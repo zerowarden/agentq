@@ -31,6 +31,12 @@ ARCHIVE_SERVICE = "agentq-archive.service"
 ARCHIVE_TIMER = "agentq-archive.timer"
 DEFAULT_ARCHIVE_INTERVAL = "5min"
 
+NERD_OK = "󰄬"
+NERD_WARN = "󰀪"
+NERD_ERROR = "󰅖"
+NERD_ACTIVE = "󰐊"
+NERD_INFO = "󰋼"
+
 
 def telemetry_enabled() -> bool:
     return os.environ.get("AGENTQ_TELEMETRY", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -512,6 +518,15 @@ def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict
             metrics["task_action"] = data["action"]
         if isinstance(data.get("status"), str):
             metrics["task_status"] = data["status"]
+        if isinstance(data.get("completed_task_id"), str):
+            metrics["completed_task_id"] = data["completed_task_id"]
+    if command == "ts-nav":
+        if isinstance(data.get("action"), str):
+            metrics["semantic_action"] = data["action"]
+        if isinstance(data.get("resolution_mode"), str):
+            metrics["semantic_mode"] = data["resolution_mode"]
+        if bool(data.get("ambiguous")):
+            metrics["semantic_ambiguous"] = True
     return metrics
 
 
@@ -902,11 +917,26 @@ def task_efficiency(
     all_repos: bool,
 ) -> dict[str, Any]:
     task_events = [event for event in selected_events if event.get("command") == "task" and event.get("task_id")]
-    starts = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "begin"}
-    accepted = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "accept"}
-    abandoned = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "abandon"}
-    attributed = [event for event in operation_events if event.get("task_id")]
+    starts: set[str] = set()
+    accepted: set[str] = set()
+    abandoned: set[str] = set()
+    for event in task_events:
+        task_id = str(event["task_id"])
+        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
+        action = metrics.get("task_action")
+        if action == "begin":
+            starts.add(task_id)
+        elif action == "accept":
+            accepted.add(task_id)
+        elif action == "abandon":
+            abandoned.add(task_id)
+        elif action == "next":
+            starts.add(task_id)
+            completed = metrics.get("completed_task_id")
+            if isinstance(completed, str):
+                accepted.add(completed)
 
+    attributed = [event for event in operation_events if event.get("task_id")]
     accepted_operations = [
         event for event in all_events
         if event.get("command") != "task" and event.get("task_id") in accepted
@@ -915,11 +945,15 @@ def task_efficiency(
     accepted_count = len(accepted)
 
     active_state = None if all_repos else current_task_state(root)
+    active_age = None
+    if active_state and isinstance(active_state.get("started_at"), (int, float)):
+        active_age = max(0, round(time.time() - float(active_state["started_at"])))
     return {
         "started": len(starts),
         "accepted": accepted_count,
         "abandoned": len(abandoned),
         "active": 1 if active_state else 0,
+        "active_age_seconds": active_age,
         "attributed_calls": len(attributed),
         "unattributed_calls": max(0, len(operation_events) - len(attributed)),
         "attribution_percent": _percent(len(attributed), len(operation_events)),
@@ -930,7 +964,10 @@ def task_efficiency(
         "calls_per_accepted_task": round(len(accepted_operations) / accepted_count, 1) if accepted_count else None,
         "reads_per_accepted_task": round(sum(event.get("command") == "read" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
         "runs_per_accepted_task": round(sum(event.get("command") == "run" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
-        "note": "Task metrics require explicit agentq task begin/accept boundaries; Codex threads are not treated as tasks.",
+        "note": (
+            "A task is one independently acceptable outcome. One Codex thread may contain several sequential tasks; "
+            "small corrections, debugging, and verification retries remain in the current task."
+        ),
     }
 
 
@@ -938,7 +975,7 @@ def stats_data(
     root: Path,
     *,
     since: str = "7d",
-    recent: int = 12,
+    recent: int = 0,
     operations: list[str] | None = None,
     all_repos: bool = False,
     archive: bool = False,
@@ -1024,21 +1061,22 @@ def stats_data(
     }
 
     recent_events = []
-    for event in reversed(operation_events[-recent:]):
-        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
-        recent_events.append({
-            "time": float(event.get("time", 0)),
-            "repo": event.get("repo_name", "?"),
-            "thread_id": event.get("thread_id"),
-            "command": event.get("command", "unknown"),
-            "tool_status": event.get("tool_status", "error"),
-            "subject_status": event.get("subject_status"),
-            "subject_exit_code": event.get("subject_exit_code"),
-            "duration_ms": int(event.get("duration_ms", 0)),
-            "visible_chars": int(event.get("visible_chars", 0)),
-            "truncated": bool(event.get("truncated")),
-            "metrics": metrics,
-        })
+    if recent > 0:
+        for event in reversed(operation_events[-recent:]):
+            metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
+            recent_events.append({
+                "time": float(event.get("time", 0)),
+                "repo": event.get("repo_name", "?"),
+                "thread_id": event.get("thread_id"),
+                "command": event.get("command", "unknown"),
+                "tool_status": event.get("tool_status", "error"),
+                "subject_status": event.get("subject_status"),
+                "subject_exit_code": event.get("subject_exit_code"),
+                "duration_ms": int(event.get("duration_ms", 0)),
+                "visible_chars": int(event.get("visible_chars", 0)),
+                "truncated": bool(event.get("truncated")),
+                "metrics": metrics,
+            })
 
     if cutoff is not None:
         window_start = cutoff
@@ -1049,9 +1087,16 @@ def stats_data(
     activity = _activity_buckets(operation_events, window_start, now)
     repos = Counter(str(event.get("repo_name", "?")) for event in operation_events)
     reads = read_efficiency(operation_events)
+    semantic_events = [event for event in operation_events if event.get("command") == "ts-nav"]
+    semantic_actions = Counter(
+        str((event.get("metrics") or {}).get("semantic_action", "unknown"))
+        for event in semantic_events
+    )
     navigation = {
         "outline_calls": sum(event.get("command") == "outline" for event in operation_events),
-        "semantic_calls": sum(event.get("command") == "ts-nav" for event in operation_events),
+        "semantic_calls": len(semantic_events),
+        "semantic_actions": dict(semantic_actions),
+        "semantic_ambiguous": sum(bool((event.get("metrics") or {}).get("semantic_ambiguous")) for event in semantic_events),
     }
     tasks = task_efficiency(root, events, selected, operation_events, all_repos=all_repos)
 
@@ -1085,6 +1130,7 @@ def stats_data(
         "commands": command_rows,
         "activity": activity,
         "recent": recent_events,
+        "detailed": recent > 0,
         "verification": verification,
         "reads": reads,
         "navigation": navigation,
@@ -1095,7 +1141,7 @@ def stats_data(
         "measurement_note": (
             "visible token proxy is visible characters divided by four; it is not provider token accounting. "
             "Measured reduction is shown only for operations where agentq captured source command output. "
-            "Read overlap is measured only for v1.2.2+ version-aware ranges; per-task values require explicit task boundaries."
+            "Read overlap is measured only for v1.2.2+ version-aware ranges; a task is one independently acceptable outcome, not one thread or prompt."
         ),
     }
 
@@ -1137,13 +1183,18 @@ def _time_label(timestamp: float, utc: bool, with_date: bool = False) -> str:
     return dt.strftime("%m-%d %H:%M" if with_date else "%H:%M:%S")
 
 
-def _window_label(data: dict[str, Any], utc: bool) -> str:
+def _window_parts(data: dict[str, Any], utc: bool) -> tuple[str, str, str]:
     start = _display_dt(float(data["window_start"]), utc)
     end = _display_dt(float(data["window_end"]), utc)
     tz = "UTC" if utc else (end.tzname() or "local")
-    if start.date() == end.date():
-        return f"{start:%Y-%m-%d %H:%M} → {end:%H:%M} {tz}"
-    return f"{start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M} {tz}"
+    start_text = f"{start:%Y-%m-%d %H:%M}"
+    end_text = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%Y-%m-%d %H:%M}"
+    return start_text, end_text, tz
+
+
+def _window_label(data: dict[str, Any], utc: bool) -> str:
+    start, end, tz = _window_parts(data, utc)
+    return f"{start} to {end} {tz}"
 
 
 def _pct(value: float | None) -> str:
@@ -1170,7 +1221,7 @@ def _recent_marker(event: dict[str, Any]) -> str:
 
 
 def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
-    width = max(72, min(120, shutil.get_terminal_size((100, 30)).columns))
+    width = max(78, min(112, shutil.get_terminal_size((96, 30)).columns))
     rule = "─" * width if _supports_unicode() else "-" * width
     reliability = _pct(data.get("tool_reliability"))
     lines = [
@@ -1192,36 +1243,37 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
     navigation = data.get("navigation") or {}
     tasks = data.get("tasks") or {}
     lines.extend([
-        f"activity     {data['events']} calls · {data['sessions']} contexts ({data['threads']} Codex threads) · agentq {reliability}",
-        f"project run  {project['passed']} passed · {project['failed']} failed · {project['timed_out']} timeout",
-        f"exposure     {human_bytes(data['visible_chars'])} visible · ~{data['visible_token_proxy']:,} token proxy · {data['truncations']} truncations",
+        f"activity     {data['events']} calls · {data['sessions']} contexts · {data['threads']} Codex threads · agentq {reliability} · {data['tool_errors']} errors",
+        f"project      {project['passed']} passed · {project['failed']} failed · {project['timed_out']} timeout",
+        f"exposure     {human_bytes(data['visible_chars'])} visible · ~{data['visible_token_proxy']:,} token proxy · {data['truncations']} cuts",
         (
-            f"measured     {human_bytes(measured['avoided_chars'])} avoided across {measured['instrumented_calls']} instrumented calls"
+            f"measured     {human_bytes(measured['avoided_chars'])} saved across {measured['instrumented_calls']} instrumented calls"
             if measured["instrumented_calls"]
             else "measured     — (no source-output measurement in this window)"
         ),
     ])
 
-    reads = data.get("reads") or {}
-    navigation = data.get("navigation") or {}
     if reads.get("calls"):
         tracked = int(reads.get("tracked_calls", 0))
         overlap = _pct(reads.get("overlap_percent")) if tracked else "—"
         lines.append(
-            f"reads        {reads.get('calls', 0)} calls · tracked {tracked} · {reads.get('unique_files', 0)} files · "
-            f"{reads.get('reread_ranges', 0)} rereads · overlap {overlap} · {reads.get('fully_redundant_ranges', 0)} redundant · "
-            f"nav {navigation.get('semantic_calls', 0)} semantic/{navigation.get('outline_calls', 0)} outline"
+            f"reads        {reads.get('calls', 0)} calls · {reads.get('unique_files', 0)} files · "
+            f"{reads.get('reread_ranges', 0)} rereads · {overlap} overlap · {reads.get('fully_redundant_ranges', 0)} redundant · "
+            f"nav {navigation.get('semantic_calls', 0)} semantic / {navigation.get('outline_calls', 0)} outline"
         )
-    tasks = data.get("tasks") or {}
     if tasks.get("started") or tasks.get("accepted") or tasks.get("abandoned") or tasks.get("active"):
+        active = ""
+        if tasks.get("active"):
+            age = tasks.get("active_age_seconds")
+            active = f" · 1 active" + (f" ({_duration(int(age) * 1000)})" if age is not None else "")
         per_task = (
             f" · ~{tasks['token_proxy_per_accepted_task']:,} tokens/accepted · {tasks['calls_per_accepted_task']} calls/accepted"
             if tasks.get("token_proxy_per_accepted_task") is not None
             else ""
         )
         lines.append(
-            f"tasks        {tasks.get('accepted', 0)} accepted · {tasks.get('active', 0)} active · "
-            f"{tasks.get('abandoned', 0)} abandoned · attributed {_pct(tasks.get('attribution_percent'))}{per_task}"
+            f"tasks        {tasks.get('accepted', 0)} accepted{active} · {tasks.get('abandoned', 0)} abandoned · "
+            f"attributed {_pct(tasks.get('attribution_percent'))}{per_task}"
         )
 
     if data["events"] >= 10 and len(data["activity"]) > 1:
@@ -1229,14 +1281,18 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
         lines.append(f"activity     {_sparkline(values, width=min(48, max(12, width - 24)))}")
 
     lines.extend([rule, "operations"])
+    header = f"  {'Operation':<18} {'Calls':>5} {'Tool':>8} {'Pass':>5} {'Fail':>5} {'Median':>7} {'Visible':>9} {'Saved':>9}"
+    lines.append(header)
     for row in data["commands"][:16]:
-        subject = ""
-        if row["subject_passes"] or row["subject_failures"]:
-            subject = f" · subject {row['subject_passes']}✓/{row['subject_failures']}◇"
-        reduction = _measurement_label(row)
+        marker = "✗" if row["tool_errors"] else "◇" if row["subject_failures"] else "✓"
+        tool = "ok" if not row["tool_errors"] else f"{row['tool_errors']} err"
+        has_subject = bool(row["subject_passes"] or row["subject_failures"])
+        passed = str(row["subject_passes"]) if has_subject else "—"
+        failed = str(row["subject_failures"]) if has_subject else "—"
+        saved = _measurement_label(row)
         lines.append(
-            f"  {row['command']:<20} {row['calls']:>3} calls · tool {row['tool_ok']}✓/{row['tool_errors']}✗ · "
-            f"med {_duration(row['median_ms']):>7} · {human_bytes(row['visible_chars']):>9} · source→visible {reduction}{subject}"
+            f"{marker} {row['command']:<18} {row['calls']:>5} {tool:>8} {passed:>5} {failed:>5} "
+            f"{_duration(row['median_ms']):>7} {human_bytes(row['visible_chars']):>9} {saved:>9}"
         )
 
     verification = data["verification"]
@@ -1247,31 +1303,31 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
             f"  {verification['runs']} runs · {verification['passed']} passed · {verification['failed']} failed · "
             f"{verification['partial']} partial · {verification['planned']} planned",
             f"  {verification['checks_executed']} checks · {verification['checks_failed']} failed checks · "
-            f"{verification['changed_files']} changed files · {verification['affected_packages']} affected packages",
+            f"{verification['changed_files']} changed files to {verification['affected_packages']} affected packages",
         ])
 
     if data.get("recent"):
-        lines.extend([rule, "recent"])
+        lines.extend([rule, "recent (--detailed)"])
         for event in data["recent"]:
             marker = _recent_marker(event)
-            detail = ""
-            metrics = event.get("metrics") or {}
-            if event["command"] == "verify-changed":
-                detail = f" · {event.get('subject_status') or '?'} · {metrics.get('executed_steps', 0)} checks"
-            elif event.get("subject_status"):
-                code = event.get("subject_exit_code")
-                detail = f" · {event['subject_status']}" + (f" exit {code}" if code is not None else "")
-            elif metrics.get("shown"):
-                detail = f" · {metrics['shown']} shown"
+            tool = "ok" if event.get("tool_status") == "ok" else "error"
+            subject = str(event.get("subject_status") or "—")
+            code = event.get("subject_exit_code")
+            if code is not None:
+                subject += f" ({code})"
             lines.append(
-                f"  {marker} {_time_label(event['time'], utc)}  {event['command']:<20} "
-                f"{_duration(event['duration_ms']):>7} · {human_bytes(event['visible_chars']):>9}{detail}"
+                f"  {marker} {_time_label(event['time'], utc)}  {event['command']:<18} "
+                f"tool {tool:<5} · command {subject:<12} · {_duration(event['duration_ms']):>7} · {human_bytes(event['visible_chars']):>9}"
             )
 
     if data.get("archive_result"):
         archived = data["archive_result"]
         lines.extend([rule, f"archive: added {archived['added']} events; total persistent {archived['total_archived']}"])
-    lines.extend([rule, "note: " + data["measurement_note"]])
+    lines.extend([
+        rule,
+        "note: Tool is agentq health; Pass/Fail are wrapped command outcomes. "
+        "~tokens is visible characters divided by four. Use --detailed for recent activity.",
+    ])
     return "\n".join(lines)
 
 
@@ -1316,40 +1372,43 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
         line.append(value, style=style)
 
     def section(name: str) -> Text:
-        text = Text()
-        text.append(name, style="bold cyan")
-        return text
+        return Text(name, style="bold cyan")
 
     header = Text()
     header.append("agentq", style="bold cyan")
     header.append(f"  {data['scope']}", style="bold")
     header.append(f"  {data['since']}", style="dim")
 
-    window = Text(_window_label(data, utc), style="dim")
+    start_label, end_label, tz = _window_parts(data, utc)
+    window = Text()
+    window.append(start_label, style="dim")
+    window.append(" to ", style="dim bold")
+    window.append(f"{end_label} {tz}", style="dim")
 
     summary1 = Text()
-    pair(summary1, "calls", str(data["events"]), "bold")
-    pair(summary1, "contexts", str(data["sessions"]), "bold")
+    pair(summary1, "calls", str(data["events"]))
+    pair(summary1, "contexts", str(data["sessions"]))
     if data["threads"]:
-        pair(summary1, "threads", str(data["threads"]), "bold")
+        pair(summary1, "threads", str(data["threads"]))
     reliability = data.get("tool_reliability")
     reliability_style = "green" if reliability is not None and reliability >= 99 else "yellow"
     if reliability is not None and reliability < 95:
         reliability_style = "red"
     pair(summary1, "agentq", _pct(reliability), reliability_style)
     if data["tool_errors"]:
-        pair(summary1, "errors", str(data["tool_errors"]), "red bold")
+        pair(summary1, "errors", f"{NERD_ERROR} {data['tool_errors']}", "red bold")
 
     summary2 = Text()
-    summary2.append("runs ", style="dim")
-    summary2.append(str(project["passed"]), style="green bold")
-    summary2.append(" passed")
+    summary2.append(f"{NERD_OK} ", style="green bold")
+    summary2.append(f"{project['passed']} passed", style="green")
     summary2.append("  ")
-    summary2.append(str(project["failed"]), style="red bold" if project["failed"] else "green")
-    summary2.append(" failed")
+    fail_icon = NERD_ERROR if project["failed"] else NERD_OK
+    fail_style = "red bold" if project["failed"] else "green"
+    summary2.append(f"{fail_icon} ", style=fail_style)
+    summary2.append(f"{project['failed']} failed", style="red" if project["failed"] else "green")
     if project["timed_out"]:
-        summary2.append(f"  {project['timed_out']} timeout", style="yellow")
-    pair(summary2, "visible", human_bytes(data["visible_chars"]), "bold")
+        summary2.append(f"  {NERD_WARN} {project['timed_out']} timeout", style="yellow")
+    pair(summary2, "visible", human_bytes(data["visible_chars"]))
     pair(summary2, "~tokens", _compact_int(int(data["visible_token_proxy"])), "cyan")
     if data["truncations"]:
         pair(summary2, "cuts", str(data["truncations"]), "yellow")
@@ -1357,24 +1416,21 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
     summary_lines: list[Any] = [header, window, Text(), summary1, summary2]
     if measured["instrumented_calls"]:
         summary3 = Text()
+        pair(summary3, "measured", human_bytes(measured["measured_source_chars"]))
         if measured["overhead_chars"]:
-            pair(summary3, "measured", human_bytes(measured["measured_source_chars"]), "bold")
             pair(summary3, "wrapper overhead", human_bytes(measured["overhead_chars"]), "yellow")
         else:
-            pair(summary3, "measured", human_bytes(measured["measured_source_chars"]), "bold")
             pair(summary3, "saved", human_bytes(measured["avoided_chars"]), "green bold")
             pair(summary3, "reduction", _pct(measured["reduction_percent"]), "green")
         summary_lines.append(summary3)
 
     if reads.get("calls"):
         read_line = Text()
-        pair(read_line, "reads", str(reads.get("calls", 0)), "bold")
-        tracked = int(reads.get("tracked_calls", 0))
-        if tracked != int(reads.get("calls", 0)):
-            pair(read_line, "tracked", str(tracked), "yellow" if tracked else "dim")
-        pair(read_line, "files", str(reads.get("unique_files", 0)), "bold")
+        pair(read_line, "reads", str(reads.get("calls", 0)))
+        pair(read_line, "files", str(reads.get("unique_files", 0)))
         if reads.get("reread_ranges"):
             pair(read_line, "rereads", str(reads["reread_ranges"]), "yellow")
+        tracked = int(reads.get("tracked_calls", 0))
         if tracked and reads.get("overlap_percent") is not None:
             overlap_value = float(reads["overlap_percent"])
             overlap_style = "green" if overlap_value < 10 else "yellow" if overlap_value < 30 else "red"
@@ -1384,8 +1440,8 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
         pair(
             read_line,
             "nav",
-            f"{navigation.get('semantic_calls', 0)} semantic/{navigation.get('outline_calls', 0)} outline",
-            "cyan" if navigation.get("semantic_calls") or navigation.get("outline_calls") else "dim",
+            f"{navigation.get('semantic_calls', 0)} semantic / {navigation.get('outline_calls', 0)} outline",
+            "cyan" if navigation.get("semantic_calls") else "yellow",
         )
         summary_lines.append(read_line)
 
@@ -1393,14 +1449,18 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
         task_line = Text()
         pair(task_line, "tasks", f"{tasks.get('accepted', 0)} accepted", "green" if tasks.get("accepted") else "dim")
         if tasks.get("active"):
-            pair(task_line, "active", str(tasks["active"]), "cyan")
+            age = tasks.get("active_age_seconds")
+            active_value = "1"
+            if age is not None:
+                active_value += f" ({_duration(int(age) * 1000)})"
+            pair(task_line, "active", f"{NERD_ACTIVE} {active_value}", "cyan")
         if tasks.get("abandoned"):
             pair(task_line, "abandoned", str(tasks["abandoned"]), "yellow")
         if tasks.get("attribution_percent") is not None:
-            pair(task_line, "attributed", _pct(tasks["attribution_percent"]), "bold")
+            pair(task_line, "attributed", _pct(tasks["attribution_percent"]))
         if tasks.get("token_proxy_per_accepted_task") is not None:
-            pair(task_line, "~tokens/accepted", _compact_int(int(tasks["token_proxy_per_accepted_task"])), "cyan")
-            pair(task_line, "calls/accepted", str(tasks["calls_per_accepted_task"]), "bold")
+            pair(task_line, "~tokens/task", _compact_int(int(tasks["token_proxy_per_accepted_task"])), "cyan")
+            pair(task_line, "calls/task", str(tasks["calls_per_accepted_task"]))
         summary_lines.append(task_line)
 
     operations = Table(
@@ -1412,46 +1472,47 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
         collapse_padding=True,
     )
     operations.add_column("", no_wrap=True)
-    operations.add_column("Operation", no_wrap=True, max_width=22)
+    operations.add_column("Operation", no_wrap=True, max_width=18)
     operations.add_column("Calls", justify="right", no_wrap=True)
+    operations.add_column("Tool", justify="right", no_wrap=True)
+    operations.add_column("Pass", justify="right", no_wrap=True)
+    operations.add_column("Fail", justify="right", no_wrap=True)
     operations.add_column("Median", justify="right", no_wrap=True)
     operations.add_column("Visible", justify="right", no_wrap=True)
-    operations.add_column("Result", no_wrap=True)
     operations.add_column("Saved", justify="right", no_wrap=True)
 
     for row in data["commands"][:16]:
         if row["tool_errors"]:
-            marker = Text("✗", style="red bold")
+            marker = Text(NERD_ERROR, style="red bold")
         elif row["subject_failures"]:
-            marker = Text("◇", style="yellow bold")
+            marker = Text(NERD_WARN, style="yellow bold")
         else:
-            marker = Text("✓", style="green bold")
+            marker = Text(NERD_OK, style="green bold")
 
-        result = Text()
+        tool = Text("ok", style="green")
         if row["tool_errors"]:
-            result.append(f"{row['tool_errors']} tool err", style="red")
-        elif row["subject_passes"] or row["subject_failures"]:
-            if row["subject_passes"]:
-                result.append(f"{row['subject_passes']}✓", style="green")
-            if row["subject_failures"]:
-                if len(result.plain):
-                    result.append(" ")
-                result.append(f"{row['subject_failures']}✗", style="red")
+            tool = Text(f"{row['tool_errors']} err", style="red bold")
 
-        saved = Text()
+        has_subject = bool(row["subject_passes"] or row["subject_failures"])
+        passed = Text(str(row["subject_passes"]), style="green") if has_subject else Text("—", style="dim")
+        failed = Text(str(row["subject_failures"]), style="red" if row["subject_failures"] else "dim") if has_subject else Text("—", style="dim")
+
+        saved = Text("—", style="dim")
         if row["instrumented_calls"]:
             if row["overhead_chars"]:
-                saved.append(f"+{human_bytes(row['overhead_chars'])}", style="yellow")
+                saved = Text(f"+{human_bytes(row['overhead_chars'])}", style="yellow")
             elif row["reduction_percent"] is not None:
-                saved.append(f"↓{row['reduction_percent']:.1f}%", style="green")
+                saved = Text(f"{row['reduction_percent']:.1f}%", style="green")
 
         operations.add_row(
             marker,
             row["command"],
             str(row["calls"]),
+            tool,
+            passed,
+            failed,
             _duration(row["median_ms"]),
             human_bytes(row["visible_chars"]),
-            result,
             saved,
         )
 
@@ -1460,73 +1521,71 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
     verification = data["verification"]
     if verification["runs"]:
         verify = Text()
-        total_status = verification["passed"] + verification["failed"] + verification["partial"] + verification["planned"]
         if verification["failed"]:
-            verify.append("✗ ", style="red bold")
+            verify.append(f"{NERD_ERROR} ", style="red bold")
         elif verification["partial"]:
-            verify.append("◇ ", style="yellow bold")
+            verify.append(f"{NERD_WARN} ", style="yellow bold")
         elif verification["passed"]:
-            verify.append("✓ ", style="green bold")
-        elif verification["planned"]:
-            verify.append("• ", style="cyan bold")
+            verify.append(f"{NERD_OK} ", style="green bold")
         else:
-            verify.append("• ", style="dim")
-
+            verify.append(f"{NERD_INFO} ", style="cyan bold")
         verify.append(f"{verification['runs']} run" + ("s" if verification["runs"] != 1 else ""), style="bold")
-        if total_status:
-            if verification["passed"]:
-                verify.append(f"  {verification['passed']} passed", style="green")
-            if verification["failed"]:
-                verify.append(f"  {verification['failed']} failed", style="red")
-            if verification["partial"]:
-                verify.append(f"  {verification['partial']} partial", style="yellow")
-            if verification["planned"]:
-                verify.append(f"  {verification['planned']} planned", style="cyan")
-        else:
-            verify.append("  status n/a", style="dim")
-        verify.append(f"  {verification['checks_executed']} checks", style="dim")
-        verify.append(f"  {verification['changed_files']} files → {verification['affected_packages']} pkgs", style="dim")
+        if verification["passed"]:
+            verify.append(f"  {verification['passed']} passed", style="green")
+        if verification["failed"]:
+            verify.append(f"  {verification['failed']} failed", style="red")
+        if verification["partial"]:
+            verify.append(f"  {verification['partial']} partial", style="yellow")
+        if verification["planned"]:
+            verify.append(f"  {verification['planned']} planned", style="cyan")
+        verify.append(f"  {verification['checks_executed']} checks  {verification['changed_files']} files ", style="dim")
+        verify.append("to", style="dim bold")
+        verify.append(f" {verification['affected_packages']} pkgs", style="dim")
         sections.extend([Text(), section("Verification"), verify])
 
     if data.get("recent"):
-        recent_table = Table(
-            box=None,
-            expand=False,
-            show_header=False,
-            padding=(0, 1),
-            collapse_padding=True,
-        )
+        recent_table = Table(box=None, expand=False, show_header=True, header_style="dim bold", padding=(0, 1), collapse_padding=True)
         recent_table.add_column("", no_wrap=True)
         recent_table.add_column("Time", style="dim", no_wrap=True)
-        recent_table.add_column("Operation", no_wrap=True, max_width=22)
-        recent_table.add_column("Duration", justify="right", style="dim", no_wrap=True)
+        recent_table.add_column("Operation", no_wrap=True, max_width=18)
+        recent_table.add_column("Tool", no_wrap=True)
+        recent_table.add_column("Command", no_wrap=True)
+        recent_table.add_column("Median", justify="right", style="dim", no_wrap=True)
         recent_table.add_column("Visible", justify="right", style="dim", no_wrap=True)
-        recent_table.add_column("Result", no_wrap=True)
 
         for event in data["recent"]:
-            status = _recent_marker(event)
-            marker_style = "green bold" if status == "✓" else "yellow bold" if status == "◇" else "red bold"
-            result = Text()
             if event.get("tool_status") != "ok":
-                result.append("tool error", style="red")
+                marker = Text(NERD_ERROR, style="red bold")
+                tool = Text("error", style="red")
             elif event.get("subject_status") in {"failed", "timeout", "partial", "unverified"}:
-                result.append(str(event["subject_status"]), style="yellow" if event["subject_status"] != "failed" else "red")
-                if event.get("subject_exit_code") is not None:
-                    result.append(f" ({event['subject_exit_code']})", style="dim")
-            elif event.get("subject_status") == "passed":
-                result.append("passed", style="green")
-
+                marker = Text(NERD_WARN, style="yellow bold")
+                tool = Text("ok", style="green")
+            else:
+                marker = Text(NERD_OK, style="green bold")
+                tool = Text("ok", style="green")
+            command_status = Text(str(event.get("subject_status") or "—"), style="dim")
+            if event.get("subject_status") == "passed":
+                command_status.stylize("green")
+            elif event.get("subject_status") == "failed":
+                command_status.stylize("red")
+            elif event.get("subject_status") in {"timeout", "partial", "unverified"}:
+                command_status.stylize("yellow")
             recent_table.add_row(
-                Text(status, style=marker_style),
+                marker,
                 _time_label(event["time"], utc),
                 event["command"],
+                tool,
+                command_status,
                 _duration(event["duration_ms"]),
                 human_bytes(event["visible_chars"]),
-                result,
             )
-        sections.extend([Text(), section("Recent"), recent_table])
+        sections.extend([Text(), section("Recent · detailed"), recent_table])
 
-    footer = Text("~tokens = visible chars / 4; read overlap is version-aware; task metrics require explicit task boundaries.", style="dim")
+    footer = Text(
+        "Tool = agentq health; Pass/Fail = wrapped command outcomes; ~tokens = visible chars / 4. "
+        "Use --detailed for recent activity.",
+        style="dim",
+    )
     if data.get("archive_result"):
         archived = data["archive_result"]
         footer.append(f"  archive +{archived['added']} / {archived['total_archived']}", style="dim")

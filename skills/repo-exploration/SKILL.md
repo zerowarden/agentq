@@ -1,10 +1,10 @@
 ---
 name: repo-exploration
-description: Use for repository exploration, file discovery, code search, symbol location, manifests, and bounded source reads. MUST use bundled agentq wrappers instead of raw tree, find, rg, grep, or whole-file reads when agentq covers the operation. Do not use for Git diff review, semantic TypeScript identity, codemods, or verification.
+description: Use for repository maps, file discovery, unknown-symbol search, manifests, and bounded source reads. MUST use bundled agentq wrappers instead of raw tree, find, rg, grep, or whole-file reads. If a TypeScript/JavaScript symbol is already known, route to semantic-code-navigation before lexical search or repeated reads.
 license: MIT
 compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. ast-grep and Universal Ctags are optional.
 metadata:
-  version: "1.2.2"
+  version: "1.2.4"
   mutation: "none"
 ---
 
@@ -16,45 +16,64 @@ AQ=~/.agents/skills/repo-exploration/scripts/agentq
 
 ## Mandatory tool policy
 
-For operations covered here, use `agentq` instead of raw `tree`, `find`, `rg`, `grep`, `cat`, or equivalent broad discovery commands. Fall back only when `agentq` cannot express the operation or fails; keep any fallback explicitly bounded.
+For operations covered here, use `agentq` instead of raw `tree`, `find`, `rg`, `grep`, `cat`, or equivalent broad discovery commands. Fall back only when `agentq` cannot express the operation or fails; keep fallback output explicitly bounded.
 
 ## Evidence ladder
 
 1. Map once if unfamiliar:
+
    ```bash
    "$AQ" repo-map
    ```
+
 2. Locate paths before contents:
+
    ```bash
    "$AQ" files assignment-offer --path packages --limit 40
    ```
-3. Search exact text; fixed-string is the default:
+
+3. If an exact TypeScript/JavaScript identifier is known, switch immediately to semantic navigation:
+
    ```bash
-   "$AQ" search 'AssignmentOffer' --path packages/contexts/dispatch --limit 60
+   "$AQ" ts-nav references AssignmentOffer --path packages/contexts/dispatch
    ```
-4. Inspect structure before opening many files:
+
+4. Otherwise search exact text; fixed-string is the default:
+
+   ```bash
+   "$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60
+   ```
+
+5. Inspect structure before opening many files:
+
    ```bash
    "$AQ" outline packages/contexts/dispatch/src --match 'Offer|Assignment' --limit 100
    ```
-5. Read only necessary ranges:
+
+6. Read only necessary ranges:
+
    ```bash
    "$AQ" read packages/contexts/dispatch/src/offers.ts:40-150 --max-lines 140
    "$AQ" read packages/contexts/dispatch/src/offers.ts --around 220 --context 30
    ```
-6. Before a second overlapping or non-adjacent read of the same source file, narrow structurally first: use `ts-nav` for a known TypeScript/JavaScript symbol, otherwise `outline --match` or a more specific `search`. Direct continuation of a truncated adjacent range is fine.
-7. When same-named symbols, re-exports, aliases, or actual call/reference identity matter, switch to `semantic-code-navigation` rather than broadening lexical search.
 
-## Long-lived thread measurement
+7. Before a second overlapping or non-adjacent read of the same source file, narrow first: `ts-nav` for a known TS/JS symbol, otherwise `outline --match` or a more specific `search`. Direct continuation of a truncated adjacent range is fine.
 
-When one Codex thread intentionally handles multiple distinct fixes/features, do not treat the thread as one task. Mark each meaningful accepted-work unit once:
+## Task measurement
 
-```bash
-agentq task begin
-# implement + verify one coherent fix/feature
-agentq task accept
-```
+A task is one independently acceptable implementation, fix, refactor, or review outcome. It is not one prompt, edit, test run, or Codex thread.
 
-Use `agentq task abandon` if the work unit is dropped. Do not create new task boundaries for debugging substeps, individual edits, or verification retries.
+- Keep clarification, implementation, debugging, correction, and verification for the same outcome inside one task.
+- One long-lived Codex thread may contain several sequential tasks.
+- Start another task only when the previous outcome could be accepted independently and the next requested outcome is distinct.
+- When continuing in the same thread, rotate atomically:
+
+  ```bash
+  agentq task next
+  ```
+
+- Use `agentq task abandon` only when the outcome is intentionally cancelled or discarded.
+- Do not create task boundaries for status questions, individual edits, failing checks, or verification retries.
 
 ## Output discipline
 

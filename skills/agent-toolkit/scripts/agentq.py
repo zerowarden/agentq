@@ -141,14 +141,31 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="report runtime/tool readiness and privacy defaults")
     add_common(p)
 
-    p = sub.add_parser("task", help="mark explicit task boundaries for per-task efficiency telemetry")
+    p = sub.add_parser(
+        "task",
+        help="mark independently acceptable work units inside one or more Codex threads",
+        description=(
+            "Track one independently acceptable implementation, fix, refactor, or review outcome. "
+            "A Codex thread may contain several sequential tasks; debugging and verification retries stay inside the current task."
+        ),
+        epilog=(
+            "Ergonomic aliases: start=begin, current=status, done=accept, drop=abandon. "
+            "Use 'next' to accept the current task and immediately begin another in the same worktree."
+        ),
+    )
     add_common(p)
-    p.add_argument("action", choices=("begin", "status", "accept", "abandon"))
+    p.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=("begin", "status", "accept", "abandon", "next", "start", "current", "done", "drop"),
+    )
 
     p = sub.add_parser("stats", help="visualize local agentq activity and output suppression")
     add_common(p)
     p.add_argument("--since", default="7d", help="all, or duration such as 24h, 7d, or 4w")
-    p.add_argument("--recent", type=nonnegative_int, default=8)
+    p.add_argument("--detailed", action="store_true", help="show recent activity and extended diagnostic detail")
+    p.add_argument("--recent", type=nonnegative_int, default=None, help="recent rows to show; implies --detailed; default 8")
     p.add_argument("--operation", action="append", default=[], help="filter by operation; repeatable")
     p.add_argument("--all-repos", action="store_true", help="aggregate all locally observed repositories")
     p.add_argument("--watch", type=positive_float, help="refresh terminal dashboard every N seconds")
@@ -292,12 +309,22 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--offline", action="store_true")
         p.add_argument("--skip-lint", action="store_true")
 
-    p = sub.add_parser("ts-nav", help="TypeScript/JavaScript semantic definition, reference, or implementation lookup")
-    add_common(p)
-    p.add_argument("action", choices=("definition", "references", "implementations"))
-    p.add_argument("--file", required=True)
-    p.add_argument("--line", type=positive_int, required=True)
-    p.add_argument("--column", type=positive_int, required=True)
+    p = sub.add_parser(
+        "ts-nav",
+        help="TypeScript/JavaScript symbol-first or position-based semantic navigation",
+        description=(
+            "Resolve a known symbol directly, or query an exact file position. "
+            "Symbol-first mode avoids a separate lexical search when declarations are unambiguous."
+        ),
+    )
+    add_common(p); add_scope(p)
+    p.add_argument("action", choices=("locate", "definition", "references", "implementations"))
+    p.add_argument("symbol_arg", nargs="?", metavar="SYMBOL", help="symbol name for symbol-first navigation")
+    p.add_argument("--symbol", dest="symbol_option", help="symbol name; equivalent to the optional positional SYMBOL")
+    p.add_argument("--file")
+    p.add_argument("--line", type=positive_int)
+    p.add_argument("--column", type=positive_int)
+    p.add_argument("--pick", type=positive_int, help="select a numbered symbol candidate when resolution is ambiguous")
     p.add_argument("--limit", type=positive_int, default=80)
 
     p = sub.add_parser("audit", help="heuristic bounded audit of the current patch")
@@ -348,16 +375,18 @@ def execute(args: argparse.Namespace, root: Path) -> int:
         if args.reset:
             emit(args, reset_telemetry(root, all_repos=args.all_repos, hot_only=args.hot_only, force=args.force), render_reset)
             return 0
+        detailed = bool(args.detailed or args.recent is not None)
+        recent = args.recent if args.recent is not None else (8 if detailed else 0)
         if args.watch:
             if args.format != "text":
                 raise AgentQError("--watch requires --format text")
             if args.archive:
                 raise AgentQError("archive once before --watch; do not combine --archive and --watch")
-            watch_stats(root, interval=args.watch, since=args.since, recent=args.recent,
+            watch_stats(root, interval=args.watch, since=args.since, recent=recent,
                         operations=args.operation, all_repos=args.all_repos, color=args.color,
                         plain=args.plain, utc=args.utc)
             return 0
-        data = stats_data(root, since=args.since, recent=args.recent, operations=args.operation,
+        data = stats_data(root, since=args.since, recent=recent, operations=args.operation,
                           all_repos=args.all_repos, archive=args.archive)
         if args.format == "json":
             emit(args, data, render_stats)
@@ -430,7 +459,22 @@ def execute(args: argparse.Namespace, root: Path) -> int:
         emit(args, data, render_verify_changed)
         return int(data.get("exit_code", 0))
     elif command == "ts-nav":
-        emit(args, ts_nav_data(root, args.action, args.file, args.line, args.column, args.limit), render_ts_nav)
+        if args.symbol_arg and args.symbol_option:
+            raise AgentQError("provide SYMBOL either positionally or with --symbol, not both")
+        symbol = args.symbol_option or args.symbol_arg
+        exact_values = (args.file, args.line, args.column)
+        if symbol and any(value is not None for value in exact_values):
+            raise AgentQError("symbol-first navigation cannot be combined with --file, --line, or --column")
+        if not symbol and args.action != "locate" and not all(value is not None for value in exact_values):
+            raise AgentQError("provide SYMBOL/--symbol or all of --file, --line, and --column")
+        emit(
+            args,
+            ts_nav_data(
+                root, args.action, args.file, args.line, args.column, args.limit,
+                symbol=symbol, paths=args.paths, pick=args.pick,
+            ),
+            render_ts_nav,
+        )
     elif command == "audit":
         emit(args, audit_data(root, staged=args.staged, base=args.base, max_findings=args.max_findings), render_audit)
     elif command == "benchmark":

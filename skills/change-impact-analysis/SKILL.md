@@ -4,7 +4,7 @@ description: Estimate the likely blast radius before changing or renaming a shar
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. An LSP-capable agent harness improves semantic confirmation.
 metadata:
-  version: "1.2.1"
+  version: "1.2.4"
   mutation: "none"
 ---
 
@@ -29,7 +29,7 @@ AQ=~/.agents/skills/change-impact-analysis/scripts/agentq
    "$AQ" impact packages/contracts/src/dispatch.ts --limit 120
    ```
 
-3. Use LSP `findReferences`, definition, implementation, or call-hierarchy tools when available. Reconcile semantic references with the lexical lower bound.
+3. For a known TypeScript/JavaScript symbol, use `agentq ts-nav references SYMBOL --path <owning-package>` and, when relevant, `definition` or `implementations`. Reconcile semantic references with the lexical lower bound.
 
 4. Inspect only the highest-signal implementation, caller, test, contract, config, migration, and documentation ranges.
 

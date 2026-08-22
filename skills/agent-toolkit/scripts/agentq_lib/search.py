@@ -21,6 +21,8 @@ DEF_RE = re.compile(r"\b(?:export\s+)?(?:public\s+)?(?:async\s+)?(?:function|cla
 IMPORT_RE = re.compile(r"^\s*(?:import|export\s+.*\s+from|from\s+\S+\s+import|use\s+|mod\s+|require\s*\()")
 PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
 PRIVATE_KEY_END_RE = re.compile(r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
+TS_JS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+TS_JS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 
 
 def _scope_match(path: str, scopes: list[str]) -> bool:
@@ -208,11 +210,17 @@ def search_data(
     role_priority = {"source": 0, "test": 1, "docs": 2, "config": 3, "generated": 4}
     hits.sort(key=lambda h: (priority.get(h["kind"], 9), role_priority.get(h["role"], 9), h["path"], h["line"]))
     counts = Counter(hit["role"] for hit in hits)
+    semantic_candidate = (
+        mode == "fixed"
+        and bool(TS_JS_IDENTIFIER_RE.fullmatch(query))
+        and any(Path(str(hit.get("path", ""))).suffix.lower() in TS_JS_SUFFIXES for hit in hits)
+    )
     return {
         "repo_root": str(root),
         "query": query,
         "mode": mode,
         "word": word,
+        "paths": scopes,
         "shown": len(hits),
         "truncated": truncated,
         "counts_by_role": dict(counts),
@@ -221,6 +229,7 @@ def search_data(
         "context": context,
         "context_lines": sorted(context_lines, key=lambda item: (item["path"], item["line"])),
         "context_truncated": context_seen > len(context_lines),
+        "semantic_candidate": semantic_candidate,
     }
 
 
@@ -247,6 +256,12 @@ def render_search(data: dict[str, Any]) -> str:
         lines.append("\nOutput cap reached. Narrow by path, file type, or a more specific literal before expanding.")
     if data.get("context_truncated"):
         lines.append("Context-line cap reached. Prefer a bounded range read around the highest-signal match.")
+    if data.get("semantic_candidate"):
+        scope = " ".join(f"--path {path}" for path in data.get("paths", [])) or "--path <owning-package>"
+        lines.append(
+            f"Semantic candidate: use agentq ts-nav references {data['query']} {scope} "
+            "before broadening lexical search or opening more files."
+        )
     return "\n".join(lines)
 
 

@@ -122,6 +122,8 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(data["hits"][0]["path"], "packages/a/src/index.ts")
         files = self.data("files", ".env")
         self.assertEqual(files["shown"], 0)
+        symbol = self.data("search", "OldName")
+        self.assertTrue(symbol["semantic_candidate"])
 
     def test_read_redacts_private_key_material_even_with_sensitive_override(self) -> None:
         key = self.repo / "fixture.pem"
@@ -215,7 +217,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         link.symlink_to(AGENTQ)
         result = subprocess.run([str(link), "--version"], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertIn("agentq 1.2.3", result.stdout)
+        self.assertIn("agentq 1.2.4", result.stdout)
 
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -481,6 +483,35 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertGreater(stats["tasks"]["token_proxy_per_accepted_task"], 0)
         self.assertNotIn("task", {row["command"] for row in stats["commands"]})
 
+    def test_task_aliases_and_next_support_multiple_tasks_in_one_thread(self) -> None:
+        started = self.data("task", "start")
+        self.assertEqual(started["action"], "begin")
+        self.data("search", "OldName", extra_env={"CODEX_THREAD_ID": "one-thread"})
+
+        rotated = self.data("task", "next", extra_env={"CODEX_THREAD_ID": "one-thread"})
+        self.assertEqual(rotated["action"], "next")
+        self.assertEqual(rotated["completed_status"], "accepted")
+        self.assertNotEqual(rotated["task_id"], rotated["completed_task_id"])
+
+        self.data("search", "Wrapped", extra_env={"CODEX_THREAD_ID": "one-thread"})
+        finished = self.data("task", "done", extra_env={"CODEX_THREAD_ID": "one-thread"})
+        self.assertEqual(finished["action"], "accept")
+
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["tasks"]["started"], 2)
+        self.assertEqual(stats["tasks"]["accepted"], 2)
+        self.assertEqual(stats["tasks"]["active"], 0)
+        self.assertEqual(stats["tasks"]["attributed_calls"], 2)
+        self.assertEqual(stats["threads"], 1)
+
+    def test_task_without_action_reports_status(self) -> None:
+        status = self.data("task")
+        self.assertFalse(status["active"])
+        self.data("task", "begin")
+        status = self.data("task")
+        self.assertTrue(status["active"])
+        self.assertGreaterEqual(status["age_seconds"], 0)
+
     def test_task_state_is_repo_scoped_not_codex_thread_scoped(self) -> None:
         self.data("task", "begin")
         self.data("search", "OldName", extra_env={"CODEX_THREAD_ID": "thread-a"})
@@ -500,9 +531,52 @@ class AgentQIntegrationTest(unittest.TestCase):
         result = subprocess.run(argv, text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         self.assertIn("agentq 100.0%", result.stdout)
-        self.assertIn("project run  0 passed · 1 failed", result.stdout)
-        self.assertIn("source→visible —", result.stdout)
+        self.assertIn("project      0 passed · 1 failed", result.stdout)
+        self.assertIn("Tool", result.stdout)
+        self.assertIn("Pass", result.stdout)
+        self.assertIn("Fail", result.stdout)
+        self.assertNotIn("source→visible", result.stdout)
         self.assertIn("◇", result.stdout)
+
+    def test_stats_recent_is_hidden_unless_detailed(self) -> None:
+        self.data("search", "OldName")
+        normal = self.data("stats", "--since", "all")
+        self.assertEqual(normal["recent"], [])
+        detailed = self.data("stats", "--since", "all", "--detailed")
+        self.assertGreaterEqual(len(detailed["recent"]), 1)
+        implied = self.data("stats", "--since", "all", "--recent", "1")
+        self.assertEqual(len(implied["recent"]), 1)
+
+    def test_stats_rich_renderer_separates_tool_and_command_results(self) -> None:
+        try:
+            from io import StringIO
+            from rich.console import Console
+        except ImportError:
+            self.skipTest("Rich unavailable in test environment")
+
+        import sys
+        scripts = str(AGENTQ.parent)
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        from agentq_lib.telemetry import _rich_dashboard
+
+        self.data("search", "OldName")
+        self.data("run", "--", "python3", "-c", "raise SystemExit(3)")
+
+        normal = self.data("stats", "--since", "all")
+        console = Console(file=StringIO(), record=True, width=100, color_system=None, force_terminal=False)
+        console.print(_rich_dashboard(normal))
+        rendered = console.export_text()
+        self.assertIn("Tool", rendered)
+        self.assertIn("Pass", rendered)
+        self.assertIn("Fail", rendered)
+        self.assertNotIn("Recent", rendered)
+        self.assertIn(" to ", rendered)
+
+        detailed = self.data("stats", "--since", "all", "--detailed")
+        console = Console(file=StringIO(), record=True, width=100, color_system=None, force_terminal=False)
+        console.print(_rich_dashboard(detailed))
+        self.assertIn("Recent · detailed", console.export_text())
 
     def test_legacy_v1_run_failure_migrates_to_subject_failure(self) -> None:
         self.telemetry.mkdir(parents=True, exist_ok=True)
@@ -527,10 +601,36 @@ class AgentQIntegrationTest(unittest.TestCase):
         node_modules = self.repo / "node_modules"
         node_modules.mkdir(exist_ok=True)
         (node_modules / "typescript").symlink_to(global_pkg, target_is_directory=True)
-        refs = self.data("ts-nav", "references", "--file", "packages/a/src/index.ts", "--line", "1", "--column", "18")
+
+        located = self.data("ts-nav", "locate", "OldName", "--path", "packages")
+        self.assertEqual(located["resolution_mode"], "symbol")
+        self.assertEqual(located["total"], 1)
+        self.assertEqual(located["candidates"][0]["path"], "packages/a/src/index.ts")
+
+        refs = self.data("ts-nav", "references", "OldName", "--path", "packages")
+        self.assertEqual(refs["resolution_mode"], "symbol")
         self.assertGreaterEqual(refs["total"], 2)
         paths = {item["path"] for item in refs["results"]}
         self.assertIn("packages/b/src/index.ts", paths)
+
+        exact = self.data("ts-nav", "references", "--file", "packages/a/src/index.ts", "--line", "1", "--column", "18")
+        self.assertEqual(exact["resolution_mode"], "position")
+        self.assertGreaterEqual(exact["total"], 2)
+
+        (self.repo / "packages/b/src/duplicate.ts").write_text(
+            "export interface OldName { other: number }\n", encoding="utf-8"
+        )
+        ambiguous = self.data("ts-nav", "references", "OldName", "--path", "packages")
+        self.assertTrue(ambiguous["ambiguous"])
+        self.assertEqual(ambiguous["total"], 2)
+        picked = self.data("ts-nav", "references", "OldName", "--path", "packages", "--pick", "1")
+        self.assertEqual(picked["resolution_mode"], "symbol")
+        self.assertEqual(picked["candidate_count"], 2)
+
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["navigation"]["semantic_calls"], 5)
+        self.assertEqual(stats["navigation"]["semantic_actions"]["references"], 4)
+        self.assertEqual(stats["navigation"]["semantic_ambiguous"], 1)
 
     def test_benchmark_fallback_or_hyperfine(self) -> None:
         data = self.data("benchmark", "--warmup", "0", "--runs", "2", "--command", "python3 -c 'pass'")
