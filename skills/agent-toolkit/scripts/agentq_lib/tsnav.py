@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, ensure_within, find_executable, run_cmd
-from .search import search_data
 
 _TS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
-_DECL_RE = re.compile(
-    r"\b(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:public\s+)?(?:async\s+)?"
-    r"(?:function|class|interface|type|enum|const|let|var|namespace|module)\s+([A-Za-z_$][\w$]*)"
-)
+_IDENTIFIER_RE = __import__("re").compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
 def _exact_ts_nav(root: Path, action: str, file: str, line: int, column: int, limit: int) -> dict[str, Any]:
@@ -41,57 +35,35 @@ def _exact_ts_nav(root: Path, action: str, file: str, line: int, column: int, li
     return data
 
 
-def _is_declaration(root: Path, hit: dict[str, Any], symbol: str) -> bool:
-    path = root / str(hit.get("path", ""))
-    line_number = hit.get("line")
-    if not isinstance(line_number, int) or not path.is_file():
-        return False
-    try:
-        line = path.read_text(encoding="utf-8", errors="replace").splitlines()[line_number - 1]
-    except (OSError, IndexError):
-        return False
-    return any(match.group(1) == symbol for match in _DECL_RE.finditer(line))
-
-
-def _symbol_candidates(root: Path, symbol: str, paths: list[str], limit: int) -> list[dict[str, Any]]:
+def _symbol_ts_nav(
+    root: Path,
+    action: str,
+    symbol: str,
+    paths: list[str],
+    limit: int,
+    pick: int | None,
+) -> dict[str, Any]:
     if not _IDENTIFIER_RE.fullmatch(symbol):
-        raise AgentQError("--symbol must be a simple TypeScript/JavaScript identifier")
-    search = search_data(
-        root,
-        symbol,
-        paths,
-        mode="fixed",
-        word=True,
-        case="sensitive",
-        globs=["*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs", "*.cjs"],
-        types=[],
-        limit=max(40, min(240, limit * 4)),
-        per_file=6,
-        context=0,
-        max_chars=240,
-        include_sensitive=False,
+        raise AgentQError("symbol must be a simple TypeScript/JavaScript identifier")
+    node = find_executable("node")
+    if not node:
+        raise AgentQError("node is required for TypeScript semantic navigation")
+    script = Path(__file__).with_name("ts_nav.mjs")
+    result = run_cmd(
+        [
+            node, str(script), "symbol", action, str(root), symbol,
+            json.dumps(paths, ensure_ascii=False), str(limit), str(pick or ""),
+        ],
+        cwd=root,
+        timeout=180,
     )
-    hits = [hit for hit in search.get("hits", []) if Path(str(hit.get("path", ""))).suffix.lower() in _TS_SUFFIXES]
-    declarations = [hit for hit in hits if _is_declaration(root, hit, symbol)]
-    selected = declarations or hits
-    candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, int, int]] = set()
-    for hit in selected:
-        key = (str(hit["path"]), int(hit["line"]), int(hit["column"]))
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append({
-            "path": key[0],
-            "line": key[1],
-            "column": key[2],
-            "kind": "declaration" if hit in declarations else str(hit.get("kind") or "occurrence"),
-            "role": hit.get("role"),
-            "text": hit.get("text"),
-        })
-        if len(candidates) >= limit:
-            break
-    return candidates
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise AgentQError("TypeScript navigation returned invalid JSON") from exc
+    if not data.get("ok"):
+        raise AgentQError(data.get("error") or "TypeScript navigation failed")
+    return data
 
 
 def ts_nav_data(
@@ -108,105 +80,114 @@ def ts_nav_data(
 ) -> dict[str, Any]:
     paths = paths or []
     if symbol:
-        candidates = _symbol_candidates(root, symbol, paths, limit=min(limit, 80))
-        base = {
-            "ok": True,
-            "action": action,
-            "resolution_mode": "symbol",
-            "symbol": symbol,
-            "paths": paths,
-            "total": len(candidates),
-            "shown": len(candidates),
-            "truncated": False,
-            "candidates": candidates,
-        }
-        if action == "locate" or not candidates:
-            base["ambiguous"] = len(candidates) > 1
-            return base
-
-        if pick is not None:
-            if pick > len(candidates):
-                raise AgentQError(f"--pick {pick} is outside the {len(candidates)} available symbol candidates")
-            selected_index = pick - 1
-        elif len(candidates) == 1:
-            selected_index = 0
-        else:
-            base["ambiguous"] = True
-            base["hint"] = "narrow with --path or select one candidate with --pick N"
-            return base
-
-        selected = candidates[selected_index]
-        resolved = _exact_ts_nav(
-            root,
-            action,
-            str(selected["path"]),
-            int(selected["line"]),
-            int(selected["column"]),
-            limit,
-        )
-        resolved.update({
-            "resolution_mode": "symbol",
-            "symbol": symbol,
-            "candidate": selected_index + 1,
-            "candidate_count": len(candidates),
-        })
-        return resolved
-
-    if action == "locate":
-        raise AgentQError("ts-nav locate requires a symbol")
+        return _symbol_ts_nav(root, action, symbol, paths, limit, pick)
+    if action in {"locate", "overview"}:
+        raise AgentQError(f"ts-nav {action} requires a symbol")
     if not file or line is None or column is None:
         raise AgentQError("ts-nav requires either SYMBOL/--symbol or --file, --line, and --column")
     if pick is not None:
         raise AgentQError("--pick is valid only with symbol-first navigation")
     return _exact_ts_nav(root, action, file, line, column, limit)
 
+def _result_flags(item: dict[str, Any]) -> str:
+    flags: list[str] = []
+    if item.get("definition"):
+        flags.append("definition")
+    if item.get("write"):
+        flags.append("write")
+    if item.get("external"):
+        flags.append("external")
+    if item.get("kind"):
+        flags.append(str(item["kind"]))
+    return f" [{' '.join(flags)}]" if flags else ""
 
-def render_ts_nav(data: dict[str, Any]) -> str:
+
+def _grouped_results(items: list[dict[str, Any]], *, indent: str = "  ") -> list[str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        grouped.setdefault(str(item.get("path", "?")), []).append(item)
+    lines: list[str] = []
+    for path in sorted(grouped):
+        values = grouped[path]
+        lines.append(f"{indent}{path} [{len(values)}]")
+        for item in values:
+            lines.append(f"{indent}  {item['line']}:{item['column']}{_result_flags(item)}")
+            preview = item.get("preview") or item.get("display") or item.get("name")
+            if preview:
+                lines.append(f"{indent}    {preview}")
+    return lines
+
+
+def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
     candidates = data.get("candidates") if isinstance(data.get("candidates"), list) else None
     if candidates is not None and (data.get("action") == "locate" or data.get("ambiguous") or not candidates):
         symbol = data.get("symbol", "?")
-        lines = [f"ts symbol: {symbol}", f"candidates: {len(candidates)}"]
+        lines = [f"ts symbol {symbol} · {len(candidates)} candidates"]
         for index, item in enumerate(candidates, 1):
             detail = f" [{item.get('kind')}]" if item.get("kind") else ""
-            lines.append(f"  {index}. {item['path']}:{item['line']}:{item['column']}{detail}")
-            if item.get("text"):
-                lines.append(f"     {item['text']}")
+            config = f" · {item.get('config')}" if item.get("config") else ""
+            lines.append(f"  {index}. {item['path']}:{item['line']}:{item['column']}{detail}{config}")
+            preview = item.get("preview") or item.get("display")
+            if preview:
+                lines.append(f"     {preview}")
         if not candidates:
-            lines.append("No TypeScript/JavaScript candidate was found. Use bounded repo search or verify the symbol spelling.")
+            lines.append("No semantic TypeScript/JavaScript declaration candidate was found in the requested scope.")
         elif data.get("ambiguous"):
-            lines.append("Narrow with --path or rerun the semantic action with --pick N.")
-        else:
-            lines.append("Use definition, references, or implementations with the same symbol and scope.")
+            lines.append("resolution incomplete: narrow --path or select a candidate with --pick N")
         return "\n".join(lines)
 
-    lines = []
+    if data.get("action") == "overview":
+        lines = [
+            f"ts overview {data.get('symbol', '?')} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)}",
+            f"target {data['target']}:{data['line']}:{data['column']} · project {data['config']}",
+        ]
+        span = data.get("declaration_span")
+        if isinstance(span, dict):
+            lines.append(f"declaration span {span.get('start_line')}:{span.get('end_line')}")
+        sections = (("definition", "definitions"), ("references", "references"), ("implementations", "implementations"))
+        for key, label in sections:
+            section = data.get(key) if isinstance(data.get(key), dict) else {}
+            items = section.get("results") if isinstance(section.get("results"), list) else []
+            lines.append(f"\n{label} · {section.get('shown', len(items))}/{section.get('total', len(items))}")
+            lines.extend(_grouped_results(items))
+            if section.get("truncated"):
+                lines.append("  … sampled; narrow scope for exhaustive semantic evidence")
+        text = "\n".join(lines)
+        if budget > 0 and len(text) > budget:
+            # Preserve whole source/result lines rather than cutting a path or preview mid-record.
+            marker = "\n… semantic overview omitted remaining complete records due render budget"
+            kept: list[str] = []
+            used = 0
+            for line in lines:
+                cost = len(line) + 1
+                if used + cost + len(marker) > budget:
+                    break
+                kept.append(line)
+                used += cost
+            return "\n".join(kept).rstrip() + marker
+        return text
+
+    lines: list[str] = []
     if data.get("symbol"):
         lines.append(
-            f"ts {data['action']}: {data['symbol']} "
-            f"[candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)}]"
+            f"ts {data['action']} {data['symbol']} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)}"
         )
-        lines.append(f"target: {data['target']}:{data['line']}:{data['column']}")
+        lines.append(f"target {data['target']}:{data['line']}:{data['column']} · project {data['config']}")
     else:
-        lines.append(f"ts {data['action']}: {data['target']}:{data['line']}:{data['column']}")
-    lines.extend([
-        f"project: {data['config']}",
-        f"results: {data['shown']}{'+' if data.get('truncated') else ''}/{data['total']}",
-    ])
-    for item in data.get("results", []):
-        flags = []
-        if item.get("definition"):
-            flags.append("definition")
-        if item.get("write"):
-            flags.append("write")
-        if item.get("external"):
-            flags.append("external")
-        if item.get("kind"):
-            flags.append(str(item["kind"]))
-        detail = f" [{' '.join(flags)}]" if flags else ""
-        lines.append(f"  {item['path']}:{item['line']}:{item['column']}{detail}")
-        display = item.get("display") or item.get("name")
-        if display:
-            lines.append(f"    {display}")
+        lines.append(f"ts {data['action']} {data['target']}:{data['line']}:{data['column']} · project {data['config']}")
+    lines.append(f"results {data['shown']}/{data['total']}" + (" · sampled" if data.get("truncated") else ""))
+    lines.extend(_grouped_results(data.get("results", [])))
     if data.get("truncated"):
-        lines.append("Output cap reached. Narrow to the owning package or inspect the highest-signal references first.")
-    return "\n".join(lines)
+        lines.append("coverage sampled; narrow the owning package for exhaustive semantic evidence")
+    text = "\n".join(lines)
+    if budget > 0 and len(text) > budget:
+        marker = "\n… semantic records omitted by render budget"
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            if used + len(line) + 1 + len(marker) > budget:
+                break
+            kept.append(line)
+            used += len(line) + 1
+        return "\n".join(kept).rstrip() + marker
+    return text

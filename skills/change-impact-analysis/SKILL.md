@@ -4,29 +4,25 @@ description: Estimate the likely blast radius before changing or renaming a shar
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. An LSP-capable agent harness improves semantic confirmation.
 metadata:
-  version: "1.2.4"
+  version: "1.3.0"
   mutation: "none"
 ---
 
 # Change Impact Analysis
-
-```bash
-AQ=~/.agents/skills/change-impact-analysis/scripts/agentq
-```
 
 ## Workflow
 
 1. For a package, public entry point, or shared platform surface, inspect package dependents first:
 
    ```bash
-   "$AQ" dependencies --target '@app/dispatch' --depth 2
+   agentq dependencies --target '@app/dispatch' --depth 2
    ```
 
 2. Run the bounded impact collector on the exact symbol or path:
 
    ```bash
-   "$AQ" impact AssignmentOffer --path packages --limit 120
-   "$AQ" impact packages/contracts/src/dispatch.ts --limit 120
+   agentq impact AssignmentOffer --path packages --limit 120
+   agentq impact packages/contracts/src/dispatch.ts --limit 120
    ```
 
 3. For a known TypeScript/JavaScript symbol, use `agentq ts-nav references SYMBOL --path <owning-package>` and, when relevant, `definition` or `implementations`. Reconcile semantic references with the lexical lower bound.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -98,29 +99,41 @@ def render_files(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def search_data(
-    root: Path,
-    query: str,
-    scopes: list[str],
-    *,
-    mode: str = "fixed",
-    word: bool = False,
-    case: str = "smart",
-    globs: list[str] | None = None,
-    types: list[str] | None = None,
-    limit: int = 80,
-    per_file: int = 8,
-    context: int = 0,
-    max_chars: int = 240,
-    include_sensitive: bool = False,
-) -> dict[str, Any]:
-    rg = find_executable("rg")
-    if not rg:
-        raise AgentQError("ripgrep (rg) is required for compact repository search")
-    if not query:
-        raise AgentQError("search query cannot be empty")
+def _validated_scopes(root: Path, scopes: list[str]) -> list[str]:
+    values = scopes or ["."]
+    normalized: list[str] = []
+    missing: list[str] = []
+    for value in values:
+        candidate = ensure_within(root, Path(value))
+        if not candidate.exists():
+            missing.append(value)
+            continue
+        normalized.append(relpath(root, candidate))
+    if missing:
+        joined = ", ".join(missing[:6]) + (" …" if len(missing) > 6 else "")
+        suggestions: list[str] = []
+        try:
+            repo_files = list_repo_files(root)
+            wanted = {Path(value).name for value in missing if Path(value).name}
+            # Exact basename matches are especially useful for moved generated/config files.
+            suggestions = [path for path in repo_files if Path(path).name in wanted][:4]
+        except Exception:
+            suggestions = []
+        suffix = f"; closest basename matches: {', '.join(suggestions)}" if suggestions else ""
+        raise AgentQError(f"search path does not exist: {joined}{suffix}")
+    return normalized or ["."]
 
-    args = [rg, "--json", "--no-messages", "--color=never", "--hidden", "--max-count", str(per_file)]
+
+def _rg_search_flags(
+    args: list[str],
+    *,
+    mode: str,
+    word: bool,
+    case: str,
+    globs: list[str],
+    types: list[str],
+    include_sensitive: bool,
+) -> None:
     add_rg_excludes(args, include_sensitive=include_sensitive)
     if mode == "fixed":
         args.append("--fixed-strings")
@@ -136,134 +149,493 @@ def search_data(
         args.append("--smart-case")
     else:
         raise AgentQError(f"unsupported case mode: {case}")
-    if context:
-        args += ["--context", str(context)]
-    for glob in globs or []:
+    for glob in globs:
         args += ["--glob", glob]
-    for type_name in types or []:
+    for type_name in types:
         args += ["--type", type_name]
-    args += ["--", query]
-    args += scopes or ["."]
 
+
+def _rg_error(stderr: str, returncode: int) -> AgentQError:
+    text = compact_line(stderr.strip(), 600) if stderr.strip() else f"ripgrep failed with exit {returncode}"
+    if "No such file or directory" in text:
+        return AgentQError("one or more search paths do not exist")
+    return AgentQError(text)
+
+
+def _matching_line_counts(
+    root: Path,
+    rg: str,
+    query: str,
+    scopes: list[str],
+    *,
+    mode: str,
+    word: bool,
+    case: str,
+    globs: list[str],
+    types: list[str],
+    include_sensitive: bool,
+) -> dict[str, int]:
+    args = [rg, "--count", "--with-filename", "--null", "--no-messages", "--color=never", "--hidden"]
+    _rg_search_flags(
+        args,
+        mode=mode,
+        word=word,
+        case=case,
+        globs=globs,
+        types=types,
+        include_sensitive=include_sensitive,
+    )
+    args += ["--", query, *scopes]
+    result = subprocess.run(
+        args,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+        timeout=90,
+    )
+    if result.returncode not in (0, 1):
+        raise _rg_error(result.stderr.decode("utf-8", errors="replace"), result.returncode)
+    counts: dict[str, int] = {}
+    for record in result.stdout.splitlines():
+        if b"\0" not in record:
+            continue
+        raw_path, raw_count = record.rsplit(b"\0", 1)
+        path = raw_path.decode("utf-8", errors="replace").replace(os.sep, "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if not path or (not include_sensitive and is_sensitive_path(path)):
+            continue
+        try:
+            count = int(raw_count)
+        except ValueError:
+            continue
+        if count > 0:
+            counts[path] = count
+    return counts
+
+
+def _match_window(line: str, byte_start: int, byte_end: int, max_chars: int) -> str:
+    clean = redact_text(line.replace("\r", "").rstrip("\n"))
+    if len(clean) <= max_chars:
+        return clean
+    raw = line.encode("utf-8", errors="replace")
+    byte_start = max(0, min(byte_start, len(raw)))
+    byte_end = max(byte_start, min(byte_end, len(raw)))
+    start_char = len(raw[:byte_start].decode("utf-8", errors="ignore"))
+    end_char = max(start_char + 1, len(raw[:byte_end].decode("utf-8", errors="ignore")))
+    span = max(1, end_char - start_char)
+    usable = max(24, max_chars - 4)
+    left = max(0, start_char - max(8, (usable - span) // 2))
+    right = min(len(clean), left + usable)
+    if right - left < usable:
+        left = max(0, right - usable)
+    prefix = "… " if left > 0 else ""
+    suffix = " …" if right < len(clean) else ""
+    return prefix + clean[left:right] + suffix
+
+
+def _declared_symbol(line: str) -> str | None:
+    match = DEF_RE.search(line)
+    return match.group(1) if match else None
+
+
+def _build_context_snippets(
+    root: Path,
+    hits: list[dict[str, Any]],
+    *,
+    context: int,
+    max_chars: int,
+    max_ranges: int = 24,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    if context <= 0 or not hits:
+        return {}, []
+    requested: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    hit_lines: dict[str, set[int]] = defaultdict(set)
+    hit_text: dict[tuple[str, int], str] = {}
+    for hit in hits:
+        path = str(hit["path"])
+        line = int(hit["line"])
+        hit_lines[path].add(line)
+        hit_text.setdefault((path, line), str(hit.get("text", "")))
+        requested[path].append((max(1, line - context), line + context))
+    snippets: dict[str, list[dict[str, Any]]] = {}
+    flat_context: list[dict[str, Any]] = []
+    ranges_used = 0
+    for path in sorted(requested):
+        if ranges_used >= max_ranges:
+            break
+        source = root / path
+        try:
+            lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(requested[path]):
+            end = min(len(lines), end)
+            if not merged or start > merged[-1][1] + 1:
+                merged.append((start, end))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        entries: list[dict[str, Any]] = []
+        for start, end in merged:
+            if ranges_used >= max_ranges:
+                break
+            block_lines: list[dict[str, Any]] = []
+            for number in range(start, end + 1):
+                is_match = number in hit_lines[path]
+                item = {
+                    "line": number,
+                    "text": hit_text.get((path, number), compact_line(lines[number - 1], max_chars)) if is_match else compact_line(lines[number - 1], max_chars),
+                    "match": is_match,
+                }
+                block_lines.append(item)
+                if not item["match"]:
+                    flat_context.append({
+                        "path": path,
+                        "line": number,
+                        "text": item["text"],
+                        "role": classify_path(path),
+                    })
+            entries.append({"start": start, "end": end, "lines": block_lines})
+            ranges_used += 1
+        if entries:
+            snippets[path] = entries
+    return snippets, flat_context
+
+
+def search_data(
+    root: Path,
+    query: str,
+    scopes: list[str],
+    *,
+    mode: str = "fixed",
+    word: bool = False,
+    case: str = "smart",
+    globs: list[str] | None = None,
+    types: list[str] | None = None,
+    limit: int = 80,
+    per_file: int = 8,
+    context: int = 0,
+    max_chars: int = 240,
+    include_sensitive: bool = False,
+    view: str = "auto",
+    max_files: int = 40,
+    scan_cap: int = 5000,
+) -> dict[str, Any]:
+    rg = find_executable("rg")
+    if not rg:
+        raise AgentQError("ripgrep (rg) is required for compact repository search")
+    if not query:
+        raise AgentQError("search query cannot be empty")
+    if view not in {"auto", "summary", "snippets", "matches"}:
+        raise AgentQError(f"unsupported search view: {view}")
+
+    scopes = _validated_scopes(root, scopes)
+    globs = globs or []
+    types = types or []
+    counts_by_file = _matching_line_counts(
+        root,
+        rg,
+        query,
+        scopes,
+        mode=mode,
+        word=word,
+        case=case,
+        globs=globs,
+        types=types,
+        include_sensitive=include_sensitive,
+    )
+    total_matching_lines = sum(counts_by_file.values())
+    matching_files = len(counts_by_file)
+    if not counts_by_file:
+        return {
+            "repo_root": str(root), "query": query, "mode": mode, "word": word,
+            "paths": scopes, "shown": 0, "total": 0, "total_matching_lines": 0,
+            "matching_files": 0, "shown_files": 0, "truncated": False,
+            "coverage": "complete", "scan_complete": True, "view": view,
+            "effective_view": "matches", "counts_by_role": {}, "hits": [],
+            "files": [], "context": context, "context_lines": [],
+            "context_truncated": False, "semantic_candidate": False,
+            "symbol_candidates": [], "query_intent": "literal-snippets",
+            "match_file_summary": [],
+        }
+
+    # The match pass is not capped per-file: samples-per-file is a rendering
+    # control, not a discovery control. A separate count pass already gives us
+    # exact coverage totals; scan_cap is the only safety bound on collection.
+    sample_args = [rg, "--json", "--no-messages", "--color=never", "--hidden"]
+    _rg_search_flags(
+        sample_args,
+        mode=mode,
+        word=word,
+        case=case,
+        globs=globs,
+        types=types,
+        include_sensitive=include_sensitive,
+    )
+    sample_args += ["--", query, *scopes]
     proc = subprocess.Popen(
-        args, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        sample_args,
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
     )
     hits: list[dict[str, Any]] = []
-    context_lines: list[dict[str, Any]] = []
-    context_seen = 0
-    context_cap = min(120, max(0, limit * max(1, context))) if context else 0
-    stats: dict[str, Any] = {}
-    truncated = False
+    scan_limited = False
     assert proc.stdout is not None
-    for raw in proc.stdout:
+    for raw_event in proc.stdout:
         try:
-            event = json.loads(raw)
+            event = json.loads(raw_event)
         except json.JSONDecodeError:
             continue
-        kind = event.get("type")
+        if event.get("type") != "match":
+            continue
         payload = event.get("data") or {}
-        if kind in {"match", "context"}:
-            path = ((payload.get("path") or {}).get("text") or "").replace(os.sep, "/")
-            if path.startswith("./"):
-                path = path[2:]
-            if not path or (not include_sensitive and is_sensitive_path(path)):
-                continue
-            line_number = safe_int(payload.get("line_number"))
-            line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
-            if kind == "context":
-                context_seen += 1
-                if len(context_lines) < context_cap:
-                    context_lines.append({
-                        "path": path, "line": line_number,
-                        "text": compact_line(line, max_chars), "role": classify_path(path),
-                    })
-                continue
-            submatches = payload.get("submatches") or []
-            column = safe_int((submatches[0].get("start") if submatches else 0)) + 1
-            role = classify_path(path)
-            stripped = line.lstrip()
-            hit_kind = "definition" if DEF_RE.search(line) else "import" if IMPORT_RE.search(stripped) else "reference"
-            hits.append({
-                "path": path,
-                "line": line_number,
-                "column": column,
-                "text": compact_line(line, max_chars),
-                "role": role,
-                "kind": hit_kind,
-            })
-            if len(hits) >= limit:
-                truncated = True
-                proc.terminate()
-                break
-        elif kind == "summary":
-            stats = payload.get("stats") or {}
+        path = ((payload.get("path") or {}).get("text") or "").replace(os.sep, "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if not path or (not include_sensitive and is_sensitive_path(path)):
+            continue
+        line_number = safe_int(payload.get("line_number"))
+        line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
+        submatches = payload.get("submatches") or []
+        first = submatches[0] if submatches else {}
+        byte_start = safe_int(first.get("start"))
+        byte_end = safe_int(first.get("end"))
+        column = len(line.encode("utf-8", errors="replace")[:byte_start].decode("utf-8", errors="ignore")) + 1
+        declared = _declared_symbol(line)
+        stripped = line.lstrip()
+        is_relevant_decl = bool(
+            declared
+            and (
+                mode == "regex"
+                or not TS_JS_IDENTIFIER_RE.fullmatch(query)
+                or declared == query
+                or declared.startswith(query)
+            )
+        )
+        hit_kind = "definition" if is_relevant_decl else "import" if IMPORT_RE.search(stripped) else "reference"
+        hits.append({
+            "path": path,
+            "line": line_number,
+            "column": column,
+            "text": _match_window(line, byte_start, byte_end, max_chars),
+            "role": classify_path(path),
+            "kind": hit_kind,
+            "declared_symbol": declared if is_relevant_decl else None,
+        })
+        if len(hits) >= max(scan_cap, limit):
+            scan_limited = True
+            proc.terminate()
+            break
     try:
         _, stderr = proc.communicate(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
         _, stderr = proc.communicate()
-    if proc.returncode not in (0, 1, -15) and not truncated:
-        raise AgentQError(compact_line(stderr or f"rg exited with {proc.returncode}", 500))
+    if proc.returncode not in (0, 1, -15) and not scan_limited:
+        raise _rg_error(stderr or "", proc.returncode)
 
     priority = {"definition": 0, "import": 1, "reference": 2}
-    role_priority = {"source": 0, "test": 1, "docs": 2, "config": 3, "generated": 4}
-    hits.sort(key=lambda h: (priority.get(h["kind"], 9), role_priority.get(h["role"], 9), h["path"], h["line"]))
-    counts = Counter(hit["role"] for hit in hits)
-    semantic_candidate = (
-        mode == "fixed"
-        and bool(TS_JS_IDENTIFIER_RE.fullmatch(query))
-        and any(Path(str(hit.get("path", ""))).suffix.lower() in TS_JS_SUFFIXES for hit in hits)
+    role_priority = {"source": 0, "test": 1, "config": 2, "docs": 3, "generated": 4}
+    hits.sort(key=lambda h: (
+        priority.get(h["kind"], 9),
+        role_priority.get(h["role"], 9),
+        -counts_by_file.get(str(h["path"]), 0),
+        h["path"], h["line"], h["column"],
+    ))
+    selected_hits: list[dict[str, Any]] = []
+    per_path: Counter[str] = Counter()
+    for hit in hits:
+        path = str(hit["path"])
+        if per_path[path] >= per_file:
+            continue
+        selected_hits.append(hit)
+        per_path[path] += 1
+        if len(selected_hits) >= limit:
+            break
+
+    if view == "auto":
+        if context > 0 or total_matching_lines <= 6:
+            effective_view = "snippets"
+        elif total_matching_lines > 40 or matching_files > 10:
+            effective_view = "summary"
+        else:
+            effective_view = "matches"
+    else:
+        effective_view = view
+    effective_context = context
+    if effective_view == "snippets" and effective_context == 0:
+        effective_context = 2
+
+    snippets, flat_context = _build_context_snippets(
+        root,
+        selected_hits,
+        context=effective_context,
+        max_chars=max_chars,
     )
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for hit in selected_hits:
+        grouped[str(hit["path"])].append(hit)
+    ordered_paths = sorted(
+        grouped,
+        key=lambda path: (
+            min(priority.get(hit["kind"], 9) for hit in grouped[path]),
+            role_priority.get(classify_path(path), 9),
+            -counts_by_file.get(path, 0),
+            path,
+        ),
+    )[:max_files]
+    files: list[dict[str, Any]] = []
+    visible_hit_ids: set[tuple[str, int, int]] = set()
+    for path in ordered_paths:
+        file_hits = grouped[path]
+        for hit in file_hits:
+            visible_hit_ids.add((path, int(hit["line"]), int(hit["column"])))
+        kind_counts = Counter(str(hit["kind"]) for hit in file_hits)
+        files.append({
+            "path": path,
+            "role": classify_path(path),
+            "matching_lines": counts_by_file.get(path, len(file_hits)),
+            "shown": len(file_hits),
+            "kind_counts": dict(kind_counts),
+            "hits": file_hits,
+            "snippets": snippets.get(path, []),
+        })
+    visible_hits = [hit for hit in selected_hits if (str(hit["path"]), int(hit["line"]), int(hit["column"])) in visible_hit_ids]
+    symbol_candidates = sorted({
+        str(hit["declared_symbol"])
+        for hit in hits
+        if hit.get("declared_symbol")
+        and str(hit["declared_symbol"]).startswith(query)
+        and Path(str(hit["path"])).suffix.lower() in TS_JS_SUFFIXES
+    }) if mode == "fixed" and TS_JS_IDENTIFIER_RE.fullmatch(query) else []
+    semantic_candidate = query in symbol_candidates
+    if semantic_candidate:
+        query_intent = "exact-symbol"
+    elif symbol_candidates:
+        query_intent = "symbol-family"
+    elif effective_view == "summary":
+        query_intent = "broad-summary"
+    else:
+        query_intent = "literal-snippets"
+    match_file_summary = [
+        {"path": path, "matching_lines": count, "role": classify_path(path)}
+        for path, count in sorted(counts_by_file.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    counts_by_role = Counter(classify_path(path) for path in counts_by_file)
+    shown = len(visible_hits)
+    shown_files = len(files)
+    coverage = "complete" if shown == total_matching_lines and shown_files == matching_files and not scan_limited else "sampled"
     return {
         "repo_root": str(root),
         "query": query,
         "mode": mode,
         "word": word,
         "paths": scopes,
-        "shown": len(hits),
-        "truncated": truncated,
-        "counts_by_role": dict(counts),
-        "stats": stats,
-        "hits": hits,
-        "context": context,
-        "context_lines": sorted(context_lines, key=lambda item: (item["path"], item["line"])),
-        "context_truncated": context_seen > len(context_lines),
+        "shown": shown,
+        "total": total_matching_lines,
+        "total_matching_lines": total_matching_lines,
+        "matching_files": matching_files,
+        "shown_files": shown_files,
+        "truncated": coverage != "complete",
+        "coverage": coverage,
+        "scan_complete": not scan_limited,
+        "render_sampled": shown < total_matching_lines or shown_files < matching_files,
+        "counts_by_role": dict(counts_by_role),
+        "hits": visible_hits,
+        "files": files,
+        "view": view,
+        "effective_view": effective_view,
+        "samples_per_file": per_file,
+        "context": effective_context,
+        "context_lines": flat_context,
+        "context_truncated": len(snippets) < len(grouped) if effective_context else False,
         "semantic_candidate": semantic_candidate,
+        "symbol_candidates": symbol_candidates,
+        "query_intent": query_intent,
+        "match_file_summary": match_file_summary,
     }
 
 
-def render_search(data: dict[str, Any]) -> str:
-    lines = [
-        f"search: {data['shown']} hits" + (" (truncated)" if data["truncated"] else ""),
-        f"query: {data['query']!r} [{data['mode']}{'; word' if data['word'] else ''}]",
-    ]
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for hit in data["hits"]:
-        grouped[hit["kind"]].append(hit)
-    for kind in ("definition", "import", "reference"):
-        items = grouped.get(kind, [])
-        if not items:
-            continue
-        lines.append(f"\n{kind}s ({len(items)}):")
-        for hit in items:
-            lines.append(f"  {hit['path']}:{hit['line']}:{hit['column']} [{hit['role']}] {hit['text']}")
-    if data.get("context_lines"):
-        lines.append(f"\ncontext lines ({len(data['context_lines'])}{'+' if data.get('context_truncated') else ''}):")
-        for item in data["context_lines"]:
-            lines.append(f"  {item['path']}:{item['line']} [{item['role']}] {item['text']}")
-    if data["truncated"]:
-        lines.append("\nOutput cap reached. Narrow by path, file type, or a more specific literal before expanding.")
-    if data.get("context_truncated"):
-        lines.append("Context-line cap reached. Prefer a bounded range read around the highest-signal match.")
-    if data.get("semantic_candidate"):
-        scope = " ".join(f"--path {path}" for path in data.get("paths", [])) or "--path <owning-package>"
-        lines.append(
-            f"Semantic candidate: use agentq ts-nav references {data['query']} {scope} "
-            "before broadening lexical search or opening more files."
-        )
+def _search_file_block(item: dict[str, Any], *, view: str, samples: int) -> str:
+    role = str(item.get("role") or "source")
+    role_suffix = f" [{role}]" if role != "source" else ""
+    shown = int(item.get("shown", 0))
+    total = int(item.get("matching_lines", shown))
+    counts = item.get("kind_counts") or {}
+    tags = []
+    for key, label in (("definition", "D"), ("import", "I"), ("reference", "R")):
+        if counts.get(key):
+            tags.append(f"{label}{counts[key]}")
+    tag_text = f" [{' '.join(tags)}]" if tags else ""
+    header = f"{item['path']}{role_suffix}{tag_text} · {shown}/{total} shown"
+    lines = [header]
+    if view == "snippets" and item.get("snippets"):
+        for snippet in item["snippets"]:
+            lines.append(f"  {snippet['start']}-{snippet['end']}")
+            width = len(str(snippet["end"]))
+            for entry in snippet["lines"]:
+                marker = ">" if entry.get("match") else " "
+                lines.append(f"  {marker} {entry['line']:>{width}} │ {entry['text']}")
+        return "\n".join(lines)
+    limit = min(len(item.get("hits", [])), samples if view == "summary" else max(samples, len(item.get("hits", []))))
+    for hit in item.get("hits", [])[:limit]:
+        label = {"definition": "D", "import": "I", "reference": "R"}.get(hit.get("kind"), "·")
+        lines.append(f"  {label} {hit['line']}:{hit['column']} {hit['text']}")
+    omitted = shown - limit
+    if omitted > 0:
+        lines.append(f"  … {omitted} additional sampled matches")
     return "\n".join(lines)
 
+
+def render_search(data: dict[str, Any], *, budget: int = 0) -> str:
+    total = int(data.get("total_matching_lines", data.get("total", 0)))
+    matching_files = int(data.get("matching_files", 0))
+    shown = int(data.get("shown", 0))
+    shown_files = int(data.get("shown_files", 0))
+    status = str(data.get("coverage") or "sampled")
+    header = [
+        f"search {data['query']!r} · {shown}/{total} matching lines · {shown_files}/{matching_files} files · {status}",
+        f"mode {data['mode']}{'; word' if data.get('word') else ''} · view {data.get('effective_view', 'matches')}",
+    ]
+    paths = data.get("paths") or []
+    if paths and paths != ["."]:
+        header.append("scope " + " ".join(str(path) for path in paths))
+    candidates = data.get("symbol_candidates") or []
+    if candidates:
+        label = "exact symbol" if data.get("semantic_candidate") else "symbol candidates"
+        header.append(f"{label}: " + ", ".join(candidates[:8]) + (" …" if len(candidates) > 8 else ""))
+    if not data.get("files"):
+        return "\n".join(header)
+
+    view = str(data.get("effective_view") or "matches")
+    samples = 2 if view == "summary" else int(data.get("samples_per_file", 8))
+    blocks = [_search_file_block(item, view=view, samples=samples) for item in data.get("files", [])]
+    rendered = "\n".join(header)
+    emitted = 0
+    for block in blocks:
+        candidate = rendered + "\n\n" + block
+        reserve = 100
+        if budget > 0 and len(candidate) + reserve > budget:
+            break
+        rendered = candidate
+        emitted += 1
+    omitted_blocks = len(blocks) - emitted
+    if omitted_blocks:
+        rendered += f"\n\n… {omitted_blocks} file blocks omitted by render budget"
+    if data.get("coverage") != "complete":
+        rendered += (
+            f"\ncoverage sampled: {shown}/{total} matching lines represented; "
+            "narrow scope or increase --samples-per-file/--max-results when exhaustive rendered evidence is required"
+        )
+    if not data.get("scan_complete", True):
+        rendered += "\nsample scan cap reached; totals remain exact but later files may lack representative snippets"
+    return rendered
 
 def _parse_range_spec(root: Path, spec: str, *, allow_outside: bool = False) -> tuple[Path, int | None, int | None]:
     direct = ensure_within(root, Path(spec), allow_outside=allow_outside)
@@ -291,6 +663,7 @@ def read_data(
     max_chars: int = 260,
     include_sensitive: bool = False,
     allow_outside: bool = False,
+    repeat: bool = False,
 ) -> dict[str, Any]:
     if not specs:
         raise AgentQError("at least one file path is required")
@@ -306,6 +679,7 @@ def read_data(
             items.append({"path": relpath(root, path), "refused": True, "reason": "sensitive path; pass --include-sensitive explicitly"})
             continue
         raw = path.read_bytes()
+        version = hashlib.sha256(raw).hexdigest()[:16]
         if b"\0" in raw[:8192]:
             items.append({"path": relpath(root, path), "refused": True, "reason": "binary file"})
             continue
@@ -343,6 +717,7 @@ def read_data(
         items.append({
             "path": relpath(root, path), "total_lines": len(lines), "start": local_start,
             "end": selected[-1]["line"] if selected else local_start, "lines": selected,
+            "version": version,
             "truncated": (selected and selected[-1]["line"] < local_end) or local_end < len(lines),
         })
         if remaining <= 0:
@@ -352,6 +727,14 @@ def read_data(
     advice = read_overlap_advice(root, data)
     if advice:
         data["read_overlap"] = advice
+        if not repeat:
+            for index in advice.get("fully_covered_indices", []):
+                if isinstance(index, int) and 0 <= index < len(items):
+                    item = items[index]
+                    if isinstance(item, dict) and not item.get("refused"):
+                        item["lines"] = []
+                        item["suppressed"] = True
+    data["repeat"] = repeat
     return data
 
 
@@ -367,6 +750,8 @@ def render_read(data: dict[str, Any]) -> str:
             continue
         width = len(str(item["end"]))
         lines = [f"--- {item['path']}:{item['start']}-{item['end']} ({item['total_lines']} lines total) ---"]
+        if item.get("suppressed"):
+            lines.append("[unchanged range already returned in this task/thread; use --repeat to force]")
         for entry in item["lines"]:
             lines.append(f"{entry['line']:>{width}} │ {entry['text']}")
         if item.get("truncated"):
@@ -378,8 +763,7 @@ def render_read(data: dict[str, Any]) -> str:
     if isinstance(overlap, dict):
         blocks.append(
             f"read overlap: {overlap.get('overlap_lines', 0)} lines already seen in this {overlap.get('scope', 'session')} "
-            f"({_pct_hint(overlap.get('overlap_percent'))}); before another overlapping read, prefer ts-nav for a known "
-            "TypeScript/JavaScript symbol or outline/search to narrow the next range."
+            f"({_pct_hint(overlap.get('overlap_percent'))})"
         )
     return "\n\n".join(blocks)
 

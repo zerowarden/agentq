@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-VERSION = "1.2.4"
+VERSION = "1.3.0"
 
 DEFAULT_SKIP_PARTS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
@@ -58,8 +58,17 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ROLE_PATTERNS = {
     "test": re.compile(r"(^|/)(tests?|__tests__|spec)(/|$)|(?:^|[._-])(test|spec)\.[^.]+$", re.I),
     "docs": re.compile(r"(^|/)(docs?|examples?)(/|$)|\.(md|mdx|rst|adoc|txt)$", re.I),
-    "config": re.compile(r"(^|/)(\.github|config|configs|migrations|supabase)(/|$)|(^|/)(package\.json|tsconfig[^/]*\.json|pyproject\.toml|cargo\.toml|.*\.(ya?ml|toml|ini|cfg))$", re.I),
-    "generated": re.compile(r"(^|/)(generated|dist|build|coverage|snapshots?|__snapshots__)(/|$)|\.(min\.js|map|lock)$", re.I),
+    "config": re.compile(
+        r"(^|/)(\.github|config|configs|migrations|supabase)(/|$)|"
+        r"(^|/)(package\.json|tsconfig[^/]*\.json|pyproject\.toml|cargo\.toml|"
+        r"[^/]+\.config\.(?:[cm]?[jt]s|tsx?)|.*\.(?:ya?ml|toml|ini|cfg))$",
+        re.I,
+    ),
+    "generated": re.compile(
+        r"(^|/)(generated|dist|build|coverage|snapshots?|__snapshots__)(/|$)|"
+        r"(?:\.generated|\.gen)\.(?:[cm]?[jt]sx?|py|rs|go)$|\.(?:min\.js|map|lock)$",
+        re.I,
+    ),
 }
 
 LANG_BY_SUFFIX = {

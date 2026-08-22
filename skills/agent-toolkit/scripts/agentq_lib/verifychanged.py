@@ -48,6 +48,7 @@ def verify_changed_data(
     max_diagnostics: int = 24,
     offline: bool = False,
     skip_lint: bool = False,
+    changed_files_override: list[str] | None = None,
 ) -> dict[str, Any]:
     plan = test_plan_data(
         root,
@@ -56,6 +57,7 @@ def verify_changed_data(
         mode=mode,
         dependents=dependents,
         include_build=include_build,
+        changed_override=changed_files_override,
     )
     all_steps = list(plan.get("steps", []))
     if skip_lint:

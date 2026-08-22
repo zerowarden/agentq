@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import locale
 import math
@@ -22,8 +23,8 @@ from typing import Any, Iterable
 from .common import AgentQError, bound_output, human_bytes
 from .tasking import current_task_id, current_task_state
 
-SCHEMA = 3
-ACCEPTED_SCHEMAS = {1, 2, 3}
+SCHEMA = 4
+ACCEPTED_SCHEMAS = {1, 2, 3, 4}
 MAX_EVENT_BYTES = 4096
 MAX_HOT_BYTES = 10 * 1024 * 1024
 SPARKS = "▁▂▃▄▅▆▇█"
@@ -432,6 +433,60 @@ def _append_jsonl(path: Path, event: dict[str, Any]) -> None:
         os.close(fd)
 
 
+def _fingerprint_key() -> bytes:
+    path = hot_dir() / "fingerprint.key"
+    try:
+        if path.exists():
+            return path.read_bytes()
+        key = secrets.token_bytes(32)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            return path.read_bytes()
+        try:
+            os.write(fd, key)
+        finally:
+            os.close(fd)
+        return key
+    except OSError:
+        # Ephemeral fallback preserves privacy if the telemetry directory is read-only.
+        return hashlib.sha256(f"agentq:{os.getpid()}".encode()).digest()
+
+
+def _fingerprint(value: str) -> str:
+    return hmac.new(_fingerprint_key(), value.encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:20]
+
+
+def _query_shape(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", value):
+        return "identifier"
+    if any(ch in value for ch in "|()[]{}.*+?\\"):
+        return "regex-like"
+    return "literal"
+
+
+def _error_category(message: str | None) -> str | None:
+    if not message:
+        return None
+    text = message.lower()
+    if "does not exist" in text or "not found" in text:
+        return "not-found"
+    if "outside repository" in text or "outside the repository" in text:
+        return "outside-repository"
+    if "invalid arguments" in text or "requires" in text or "provide " in text or "cannot be combined" in text:
+        return "invalid-arguments"
+    if "typescript" in text and ("project" in text or "tsconfig" in text):
+        return "typescript-project-unavailable"
+    if "unavailable" in text or "missing" in text:
+        return "missing-dependency"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "parse" in text or "json" in text:
+        return "parse-error"
+    return "other"
+
+
 def _metric_int(data: dict[str, Any], key: str) -> int:
     value = data.get(key)
     if isinstance(value, bool):
@@ -460,7 +515,7 @@ def _read_ranges(root: Path, data: dict[str, Any] | None, *, limit: int = 24) ->
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         return []
     ranges: list[dict[str, Any]] = []
-    for item in data["items"]:
+    for item_index, item in enumerate(data["items"]):
         if not isinstance(item, dict) or item.get("refused"):
             continue
         path_text = item.get("path")
@@ -471,8 +526,9 @@ def _read_ranges(root: Path, data: dict[str, Any] | None, *, limit: int = 24) ->
         path = Path(path_text)
         actual = path if path.is_absolute() else root / path
         ranges.append({
+            "item_index": item_index,
             "file": _read_path_id(root, path_text),
-            "version": _read_version_id(actual),
+            "version": str(item.get("version") or _read_version_id(actual)),
             "start": max(1, start),
             "end": max(start, end),
             "lines": max(0, end - start + 1),
@@ -490,12 +546,26 @@ def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict
         "shown", "total", "files", "matches", "changed_files", "changed_packages",
         "dependent_packages", "affected_packages", "planned_steps", "executed_steps",
         "passed_steps", "failed_steps", "output_lines", "output_chars", "raw_output_lines",
-        "raw_output_chars", "findings", "nodes", "edges",
+        "raw_output_chars", "findings", "nodes", "edges", "total_matching_lines",
+        "matching_files", "shown_files",
     ):
         value = _metric_int(data, key)
         if value:
             metrics[key] = value
-    if command == "verify-changed":
+    if command in {"search", "inspect"}:
+        query = data.get("query") if command == "search" else data.get("target")
+        if isinstance(query, str):
+            metrics["query_shape"] = _query_shape(query)
+            metrics["query_fingerprint"] = _fingerprint(query)
+        for source, target in (("coverage", "search_coverage"), ("query_intent", "query_intent"), ("view", "search_view")):
+            if isinstance(data.get(source), str):
+                metrics[target] = data[source]
+        if bool(data.get("semantic_candidate")):
+            metrics["semantic_candidate"] = True
+        candidates = data.get("symbol_candidates")
+        if isinstance(candidates, list):
+            metrics["prefix_candidate_count"] = len(candidates)
+    if command in {"verify-changed", "verify-task"}:
         for source, target in (
             ("status", "verification_status"),
             ("mode", "verification_mode"),
@@ -507,6 +577,11 @@ def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict
         metrics["child_exit_code"] = data["exit_code"]
         if bool(data.get("timed_out")):
             metrics["child_timed_out"] = True
+        argv = data.get("command")
+        if isinstance(argv, list):
+            metrics["command_fingerprint"] = _fingerprint("\0".join(str(x) for x in argv))
+        elif isinstance(argv, str):
+            metrics["command_fingerprint"] = _fingerprint(argv)
     if command == "read":
         ranges = _read_ranges(root, data)
         if ranges:
@@ -529,7 +604,6 @@ def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict
             metrics["semantic_ambiguous"] = True
     return metrics
 
-
 def _subject_status(command: str, data: dict[str, Any] | None) -> tuple[str | None, int | None]:
     if not isinstance(data, dict):
         return None, None
@@ -538,7 +612,7 @@ def _subject_status(command: str, data: dict[str, Any] | None) -> tuple[str | No
         if data.get("timed_out"):
             return "timeout", code
         return ("passed" if code == 0 else "failed"), code
-    if command == "verify-changed":
+    if command in {"verify-changed", "verify-task"}:
         status = data.get("status")
         code = data.get("exit_code")
         return (str(status) if isinstance(status, str) else None, int(code) if isinstance(code, int) else None)
@@ -557,6 +631,8 @@ def record_event(
     truncated: bool = False,
     data: dict[str, Any] | None = None,
     error_type: str | None = None,
+    error_message: str | None = None,
+    invocation: list[str] | None = None,
 ) -> None:
     """Append privacy-minimized local telemetry. Never raises into agent work."""
     if not telemetry_enabled() or command == "stats":
@@ -588,10 +664,15 @@ def record_event(
             "source_chars": max(0, source_chars),
             "source_lines": max(0, source_lines),
             "truncated": bool(truncated),
+            "invocation_chars": sum(len(item) for item in invocation) + max(0, len(invocation) - 1) if invocation else 0,
+            "invocation_fingerprint": _fingerprint("\0".join(invocation)) if invocation else None,
             "metrics": metrics,
         }
         if error_type:
             event["error_type"] = error_type[:80]
+        category = _error_category(error_message)
+        if category:
+            event["error_category"] = category
         _append_jsonl(hot_file(), event)
     except Exception:
         return
@@ -601,9 +682,12 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     schema = int(event.get("schema", 1))
     if schema == SCHEMA:
         return event
-    if schema == 2:
+    if schema in {2, 3}:
         converted = dict(event)
-        converted.update({"schema": SCHEMA, "task_id": None})
+        converted["schema"] = SCHEMA
+        converted.setdefault("task_id", None)
+        converted.setdefault("invocation_chars", 0)
+        converted.setdefault("invocation_fingerprint", None)
         return converted
 
     # v1 telemetry treated child/verification failures as agentq failures. Recover
@@ -691,29 +775,26 @@ def _merge_interval(intervals: list[tuple[int, int]], start: int, end: int) -> l
 def read_efficiency(events: list[dict[str, Any]]) -> dict[str, Any]:
     reads = [event for event in events if event.get("command") == "read"]
     seen_files: set[str] = set()
-    coverage: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
-    total_lines = 0
-    overlap_lines = 0
-    range_count = 0
-    reread_ranges = 0
-    fully_redundant = 0
-    tracked_events = 0
+    # Coverage is partitioned by active-context identity. Cross-task/thread reuse
+    # is informative, but only same-context overlap is treated as redundancy.
+    context_coverage: dict[tuple[str, str, str], list[tuple[int, int]]] = defaultdict(list)
+    global_coverage: dict[tuple[str, str], list[tuple[int, int, str]]] = defaultdict(list)
+    total_lines = overlap_lines = range_count = reread_ranges = fully_redundant = tracked_events = 0
+    cross_task_overlap = cross_thread_overlap = 0
 
     for event in reads:
         metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
         ranges = metrics.get("read_ranges") if isinstance(metrics.get("read_ranges"), list) else []
         if ranges:
             tracked_events += 1
+        task = str(event.get("task_id") or "")
+        thread = str(event.get("thread_id") or "")
+        context = f"task:{task}" if task else f"thread:{thread}" if thread else "unattributed"
         for item in ranges:
             if not isinstance(item, dict):
                 continue
-            file_id = item.get("file")
-            version = item.get("version")
-            start = item.get("start")
-            end = item.get("end")
-            if not isinstance(file_id, str) or not isinstance(version, str) or not isinstance(start, int) or not isinstance(end, int):
-                continue
-            if end < start:
+            file_id, version, start, end = item.get("file"), item.get("version"), item.get("start"), item.get("end")
+            if not isinstance(file_id, str) or not isinstance(version, str) or not isinstance(start, int) or not isinstance(end, int) or end < start:
                 continue
             range_count += 1
             line_count = end - start + 1
@@ -722,12 +803,27 @@ def read_efficiency(events: list[dict[str, Any]]) -> dict[str, Any]:
                 reread_ranges += 1
             seen_files.add(file_id)
             key = (file_id, version)
-            prior = coverage[key]
+            ckey = (context, file_id, version)
+            prior = context_coverage[ckey]
             overlap = _range_overlap(prior, start, end)
             overlap_lines += overlap
             if overlap >= line_count and line_count:
                 fully_redundant += 1
-            coverage[key] = _merge_interval(prior, start, end)
+            context_coverage[ckey] = _merge_interval(prior, start, end)
+
+            # Attribute overlap with other contexts separately, without counting it
+            # as avoidable within-task transcript duplication.
+            for ps, pe, pcontext in global_coverage[key]:
+                if pcontext == context:
+                    continue
+                amount = _range_overlap([(ps, pe)], start, end)
+                if not amount:
+                    continue
+                if task and pcontext.startswith("task:"):
+                    cross_task_overlap += amount
+                else:
+                    cross_thread_overlap += amount
+            global_coverage[key].append((start, end, context))
 
     return {
         "calls": len(reads),
@@ -739,9 +835,12 @@ def read_efficiency(events: list[dict[str, Any]]) -> dict[str, Any]:
         "unique_lines": max(0, total_lines - overlap_lines),
         "overlap_lines": overlap_lines,
         "overlap_percent": _percent(overlap_lines, total_lines),
+        "same_context_overlap_lines": overlap_lines,
+        "same_context_overlap_percent": _percent(overlap_lines, total_lines),
+        "cross_task_overlap_lines": cross_task_overlap,
+        "cross_thread_overlap_lines": cross_thread_overlap,
         "fully_redundant_ranges": fully_redundant,
     }
-
 
 def read_overlap_advice(root: Path, data: dict[str, Any]) -> dict[str, Any] | None:
     current_ranges = _read_ranges(root, data)
@@ -781,6 +880,7 @@ def read_overlap_advice(root: Path, data: dict[str, Any]) -> dict[str, Any] | No
     overlapping = 0
     overlap_lines = 0
     fully_covered = 0
+    fully_covered_indices: list[int] = []
     total_lines = 0
     for item in current_ranges:
         key = (str(item["file"]), str(item["version"]))
@@ -793,6 +893,8 @@ def read_overlap_advice(root: Path, data: dict[str, Any]) -> dict[str, Any] | No
             overlap_lines += overlap
         if overlap >= lines and lines:
             fully_covered += 1
+            if isinstance(item.get("item_index"), int):
+                fully_covered_indices.append(int(item["item_index"]))
 
     if not overlapping:
         return None
@@ -801,6 +903,7 @@ def read_overlap_advice(root: Path, data: dict[str, Any]) -> dict[str, Any] | No
         "overlap_lines": overlap_lines,
         "overlap_percent": _percent(overlap_lines, total_lines),
         "fully_covered_ranges": fully_covered,
+        "fully_covered_indices": fully_covered_indices,
         "scope": "task" if task_id else "thread" if thread_id else "recent-session",
     }
 
@@ -893,20 +996,61 @@ def _measurement(items: list[dict[str, Any]]) -> dict[str, Any]:
     measured = [item for item in items if int(item.get("source_chars", 0)) > 0]
     source = sum(int(item.get("source_chars", 0)) for item in measured)
     visible = sum(int(item.get("visible_chars", 0)) for item in measured)
+    all_visible = sum(int(item.get("visible_chars", 0)) for item in items)
     avoided = max(0, source - visible)
     overhead = max(0, visible - source)
     reduction = _percent(source - visible, source) if source else None
     budget_removed = sum(max(0, int(item.get("prebudget_chars", 0)) - int(item.get("visible_chars", 0))) for item in items)
     return {
         "instrumented_calls": len(measured),
+        "total_calls": len(items),
+        "instrumented_call_percent": _percent(len(measured), len(items)),
         "measured_source_chars": source,
         "measured_visible_chars": visible,
+        "total_visible_chars": all_visible,
+        "instrumented_visible_percent": _percent(visible, all_visible),
         "avoided_chars": avoided,
         "overhead_chars": overhead,
         "reduction_percent": reduction,
         "budget_removed_chars": budget_removed,
     }
 
+
+def _percentile(values: list[int | float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(v) for v in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * q
+    low, high = math.floor(pos), math.ceil(pos)
+    if low == high:
+        return ordered[low]
+    return ordered[low] * (high - pos) + ordered[high] * (pos - low)
+
+
+def _distribution(values: list[int | float]) -> dict[str, float | int | None]:
+    return {
+        "p50": round(_percentile(values, 0.50) or 0, 1) if values else None,
+        "p90": round(_percentile(values, 0.90) or 0, 1) if values else None,
+        "max": round(max(values), 1) if values else None,
+    }
+
+
+def operation_transitions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        task, thread = event.get("task_id"), event.get("thread_id")
+        key = f"task:{task}" if task else f"thread:{thread}" if thread else f"repo:{event.get('repo_id','')}"
+        grouped[key].append(event)
+    counts: Counter[str] = Counter()
+    for items in grouped.values():
+        items.sort(key=lambda item: float(item.get("time", 0)))
+        for left, right in zip(items, items[1:]):
+            if float(right.get("time", 0)) - float(left.get("time", 0)) > 30 * 60:
+                continue
+            counts[f"{left.get('command','?')} → {right.get('command','?')}"] += 1
+    return [{"transition": name, "calls": count} for name, count in counts.most_common(12)]
 
 def task_efficiency(
     root: Path,
@@ -943,6 +1087,15 @@ def task_efficiency(
     ]
     accepted_visible = sum(int(event.get("visible_chars", 0)) for event in accepted_operations)
     accepted_count = len(accepted)
+    per_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in accepted_operations:
+        if event.get("task_id"):
+            per_task[str(event["task_id"])].append(event)
+    task_calls = [len(items) for items in per_task.values()]
+    task_visible = [sum(int(e.get("visible_chars", 0)) for e in items) for items in per_task.values()]
+    task_reads = [sum(e.get("command") == "read" for e in items) for items in per_task.values()]
+    task_searches = [sum(e.get("command") == "search" for e in items) for items in per_task.values()]
+    task_runs = [sum(e.get("command") == "run" for e in items) for items in per_task.values()]
 
     active_state = None if all_repos else current_task_state(root)
     active_age = None
@@ -964,6 +1117,12 @@ def task_efficiency(
         "calls_per_accepted_task": round(len(accepted_operations) / accepted_count, 1) if accepted_count else None,
         "reads_per_accepted_task": round(sum(event.get("command") == "read" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
         "runs_per_accepted_task": round(sum(event.get("command") == "run" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
+        "calls_distribution": _distribution(task_calls),
+        "visible_chars_distribution": _distribution(task_visible),
+        "token_proxy_distribution": _distribution([v / 4 for v in task_visible]),
+        "reads_distribution": _distribution(task_reads),
+        "searches_distribution": _distribution(task_searches),
+        "runs_distribution": _distribution(task_runs),
         "note": (
             "A task is one independently acceptable outcome. One Codex thread may contain several sequential tasks; "
             "small corrections, debugging, and verification retries remain in the current task."
@@ -1039,7 +1198,7 @@ def stats_data(
         "timed_out": sum(event.get("subject_status") == "timeout" for event in project_run_events),
     }
 
-    verification_events = [event for event in operation_events if event.get("command") == "verify-changed"]
+    verification_events = [event for event in operation_events if event.get("command") in {"verify-changed", "verify-task"}]
     verification_modes = Counter(
         str((event.get("metrics") or {}).get("verification_mode", "unknown"))
         for event in verification_events
@@ -1099,6 +1258,8 @@ def stats_data(
         "semantic_ambiguous": sum(bool((event.get("metrics") or {}).get("semantic_ambiguous")) for event in semantic_events),
     }
     tasks = task_efficiency(root, events, selected, operation_events, all_repos=all_repos)
+    transitions = operation_transitions(operation_events)
+    error_categories = Counter(str(event.get("error_category") or "unknown") for event in operation_events if event.get("tool_status") != "ok")
 
     return {
         "schema": SCHEMA,
@@ -1122,6 +1283,7 @@ def stats_data(
         "visible_chars": visible_chars,
         "visible_token_proxy": round(visible_chars / 4),
         "truncations": sum(bool(event.get("truncated")) for event in operation_events),
+        "invocation_chars": sum(int(event.get("invocation_chars", 0)) for event in operation_events),
         "measurement": measurement,
         "source_chars": measurement["measured_source_chars"],
         "suppressed_chars": measurement["avoided_chars"],
@@ -1135,13 +1297,16 @@ def stats_data(
         "reads": reads,
         "navigation": navigation,
         "tasks": tasks,
+        "transitions": transitions,
+        "error_categories": dict(error_categories),
         "repositories": [{"name": name, "events": count} for name, count in repos.most_common(10)],
         "sources": sources,
         "archive_result": archive_result,
         "measurement_note": (
             "visible token proxy is visible characters divided by four; it is not provider token accounting. "
-            "Measured reduction is shown only for operations where agentq captured source command output. "
-            "Read overlap is measured only for v1.2.2+ version-aware ranges; a task is one independently acceptable outcome, not one thread or prompt."
+            "Measured reduction applies only to calls where agentq captured source command output; coverage is reported explicitly. "
+            "Read redundancy is same-task/thread and content-version scoped; cross-task/thread reuse is reported separately. "
+            "A task is one independently acceptable outcome, not one thread or prompt."
         ),
     }
 
@@ -1247,7 +1412,9 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
         f"project      {project['passed']} passed · {project['failed']} failed · {project['timed_out']} timeout",
         f"exposure     {human_bytes(data['visible_chars'])} visible · ~{data['visible_token_proxy']:,} token proxy · {data['truncations']} cuts",
         (
-            f"measured     {human_bytes(measured['avoided_chars'])} saved across {measured['instrumented_calls']} instrumented calls"
+            f"measured     {human_bytes(measured['measured_source_chars'])} source → {human_bytes(measured['measured_visible_chars'])} visible · "
+            f"{_pct(measured['reduction_percent'])} reduction · {measured['instrumented_calls']}/{measured['total_calls']} calls "
+            f"({_pct(measured['instrumented_call_percent'])}) instrumented"
             if measured["instrumented_calls"]
             else "measured     — (no source-output measurement in this window)"
         ),
@@ -1279,6 +1446,11 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
     if data["events"] >= 10 and len(data["activity"]) > 1:
         values = [int(item["calls"]) for item in data["activity"]]
         lines.append(f"activity     {_sparkline(values, width=min(48, max(12, width - 24)))}")
+    if data.get("detailed") and tasks.get("calls_distribution", {}).get("p50") is not None:
+        d = tasks["calls_distribution"]
+        lines.append(f"task calls   p50 {d['p50']} · p90 {d['p90']} · max {d['max']}")
+    if data.get("detailed") and data.get("transitions"):
+        lines.append("transitions  " + " · ".join(f"{x['transition']} {x['calls']}" for x in data["transitions"][:5]))
 
     lines.extend([rule, "operations"])
     header = f"  {'Operation':<18} {'Calls':>5} {'Tool':>8} {'Pass':>5} {'Fail':>5} {'Median':>7} {'Visible':>9} {'Saved':>9}"
@@ -1422,6 +1594,7 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
         else:
             pair(summary3, "saved", human_bytes(measured["avoided_chars"]), "green bold")
             pair(summary3, "reduction", _pct(measured["reduction_percent"]), "green")
+        pair(summary3, "coverage", f"{measured['instrumented_calls']}/{measured['total_calls']} calls ({_pct(measured['instrumented_call_percent'])})", "dim")
         summary_lines.append(summary3)
 
     if reads.get("calls"):

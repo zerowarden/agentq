@@ -1,54 +1,56 @@
 ---
 name: semantic-code-navigation
-description: Use first when a TypeScript/JavaScript symbol name or exact source position is known and definition, references, implementations, aliases, or re-exports matter. MUST use bounded agentq ts-nav before broad lexical search or repeated reads; use repo-exploration only to resolve ambiguity or when the TypeScript project cannot load.
+description: Use when an exact TypeScript/JavaScript symbol or exact source position is known and semantic definition, references, and implementations matter. Prefer one agentq ts-nav overview or agentq inspect call; use lexical repo-exploration only for unknown names, strings/configuration, or semantic-project failure.
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Node.js, and a TypeScript dependency resolvable from the repository. Uses only local project files.
 metadata:
-  version: "1.2.4"
+  version: "1.3.0"
   mutation: "none"
 ---
 
 # Semantic Code Navigation
 
+## One-call default
+
+For a known identifier, start with one overview rather than a sequence of primitive calls:
+
 ```bash
-AQ=~/.agents/skills/semantic-code-navigation/scripts/agentq
+agentq ts-nav overview AssignmentOffer --path packages/contexts/dispatch
+# Equivalent agent-facing entry point when repository inspection is the intent:
+agentq inspect AssignmentOffer --path packages/contexts/dispatch
 ```
 
-## Symbol-first workflow
+The overview returns the selected declaration, declaration span, definitions, references, implementations, source previews and per-file grouping from one TypeScript language-service process.
 
-When the symbol name is known, do not begin with broad `rg` or several source reads.
-
-1. Query it directly, scoped to the likely owning package when possible:
-
-   ```bash
-   "$AQ" ts-nav locate AssignmentOffer --path packages/contexts/dispatch
-   "$AQ" ts-nav definition AssignmentOffer --path packages/contexts/dispatch
-   "$AQ" ts-nav references AssignmentOffer --path packages/contexts/dispatch --limit 60
-   "$AQ" ts-nav implementations AssignmentOffer --path packages/contexts/dispatch
-   ```
-
-2. If several declarations remain, narrow with another `--path` or select the numbered candidate explicitly:
-
-   ```bash
-   "$AQ" ts-nav references AssignmentOffer --path packages/contexts/dispatch --pick 2
-   ```
-
-3. Read only the returned declaration/caller ranges that affect the task.
-
-## Exact-position workflow
-
-Use an exact position when the relevant occurrence is already known:
+If several exact declarations remain, narrow the scope or select the returned candidate:
 
 ```bash
-"$AQ" ts-nav definition --file packages/foo/src/bar.ts --line 42 --column 17
-"$AQ" ts-nav references --file packages/foo/src/bar.ts --line 42 --column 17 --limit 60
-"$AQ" ts-nav implementations --file packages/foo/src/bar.ts --line 42 --column 17
+agentq ts-nav overview AssignmentOffer --path packages/contexts/dispatch --pick 2
+```
+
+Use primitive actions only when the task explicitly needs one class of semantic evidence:
+
+```bash
+agentq ts-nav refs AssignmentOffer --path packages/contexts/dispatch
+agentq ts-nav def AssignmentOffer --path packages/contexts/dispatch
+agentq ts-nav impls AssignmentOffer --path packages/contexts/dispatch
+```
+
+The aliases above are intentionally accepted because agents commonly emit them; canonical spellings remain `references`, `definition`, and `implementations`.
+
+## Exact-position compatibility
+
+Both forms are valid:
+
+```bash
+agentq ts-nav references --file packages/foo/src/bar.ts --line 42 --column 17
+agentq ts-nav references packages/foo/src/bar.ts:42:17
 ```
 
 ## Guardrails
 
-- A known TS/JS identifier is a semantic-navigation trigger, not merely an ambiguity fallback.
-- Use lexical search only to discover an unknown symbol, investigate strings/configuration, or recover when semantic project resolution fails.
-- Do not infer semantic equivalence from same-named lexical matches.
-- If output is truncated, narrow the owning package before raising limits.
-- The repository must expose a usable `tsconfig.json` and local `typescript` package for semantic resolution. Do not install packages or contact the network merely to make this skill work.
+- A simple identifier prefix is not an exact symbol. Use `agentq search PREFIX` to obtain declaration candidates first.
+- Do not run `locate`, `definition`, `references`, and `implementations` serially for routine exploration.
+- Lexical search is for unknown names, strings/configuration, or recovery when semantic project resolution fails; same-named lexical matches do not prove semantic equivalence.
+- If the overview is sampled, narrow the owning package before increasing limits.
+- Do not install packages or contact the network merely to make semantic resolution work.

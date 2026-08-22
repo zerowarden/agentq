@@ -4,36 +4,36 @@ description: Use for tests, typechecks, lint, builds, and changed-code verificat
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Project commands must already be installed. Node/pnpm workspaces and Vitest receive specialized local planning.
 metadata:
-  version: "1.2.4"
+  version: "1.3.0"
   mutation: "command-dependent"
 ---
 
 # Targeted Verification
 
-```bash
-AQ=~/.agents/skills/targeted-verification/scripts/agentq
-```
-
 ## Changed-code default
 
-Plan without execution when scope is uncertain:
+When an agentq task is active, prefer task-scoped verification so unrelated pre-existing dirty files do not inflate the plan:
 
 ```bash
-"$AQ" verify-changed --dry-run
-"$AQ" verify-changed --dry-run --base origin/main
+agentq verify-task --dry-run
+agentq verify-task
 ```
 
-Then execute the workspace-aware ladder:
+Outside an active task, use worktree/base-scoped verification:
 
 ```bash
-"$AQ" verify-changed
+agentq verify-changed --dry-run
+agentq verify-changed --dry-run --base origin/main
+agentq verify-changed
 ```
+
+`agentq task changes`, `agentq git-diff --task`, and `agentq test-plan --task` expose the same task baseline explicitly.
 
 `standard` mode verifies changed packages plus direct local dependents. Use narrower or broader modes deliberately:
 
 ```bash
-"$AQ" verify-changed --mode focused
-"$AQ" verify-changed --mode thorough
+agentq verify-changed --mode focused
+agentq verify-changed --mode thorough
 ```
 
 The legacy spelling `verified-changed` is accepted as an alias; prefer `verify-changed` in new instructions.
@@ -43,9 +43,9 @@ The legacy spelling `verified-changed` is accepted as an alias; prefer `verify-c
 Use `agentq run` when the repository has a known command that the planner cannot infer:
 
 ```bash
-"$AQ" run -- pnpm --filter @app/dispatch test -- assignment-offer.test.ts
-"$AQ" run --timeout 1200 -- pnpm --filter api typecheck
-"$AQ" run --cwd crates/engine -- cargo test query_parser
+agentq run -- pnpm --filter @app/dispatch test -- assignment-offer.test.ts
+agentq run --timeout 1200 -- pnpm --filter api typecheck
+agentq run --cwd crates/engine -- cargo test query_parser
 ```
 
 Use `--label` only when several retained logs would otherwise be ambiguous.
@@ -56,7 +56,7 @@ Use `--label` only when several retained logs would otherwise be ambiguous.
 - Read only a narrow range from the exact returned log path when more evidence is required:
 
   ```bash
-  "$AQ" read --allow-outside <returned-log-path>:120-190
+  agentq read --allow-outside <returned-log-path>:120-190
   ```
 
 - Escalate only after narrower checks pass or project policy requires it.

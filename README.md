@@ -76,40 +76,56 @@ Results are bounded and sensitive paths are excluded by default.
 
 ### Search source
 
-Search is fixed-string by default:
+Search is fixed-string by default and reports exact matching-line/file totals separately from rendered samples:
 
 ```bash
 agentq search AssignmentOffer
 agentq search 'foo.bar(' --path apps/api
+agentq search 'changes:' --path apps/api/src --view summary
 ```
+
+`--path` accepts several scopes after one flag, and common agent aliases are accepted:
+
+```bash
+agentq search AuditEvent \
+  --path apps/api packages/contexts \
+  --max-results 180 \
+  --samples-per-file 8
+```
+
+`--limit` is the canonical spelling of `--max-results`; `--samples-per-file` is the clearer spelling of the retained `--per-file` alias. Sampling affects rendered evidence, not reported repository totals. Coverage is explicitly `complete` or `sampled`.
+
+Views are `auto`, `summary`, `snippets`, and `matches`. `auto` uses contextual snippets for small/exact lookups and grouped summaries for broad inventories. Context is attached directly to selected matches rather than emitted as a detached global section.
 
 Use regex explicitly:
 
 ```bash
-agentq search '^export .*AssignmentOffer' \
-  --regex \
-  --path packages
+agentq search '^export .*AssignmentOffer' --regex --path packages
 ```
 
-Useful narrowing options include:
+### Inspect a target
+
+Use the single-entry inspector for routine exploration when the target is already known:
 
 ```bash
-agentq search AssignmentOffer \
-  --path packages/contexts/dispatch \
-  --limit 40 \
-  --per-file 5 \
-  --context 2
+agentq inspect AssignmentOffer --path packages/contexts/dispatch
+agentq inspect apps/api/src/routes/jobs.ts
+agentq inspect "name: 'contract'" --path apps/api
 ```
+
+Exact TypeScript/JavaScript identifiers use semantic overview when the project can load; literals and prefixes fall back to grouped lexical search.
 
 ### Read source ranges
 
 ```bash
 agentq read packages/dispatch/src/offers.ts
-agentq read packages/dispatch/src/offers.ts --start 40 --end 120
+agentq read packages/dispatch/src/offers.ts:40-120
+agentq read packages/dispatch/src/offers.ts --lines 40:120
 agentq read packages/dispatch/src/offers.ts --around 85 --context 20
+agentq read a.ts:20-70 b.ts:90-140 c.ts:1-45
 ```
 
-Multiple files can be supplied in one command.
+`--lines START:END` is accepted for compatibility with common agent-generated syntax. Multiple exact ranges/files can be supplied in one command. Inside an active task/thread, a fully repeated unchanged range can be suppressed; `--repeat` forces it to be emitted again.
 
 ### Repository map
 
@@ -131,45 +147,30 @@ agentq outline packages/dispatch --public
 
 ## TypeScript and JavaScript navigation
 
-For a known TypeScript or JavaScript symbol, prefer semantic navigation over repeated lexical searches.
-
-Locate candidate declarations:
+For a known TypeScript or JavaScript symbol, prefer one semantic overview instead of serial `locate`, `definition`, `references`, and `implementations` calls:
 
 ```bash
-agentq ts-nav locate AssignmentOffer \
-  --path packages/contexts/dispatch
+agentq ts-nav overview AssignmentOffer --path packages/contexts/dispatch
 ```
 
-Find a definition:
+The overview resolves exact declaration candidates through the project TypeScript language service and returns the declaration span, definitions, references, implementations, and bounded source previews from one process.
+
+Primitive actions remain available when only one evidence class is needed:
 
 ```bash
-agentq ts-nav definition AssignmentOffer \
-  --path packages/contexts/dispatch
+agentq ts-nav definition AssignmentOffer --path packages/contexts/dispatch
+agentq ts-nav references AssignmentOffer --path packages/contexts/dispatch
+agentq ts-nav implementations AssignmentRepository --path packages
 ```
 
-Find semantic references:
+Common compact aliases are accepted: `def`, `refs`, and `impls`. Exact positions support both forms:
 
 ```bash
-agentq ts-nav references AssignmentOffer \
-  --path packages/contexts/dispatch \
-  --limit 60
+agentq ts-nav references --file apps/api/src/routes.ts --line 42 --column 17
+agentq ts-nav references apps/api/src/routes.ts:42:17
 ```
 
-Find implementations:
-
-```bash
-agentq ts-nav implementations AssignmentRepository \
-  --path packages
-```
-
-Exact source positions are also supported:
-
-```bash
-agentq ts-nav references \
-  apps/api/src/routes.ts:42:17
-```
-
-If a symbol is ambiguous, narrow the `--path` or select the returned candidate.
+If a symbol is ambiguous, narrow `--path` or select the numbered candidate with `--pick N`. Identifier prefixes are lexical discovery, not exact semantic symbols; use `agentq search PREFIX` to obtain candidates.
 
 ## Git inspection
 
@@ -330,7 +331,10 @@ Inspect what should be verified without running anything:
 ```bash
 agentq test-plan
 agentq test-plan --base origin/main
+agentq test-plan --task
 ```
+
+With an active task, `--task` uses the task-begin baseline and excludes unchanged files that were already dirty before the task. Inspect that scope directly with `agentq task changes` or `agentq git-diff --task`.
 
 Modes:
 
@@ -346,6 +350,13 @@ Run affected checks:
 
 ```bash
 agentq verify-changed
+```
+
+For agent work tracked with `agentq task begin`, prefer task-scoped verification:
+
+```bash
+agentq verify-task
+agentq verify-task --dry-run
 ```
 
 Include committed branch changes relative to a base:
@@ -492,6 +503,8 @@ Machine-readable output:
 agentq stats --format json
 ```
 
+When JSON exceeds `--budget`, agentq preserves scalar metadata and as many complete list records as fit, with an `_agentq.omitted` summary. It does not replace the entire result with a truncation-only object.
+
 The displayed token figure is a proxy based on visible characters divided by four. It is intended for comparing tool-output volume, not provider billing.
 
 ### Telemetry persistence
@@ -596,7 +609,7 @@ By default:
 
 * common credential and secret paths are excluded from search and reads;
 * common secret-like values are redacted from retained command logs;
-* telemetry stores operational metadata rather than source contents, search queries, command arguments, or absolute repository paths;
+* telemetry stores operational metadata rather than source contents, raw search queries, raw command arguments, or absolute repository paths; query/command identity uses a keyed local HMAC fingerprint;
 * telemetry can be disabled with:
 
 ```bash
@@ -614,3 +627,5 @@ agentq search AssignmentOffer --format json
 agentq git-status --format json
 agentq stats --format json
 ```
+
+When JSON exceeds `--budget`, agentq preserves scalar metadata and as many complete list records as fit, with an `_agentq.omitted` summary. It does not replace the entire result with a truncation-only object.

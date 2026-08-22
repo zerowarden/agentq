@@ -64,9 +64,10 @@ def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) ->
     tests = [h for h in refs["hits"] if h["role"] == "test"]
     docs_config = [h for h in refs["hits"] if h["role"] in {"docs", "config"}]
     source_refs = [h for h in refs["hits"] if h["role"] == "source"]
+    all_ref_files = refs.get("match_file_summary") or []
     package = _nearest_manifest(root, target_path if exists else root)
-    unique_source_files = {h["path"] for h in source_refs}
-    unique_import_files = {h["path"] for h in import_hits}
+    unique_source_files = {str(h["path"]) for h in all_ref_files if h.get("role") == "source"}
+    unique_import_files = {str(h["path"]) for h in (imports.get("match_file_summary") if 'imports' in locals() else []) or []}
 
     score = 0
     reasons: list[str] = []
@@ -87,8 +88,8 @@ def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) ->
         score += 1; reasons.append("document/config references exist")
     if not tests and (source_refs or import_hits):
         score += 1; reasons.append("no direct lexical test reference found")
-    if refs["truncated"]:
-        score += 2; reasons.append("reference output reached cap")
+    if not refs.get("scan_complete", True):
+        score += 2; reasons.append("reference discovery reached scan safety cap")
     level = "high" if score >= 6 else "medium" if score >= 3 else "low"
     validation = []
     if tests:
@@ -105,9 +106,9 @@ def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) ->
         "package": package, "source_reference_files": len(unique_source_files),
         "import_reference_files": len(unique_import_files), "tests": tests[:25],
         "docs_config": docs_config[:25], "top_references": refs["hits"][:50],
-        "filename_candidates": file_hits["files"][:20], "truncated": refs["truncated"],
+        "filename_candidates": file_hits["files"][:20], "truncated": not refs.get("scan_complete", True),
         "validation": validation,
-        "evidence_quality": "bounded lexical/import-pattern evidence; use LSP findReferences when available for semantic confirmation",
+        "evidence_quality": "exact lexical matching-file counts plus bounded previews; use semantic overview for TypeScript/JavaScript symbol confirmation",
     }
 
 

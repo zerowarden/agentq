@@ -4,7 +4,7 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 license: MIT
 compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
 metadata:
-  version: "1.2.4"
+  version: "1.3.0"
   network: "runtime-offline"
 ---
 
@@ -15,7 +15,7 @@ This skill maintains the shared `agentq` runtime used by the other skills. Ordin
 ## First checks
 
 ```bash
-~/.agents/skills/agent-toolkit/scripts/agentq doctor
+agentq doctor
 ~/.agents/skills/agent-toolkit/scripts/validate-skills
 ```
 
@@ -27,7 +27,7 @@ Use `--format json` only when another program consumes the result.
 - Cap files, matches, lines, hunks, diagnostics, and line width.
 - Exclude sensitive paths and redact common secret-like values by default.
 - Keep full command output only in mode-`0600` redacted logs under the sandbox-safe runtime directory.
-- Store only allowlisted operational telemetry; never store queries, source text, command arguments, task names, or absolute repository paths.
+- Store only allowlisted operational telemetry; query/command identity uses keyed local HMAC fingerprints, never raw queries, source text, command arguments, task names, or absolute repository paths.
 - Never silently substitute lexical evidence for semantic proof.
 - Never mutate files unless a command has an explicit mutation flag.
 - Never download packages or execute `npx` during ordinary skill use.
@@ -35,7 +35,7 @@ Use `--format json` only when another program consumes the result.
 ## Shared command surface
 
 ```text
-files, search, read, repo-map, outline, ts-nav
+files, search, read, repo-map, outline, inspect, ts-nav
 
 git-status, git-diff, git-history, git-structural
 
@@ -43,7 +43,7 @@ dependencies, impact
 
 codemod-scan, codemod-apply
 
-run, test-plan, verify-changed, audit, benchmark
+run, test-plan, verify-changed, verify-task, audit, benchmark
 
 task, stats, doctor
 ```

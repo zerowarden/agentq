@@ -10,13 +10,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .common import AgentQError
+from .common import AgentQError, run_cmd
+from .workspace import changed_files
 
 _ACTION_ALIASES = {
     "start": "begin",
     "current": "status",
     "done": "accept",
     "drop": "abandon",
+    "cancel": "abandon",
 }
 
 
@@ -76,8 +78,83 @@ def _clear_state(root: Path) -> None:
         raise AgentQError(f"unable to clear task state: {exc}") from exc
 
 
-def _new_state(now: float) -> dict[str, Any]:
-    return {"task_id": secrets.token_hex(8), "started_at": now}
+def _content_fingerprint(root: Path, path_text: str) -> str:
+    path = root / path_text
+    try:
+        if not path.is_file():
+            return "missing"
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(128 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()[:20]
+    except OSError:
+        return "unreadable"
+
+
+def _git_head(root: Path) -> str | None:
+    result = run_cmd(["git", "rev-parse", "HEAD"], cwd=root, timeout=10)
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
+def _baseline(root: Path) -> dict[str, Any]:
+    dirty = changed_files(root)
+    return {
+        "head": _git_head(root),
+        "dirty": {path: _content_fingerprint(root, path) for path in dirty},
+    }
+
+
+def _new_state(root: Path, now: float) -> dict[str, Any]:
+    return {
+        "task_id": secrets.token_hex(8),
+        "started_at": now,
+        "baseline": _baseline(root),
+    }
+
+
+def task_changes(root: Path) -> dict[str, Any]:
+    state = _read_state(root)
+    if not state:
+        raise AgentQError("no active task; use 'agentq task begin' before requesting task-scoped changes")
+    baseline = state.get("baseline") if isinstance(state.get("baseline"), dict) else {}
+    baseline_dirty = baseline.get("dirty") if isinstance(baseline.get("dirty"), dict) else {}
+    baseline_head = baseline.get("head") if isinstance(baseline.get("head"), str) else None
+
+    worktree = set(changed_files(root))
+    committed: set[str] = set()
+    current_head = _git_head(root)
+    if baseline_head and current_head and baseline_head != current_head:
+        result = run_cmd(["git", "diff", "--name-only", "-z", baseline_head, current_head], cwd=root, timeout=30)
+        if result.returncode == 0:
+            committed.update(item for item in result.stdout.split("\0") if item)
+
+    candidates = worktree | committed
+    selected: list[str] = []
+    ambiguous: list[str] = []
+    preexisting_unchanged: list[str] = []
+    for path in sorted(candidates):
+        previous = baseline_dirty.get(path)
+        current = _content_fingerprint(root, path)
+        if previous is None or path in committed:
+            selected.append(path)
+            continue
+        if current != previous:
+            selected.append(path)
+            ambiguous.append(path)
+        else:
+            preexisting_unchanged.append(path)
+
+    return {
+        "task_id": state["task_id"],
+        "baseline_head": baseline_head,
+        "current_head": current_head,
+        "files": selected,
+        "count": len(selected),
+        "ambiguous_preexisting": ambiguous,
+        "excluded_preexisting_unchanged": preexisting_unchanged,
+    }
 
 
 def _canonical_action(action: str) -> str:
@@ -99,6 +176,10 @@ def task_data(root: Path, action: str) -> dict[str, Any]:
     action = _canonical_action(action)
     state = _read_state(root)
 
+    if action == "changes":
+        changes = task_changes(root)
+        return {"action": "changes", "active": True, "status": "active", **changes}
+
     if action == "status":
         if not state:
             return {"action": "status", "active": False, "status": "none"}
@@ -119,7 +200,7 @@ def task_data(root: Path, action: str) -> dict[str, Any]:
                 "a task is already active for this repository/worktree; continue it, or use "
                 "'agentq task next' only after the current outcome is independently acceptable"
             )
-        state = _new_state(now)
+        state = _new_state(root, now)
         _write_state(root, state)
         return {"action": "begin", "active": True, "status": "active", **state}
 
@@ -127,7 +208,7 @@ def task_data(root: Path, action: str) -> dict[str, Any]:
         if not state:
             raise AgentQError("no active task; use 'agentq task begin' before 'agentq task next'")
         completed = state
-        state = _new_state(now)
+        state = _new_state(root, now)
         _write_state(root, state)
         return {
             "action": "next",
@@ -170,6 +251,17 @@ def _duration(seconds: int | None) -> str:
 
 def render_task(data: dict[str, Any]) -> str:
     action = data.get("action")
+    if action == "changes":
+        files = data.get("files") or []
+        lines = [f"task changes: {len(files)} files"]
+        lines.extend(f"  {path}" for path in files)
+        excluded = data.get("excluded_preexisting_unchanged") or []
+        if excluded:
+            lines.append(f"excluded unchanged pre-task dirty files: {len(excluded)}")
+        ambiguous = data.get("ambiguous_preexisting") or []
+        if ambiguous:
+            lines.append(f"changed from already-dirty baseline: {len(ambiguous)} (attribution conservative)")
+        return "\n".join(lines)
     if action == "status":
         if not data.get("active"):
             return "no active task"

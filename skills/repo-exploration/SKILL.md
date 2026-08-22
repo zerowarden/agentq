@@ -1,84 +1,52 @@
 ---
 name: repo-exploration
-description: Use for repository maps, file discovery, unknown-symbol search, manifests, and bounded source reads. MUST use bundled agentq wrappers instead of raw tree, find, rg, grep, or whole-file reads. If a TypeScript/JavaScript symbol is already known, route to semantic-code-navigation before lexical search or repeated reads.
+description: Use for repository structure, unknown symbols, literals/configuration, file discovery, and bounded source reads. MUST use agentq rather than raw broad tree/find/rg/grep/cat. For an exact TypeScript/JavaScript symbol, use one agentq inspect/ts-nav overview operation rather than a lexical discovery ladder.
 license: MIT
-compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. ast-grep and Universal Ctags are optional.
+compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. TypeScript semantic inspection additionally requires Node.js and project TypeScript. ast-grep and Universal Ctags are optional.
 metadata:
-  version: "1.2.4"
+  version: "1.3.0"
   mutation: "none"
 ---
 
 # Repository Exploration
 
-```bash
-AQ=~/.agents/skills/repo-exploration/scripts/agentq
-```
-
 ## Mandatory tool policy
 
-For operations covered here, use `agentq` instead of raw `tree`, `find`, `rg`, `grep`, `cat`, or equivalent broad discovery commands. Fall back only when `agentq` cannot express the operation or fails; keep fallback output explicitly bounded.
+For operations covered here, use the PATH-installed `agentq`. Do not use raw broad `tree`, `find`, `rg`, `grep`, `cat`, or equivalent discovery unless agentq cannot express the operation or actually fails. Keep any fallback explicitly bounded.
 
-## Evidence ladder
+## Choose exactly one starting operation
 
-1. Map once if unfamiliar:
+Do not execute these as a ladder. Select the narrowest row matching what is already known.
 
-   ```bash
-   "$AQ" repo-map
-   ```
+| Known evidence | Start with | Purpose |
+|---|---|---|
+| Exact TS/JS symbol | `agentq inspect SYMBOL --path OWNER` | Definition, references, implementations and previews in one operation |
+| Exact TS/JS source position | `agentq ts-nav overview SYMBOL` when name is known; otherwise `agentq ts-nav references path.ts:LINE:COLUMN` | Semantic navigation without lexical rediscovery |
+| Identifier prefix / uncertain spelling | `agentq search PREFIX --path SCOPE` | Declaration candidates and grouped lexical usage |
+| String, SQL fragment, route, config key/value | `agentq search 'LITERAL' --path SCOPE --context 3` | Contextual lexical snippets |
+| Known file/range | `agentq read FILE:START-END` | Only required source |
+| Known file but unknown structure | `agentq outline FILE --match 'PATTERN'` | Structural landmarks before reading |
+| Unknown repository layout | `agentq repo-map` | One compact repository map |
+| Filename/path fragment only | `agentq files FRAGMENT --path SCOPE` | Locate candidate paths |
 
-2. Locate paths before contents:
+`search --view auto` is normally sufficient. Do not add `--limit`, `--budget`, or `--samples-per-file` on the first call unless the task itself requires a hard bound different from the defaults.
 
-   ```bash
-   "$AQ" files assignment-offer --path packages --limit 40
-   ```
+## Stop conditions
 
-3. If an exact TypeScript/JavaScript identifier is known, switch immediately to semantic navigation:
-
-   ```bash
-   "$AQ" ts-nav references AssignmentOffer --path packages/contexts/dispatch
-   ```
-
-4. Otherwise search exact text; fixed-string is the default:
-
-   ```bash
-   "$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60
-   ```
-
-5. Inspect structure before opening many files:
-
-   ```bash
-   "$AQ" outline packages/contexts/dispatch/src --match 'Offer|Assignment' --limit 100
-   ```
-
-6. Read only necessary ranges:
-
-   ```bash
-   "$AQ" read packages/contexts/dispatch/src/offers.ts:40-150 --max-lines 140
-   "$AQ" read packages/contexts/dispatch/src/offers.ts --around 220 --context 30
-   ```
-
-7. Before a second overlapping or non-adjacent read of the same source file, narrow first: `ts-nav` for a known TS/JS symbol, otherwise `outline --match` or a more specific `search`. Direct continuation of a truncated adjacent range is fine.
+- A complete contextual search result answers an exact literal/config lookup: stop; do not read the same lines again.
+- `inspect`/`ts-nav overview` returns the declaration and relevant semantic callers: read only a declaration/body range that is actually required for implementation.
+- If output says `coverage sampled`, narrow scope before raising limits.
+- If symbol resolution is ambiguous, narrow `--path` or use the numbered `--pick`; do not restart discovery from repository root.
+- Do not run `repo-map` when the owning path is already known.
+- Do not run `files` before `search` when the search scope is already known.
+- Do not run `locate`, `definition`, `references`, and `implementations` sequentially; use `overview`/`inspect`.
+- Batch independent exact reads in one invocation: `agentq read a.ts:20-70 b.ts:90-140 c.ts:1-45`.
+- A fully repeated unchanged range may be suppressed. Use `--repeat` only when the actual source must be emitted again.
 
 ## Task measurement
 
-A task is one independently acceptable implementation, fix, refactor, or review outcome. It is not one prompt, edit, test run, or Codex thread.
-
-- Keep clarification, implementation, debugging, correction, and verification for the same outcome inside one task.
-- One long-lived Codex thread may contain several sequential tasks.
-- Start another task only when the previous outcome could be accepted independently and the next requested outcome is distinct.
-- When continuing in the same thread, rotate atomically:
-
-  ```bash
-  agentq task next
-  ```
-
-- Use `agentq task abandon` only when the outcome is intentionally cancelled or discarded.
-- Do not create task boundaries for status questions, individual edits, failing checks, or verification retries.
+A task is one independently acceptable implementation, fix, refactor, or review outcome, not a prompt, edit, test run, or Codex thread. Keep investigation, implementation, debugging and verification for one outcome in the same task. One thread may contain several sequential tasks; use `agentq task next` only after the current outcome could be accepted independently.
 
 ## Output discipline
 
-- Default model-visible output is globally capped by `--budget 12000`; narrow scope before raising it.
-- If output is truncated, narrow by package, path, type, glob, symbol, or literal.
-- Do not read generated output, lockfiles, snapshots, or vendored dependencies unless required.
-- Sensitive paths are excluded by default.
-- Stop once ownership, implementation, relevant callers, and tests are identified.
+Paths are grouped once per search file block. Search totals describe repository coverage separately from rendered samples. Sensitive paths remain excluded by default. Stop once ownership, implementation, relevant callers and tests are established.

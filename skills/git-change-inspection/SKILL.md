@@ -4,15 +4,11 @@ description: Use for Git status, diff, history, patch review, and high-signal pa
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Git. Difftastic is optional for one-file syntax-aware diffs.
 metadata:
-  version: "1.2.1"
+  version: "1.3.0"
   mutation: "none"
 ---
 
 # Git Change Inspection
-
-```bash
-AQ=~/.agents/skills/git-change-inspection/scripts/agentq
-```
 
 ## Mandatory tool policy
 
@@ -22,29 +18,29 @@ Use `agentq git-*` for Git inspection covered by this skill. Do not issue raw un
 
 1. Establish state:
    ```bash
-   "$AQ" git-status --limit 80
+   agentq git-status --limit 80
    ```
 2. Read summaries before patch bodies:
    ```bash
-   "$AQ" git-diff
-   "$AQ" git-diff --staged
-   "$AQ" git-diff --base origin/main
+   agentq git-diff
+   agentq git-diff --staged
+   agentq git-diff --base origin/main
    ```
 3. Request patch text only for relevant scope:
    ```bash
-   "$AQ" git-diff --patch --path apps/api/src/routes --max-lines 500
+   agentq git-diff --patch --path apps/api/src/routes --max-lines 500
    ```
 4. Use structural diff only for a dense single file:
    ```bash
-   "$AQ" git-structural apps/api/src/routes/jobs.ts --max-lines 400
+   agentq git-structural apps/api/src/routes/jobs.ts --max-lines 400
    ```
 5. Inspect bounded history only when intent/regression origin matters:
    ```bash
-   "$AQ" git-history --path packages/contexts/dispatch --limit 15
+   agentq git-history --path packages/contexts/dispatch --limit 15
    ```
 6. Before handoff, run the integrated mechanical audit:
    ```bash
-   "$AQ" audit
+   agentq audit
    ```
 
 ## Guardrails

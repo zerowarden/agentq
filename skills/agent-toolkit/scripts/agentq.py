@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -25,6 +27,7 @@ from agentq_lib.gitops import (
     structural_diff_data,
 )
 from agentq_lib.impact import impact_data, render_impact
+from agentq_lib.inspectops import inspect_data, render_inspect
 from agentq_lib.runops import render_run, run_compact
 from agentq_lib.search import (
     files_data,
@@ -38,7 +41,7 @@ from agentq_lib.search import (
     repo_map_data,
     search_data,
 )
-from agentq_lib.tasking import render_task, task_data
+from agentq_lib.tasking import render_task, task_changes, task_data
 from agentq_lib.telemetry import (
     archive_hot_events,
     install_persistence,
@@ -59,7 +62,26 @@ from agentq_lib.testplan import render_test_plan, test_plan_data
 from agentq_lib.tsnav import render_ts_nav, ts_nav_data
 from agentq_lib.verifychanged import render_verify_changed, verify_changed_data
 
-Formatter = Callable[[dict[str, Any]], str]
+Formatter = Callable[..., str]
+
+
+class AgentQArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> None:
+        raise AgentQError(f"invalid arguments: {message}; run '{self.prog} --help' for supported syntax")
+
+
+def line_range(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)(?::|-)(\d+)", value.strip())
+    if not match:
+        raise argparse.ArgumentTypeError("must be START:END or START-END")
+    start, end = int(match.group(1)), int(match.group(2))
+    if start < 1 or end < start:
+        raise argparse.ArgumentTypeError("must satisfy 1 <= START <= END")
+    return start, end
 
 
 def positive_int(value: str) -> int:
@@ -90,7 +112,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 
 
 def add_scope(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--path", dest="paths", action="append", default=[], help="scope to a file/directory; repeatable")
+    parser.add_argument("--path", dest="paths", nargs="+", action="extend", default=[], help="scope to one or more files/directories; repeatable")
 
 
 def add_sensitive(parser: argparse.ArgumentParser) -> None:
@@ -104,23 +126,72 @@ def add_plan_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--include-build", action="store_true", help="include package build scripts")
 
 
+def _json_skeleton(value: Any, *, max_string: int = 800) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_skeleton(item, max_string=max_string) for key, item in value.items() if not isinstance(item, list)}
+    if isinstance(value, list):
+        return []
+    if isinstance(value, str) and len(value) > max_string:
+        return value[: max_string - 16] + " …[truncated]"
+    return value
+
+
+def _bounded_json(data: dict[str, Any], budget: int) -> tuple[str, bool]:
+    full = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if budget <= 0 or len(full) <= budget:
+        return full, False
+    bounded = _json_skeleton(data)
+    omitted: dict[str, int] = {}
+    bounded["_agentq"] = {
+        "truncated": True,
+        "original_chars": len(full),
+        "budget": budget,
+        "omitted": omitted,
+    }
+    preferred = ("items", "results", "hits", "files", "steps", "matches", "candidates", "packages", "recent", "commands")
+    keys = [key for key in preferred if isinstance(data.get(key), list)]
+    keys += [key for key, value in data.items() if isinstance(value, list) and key not in keys]
+    for key in keys:
+        source = data.get(key) or []
+        target: list[Any] = []
+        bounded[key] = target
+        for item in source:
+            target.append(item)
+            candidate = json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
+            if len(candidate) > max(256, budget - 80):
+                target.pop()
+                break
+        if len(target) < len(source):
+            omitted[key] = len(source) - len(target)
+    visible = json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
+    if len(visible) > budget:
+        minimal = {
+            "_agentq": {
+                "truncated": True, "original_chars": len(full), "budget": budget,
+                "omitted": {key: len(value) for key, value in data.items() if isinstance(value, list)},
+            }
+        }
+        for key, value in data.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                minimal[key] = value[:160] + "…" if isinstance(value, str) and len(value) > 160 else value
+        visible = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+    return visible, True
+
+
 def emit(args: argparse.Namespace, data: dict[str, Any], formatter: Formatter) -> None:
     if args.format == "json":
         full = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        truncated = args.budget > 0 and len(full) > args.budget
-        if truncated:
-            visible = json.dumps({
-                "truncated": True,
-                "reason": "structured output exceeds agentq character budget",
-                "chars": len(full),
-                "budget": args.budget,
-                "hint": "narrow scope or explicitly raise --budget",
-            }, ensure_ascii=False, separators=(",", ":"))
-        else:
-            visible = full
+        visible, truncated = _bounded_json(data, args.budget)
     else:
         full = formatter(data).rstrip()
-        visible, truncated = bound_output(full, args.budget)
+        if "budget" in inspect.signature(formatter).parameters:
+            visible = formatter(data, budget=args.budget).rstrip()
+            truncated = len(visible) < len(full) or "omitted by render budget" in visible
+            if args.budget > 0 and len(visible) > args.budget:
+                visible, hard_cut = bound_output(visible, args.budget)
+                truncated = truncated or hard_cut
+        else:
+            visible, truncated = bound_output(full, args.budget)
     print(visible)
     args._agentq_data = data
     args._agentq_render_meta = {
@@ -131,7 +202,7 @@ def emit(args: argparse.Namespace, data: dict[str, Any], formatter: Formatter) -
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = AgentQArgumentParser(
         prog="agentq",
         description="Privacy-preserving, token-bounded repository tools for coding agents.",
     )
@@ -158,13 +229,13 @@ def build_parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default="status",
-        choices=("begin", "status", "accept", "abandon", "next", "start", "current", "done", "drop"),
+        choices=("begin", "status", "changes", "accept", "abandon", "next", "start", "current", "done", "drop", "cancel"),
     )
 
     p = sub.add_parser("stats", help="visualize local agentq activity and output suppression")
     add_common(p)
     p.add_argument("--since", default="7d", help="all, or duration such as 24h, 7d, or 4w")
-    p.add_argument("--detailed", action="store_true", help="show recent activity and extended diagnostic detail")
+    p.add_argument("--detailed", "--detail", dest="detailed", action="store_true", help="show recent activity and extended diagnostic detail")
     p.add_argument("--recent", type=nonnegative_int, default=None, help="recent rows to show; implies --detailed; default 8")
     p.add_argument("--operation", action="append", default=[], help="filter by operation; repeatable")
     p.add_argument("--all-repos", action="store_true", help="aggregate all locally observed repositories")
@@ -198,8 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", choices=("smart", "sensitive", "insensitive"), default="smart")
     p.add_argument("--glob", action="append", default=[])
     p.add_argument("--type", dest="types", action="append", default=[])
-    p.add_argument("--limit", type=positive_int, default=80)
-    p.add_argument("--per-file", type=positive_int, default=8)
+    p.add_argument("--limit", "--max-results", dest="limit", type=positive_int, default=80)
+    p.add_argument("--per-file", "--samples-per-file", dest="per_file", type=positive_int, default=8)
+    p.add_argument("--max-files", type=positive_int, default=40)
+    p.add_argument("--view", choices=("auto", "summary", "snippets", "matches"), default="auto")
+    p.add_argument("--scan-cap", type=positive_int, default=5000, help=argparse.SUPPRESS)
     p.add_argument("--context", type=nonnegative_int, default=0)
     p.add_argument("--max-chars", type=positive_int, default=240)
 
@@ -207,12 +281,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p); add_sensitive(p)
     p.add_argument("files", nargs="+")
     p.add_argument("--start", type=positive_int)
+    p.add_argument("--lines", dest="lines_spec", type=line_range, help="compatibility range syntax START:END")
     p.add_argument("--end", type=positive_int)
     p.add_argument("--around", type=positive_int)
     p.add_argument("--context", type=nonnegative_int, default=20)
     p.add_argument("--max-lines", type=positive_int, default=240)
     p.add_argument("--max-chars", type=positive_int, default=260)
     p.add_argument("--allow-outside", action="store_true", help="explicitly permit reads outside the repository")
+    p.add_argument("--repeat", action="store_true", help="force output for an unchanged range already returned in the active context")
 
     p = sub.add_parser("repo-map", help="compact repository/workspace map")
     add_common(p)
@@ -239,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--base")
     scope.add_argument("--range", dest="range_value")
     p.add_argument("--patch", action="store_true")
+    p.add_argument("--task", dest="task_scope", action="store_true", help="restrict paths to changes since the active agentq task baseline")
     p.add_argument("--context", type=nonnegative_int, default=2)
     p.add_argument("--max-files", type=positive_int, default=40)
     p.add_argument("--max-hunks", type=positive_int, default=60)
@@ -296,11 +373,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("test-plan", help="infer a workspace-aware verification ladder from changed files")
     add_common(p); add_plan_options(p)
+    p.add_argument("--task", dest="task_scope", action="store_true", help="plan only files changed since the active task baseline")
     p.add_argument("--limit", type=positive_int, default=60)
 
-    for name in ("verify-changed", "verified-changed"):
+    for name in ("verify-changed", "verified-changed", "verify-task"):
         p = sub.add_parser(name, help="plan and execute workspace-aware affected verification")
         add_common(p); add_plan_options(p)
+        p.add_argument("--task", dest="task_scope", action="store_true", help="verify only files changed since the active task baseline")
         p.add_argument("--dry-run", action="store_true", help="show the plan without running commands")
         p.add_argument("--continue-on-failure", action="store_true")
         p.add_argument("--timeout", type=positive_int, default=900, help="timeout per verification step")
@@ -318,7 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_common(p); add_scope(p)
-    p.add_argument("action", choices=("locate", "definition", "references", "implementations"))
+    p.add_argument("action", choices=("locate", "definition", "def", "references", "refs", "implementations", "impls", "overview"))
     p.add_argument("symbol_arg", nargs="?", metavar="SYMBOL", help="symbol name for symbol-first navigation")
     p.add_argument("--symbol", dest="symbol_option", help="symbol name; equivalent to the optional positional SYMBOL")
     p.add_argument("--file")
@@ -326,6 +405,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--column", type=positive_int)
     p.add_argument("--pick", type=positive_int, help="select a numbered symbol candidate when resolution is ambiguous")
     p.add_argument("--limit", type=positive_int, default=80)
+
+    p = sub.add_parser("inspect", help="single-entry repository inspection for symbols, literals, or files")
+    add_common(p); add_scope(p)
+    p.add_argument("target")
+    p.add_argument("--limit", "--max-results", dest="limit", type=positive_int, default=80)
+    p.add_argument("--context", type=nonnegative_int, default=2)
 
     p = sub.add_parser("audit", help="heuristic bounded audit of the current patch")
     add_common(p)
@@ -399,12 +484,16 @@ def execute(args: argparse.Namespace, root: Path) -> int:
     elif command == "search":
         data = search_data(root, args.query, args.paths, mode=args.mode, word=args.word, case=args.case,
                            globs=args.glob, types=args.types, limit=args.limit, per_file=args.per_file,
-                           context=args.context, max_chars=args.max_chars, include_sensitive=args.include_sensitive)
+                           context=args.context, max_chars=args.max_chars, include_sensitive=args.include_sensitive,
+                           view=args.view, max_files=args.max_files, scan_cap=args.scan_cap)
         emit(args, data, render_search)
     elif command == "read":
-        data = read_data(root, args.files, start=args.start, end=args.end, around=args.around,
+        line_start, line_end = args.lines_spec if args.lines_spec else (args.start, args.end)
+        if args.lines_spec and (args.start is not None or args.end is not None or args.around is not None):
+            raise AgentQError("--lines cannot be combined with --start, --end, or --around")
+        data = read_data(root, args.files, start=line_start, end=line_end, around=args.around,
                          context=args.context, max_lines=args.max_lines, max_chars=args.max_chars,
-                         include_sensitive=args.include_sensitive, allow_outside=args.allow_outside)
+                         include_sensitive=args.include_sensitive, allow_outside=args.allow_outside, repeat=args.repeat)
         emit(args, data, render_read)
     elif command == "repo-map":
         emit(args, repo_map_data(root, args.max_dirs, args.max_manifests), render_repo_map)
@@ -413,10 +502,28 @@ def execute(args: argparse.Namespace, root: Path) -> int:
     elif command == "git-status":
         emit(args, status_data(root, args.limit), render_status)
     elif command == "git-diff":
-        data = diff_data(root, staged=args.staged, unstaged=args.unstaged, base=args.base,
-                         range_value=args.range_value, paths=args.paths, patch=args.patch,
-                         context=args.context, max_files=args.max_files, max_hunks=args.max_hunks,
-                         max_lines=args.max_lines)
+        diff_paths = list(args.paths)
+        scoped = None
+        if args.task_scope:
+            scoped = task_changes(root)
+            diff_paths = sorted(set(diff_paths) & set(scoped["files"])) if diff_paths else list(scoped["files"])
+        if args.task_scope and not diff_paths:
+            data = {
+                "repo_root": str(root), "scope": "active-task", "total_files": 0,
+                "total_added": 0, "total_deleted": 0, "files": [], "files_truncated": False,
+                "diff_check_ok": True, "diff_check": [],
+            }
+            if args.patch:
+                data.update({"patch": "", "patch_stats": {}, "patch_truncated": False})
+        else:
+            data = diff_data(root, staged=args.staged, unstaged=args.unstaged, base=args.base,
+                             range_value=args.range_value, paths=diff_paths, patch=args.patch,
+                             context=args.context, max_files=args.max_files, max_hunks=args.max_hunks,
+                             max_lines=args.max_lines)
+        if args.task_scope:
+            data["task_scope"] = True
+            data["task_ambiguous_preexisting"] = list((scoped or {}).get("ambiguous_preexisting", []))
+            data["preexisting_unchanged_excluded"] = len((scoped or {}).get("excluded_preexisting_unchanged", []))
         emit(args, data, render_diff)
     elif command == "git-history":
         emit(args, history_data(root, args.limit, args.paths), render_history)
@@ -445,36 +552,59 @@ def execute(args: argparse.Namespace, root: Path) -> int:
                            offline=args.offline)
         emit(args, data, render_run)
     elif command == "test-plan":
+        scoped = task_changes(root) if args.task_scope else None
         data = test_plan_data(root, base=args.base, limit=args.limit, mode=args.mode,
-                              dependents=args.dependents, include_build=args.include_build)
+                              dependents=args.dependents, include_build=args.include_build,
+                              changed_override=list(scoped["files"]) if scoped else None)
+        if scoped:
+            data["task_scope"] = True
+            data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
         emit(args, data, render_test_plan)
-    elif command in {"verify-changed", "verified-changed"}:
+    elif command in {"verify-changed", "verified-changed", "verify-task"}:
+        task_scoped = command == "verify-task" or args.task_scope
+        scoped = task_changes(root) if task_scoped else None
         data = verify_changed_data(
             root, base=args.base, mode=args.mode, dependents=args.dependents,
             include_build=args.include_build, dry_run=args.dry_run,
             continue_on_failure=args.continue_on_failure, timeout=args.timeout,
             max_steps=args.max_steps, max_diagnostics=args.max_diagnostics,
             offline=args.offline, skip_lint=args.skip_lint,
+            changed_files_override=list(scoped["files"]) if scoped else None,
         )
+        if scoped:
+            data["task_scope"] = True
+            data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
+            data["preexisting_unchanged_excluded"] = len(scoped.get("excluded_preexisting_unchanged", []))
         emit(args, data, render_verify_changed)
         return int(data.get("exit_code", 0))
     elif command == "ts-nav":
+        action = {"refs": "references", "def": "definition", "impls": "implementations"}.get(args.action, args.action)
         if args.symbol_arg and args.symbol_option:
             raise AgentQError("provide SYMBOL either positionally or with --symbol, not both")
         symbol = args.symbol_option or args.symbol_arg
+        # Compatibility with the common `path.ts:line:column` form.
+        if symbol and not args.symbol_option:
+            position = re.fullmatch(r"(.+):(\d+):(\d+)", symbol)
+            if position and (root / position.group(1)).exists():
+                args.file, args.line, args.column = position.group(1), int(position.group(2)), int(position.group(3))
+                symbol = None
         exact_values = (args.file, args.line, args.column)
         if symbol and any(value is not None for value in exact_values):
             raise AgentQError("symbol-first navigation cannot be combined with --file, --line, or --column")
-        if not symbol and args.action != "locate" and not all(value is not None for value in exact_values):
+        if not symbol and action in {"locate", "overview"}:
+            raise AgentQError(f"ts-nav {action} requires a symbol")
+        if not symbol and not all(value is not None for value in exact_values):
             raise AgentQError("provide SYMBOL/--symbol or all of --file, --line, and --column")
         emit(
             args,
             ts_nav_data(
-                root, args.action, args.file, args.line, args.column, args.limit,
+                root, action, args.file, args.line, args.column, args.limit,
                 symbol=symbol, paths=args.paths, pick=args.pick,
             ),
             render_ts_nav,
         )
+    elif command == "inspect":
+        emit(args, inspect_data(root, args.target, args.paths, limit=args.limit, context=args.context), render_inspect)
     elif command == "audit":
         emit(args, audit_data(root, staged=args.staged, base=args.base, max_findings=args.max_findings), render_audit)
     elif command == "benchmark":
@@ -485,11 +615,12 @@ def execute(args: argparse.Namespace, root: Path) -> int:
 
 
 def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
     start = time.perf_counter()
     root: Path | None = None
+    args: argparse.Namespace | None = None
     try:
+        parser = build_parser()
+        args = parser.parse_args()
         stats_repo_optional = (
             getattr(args, "command", None) == "stats"
             and any((
@@ -514,19 +645,27 @@ def main() -> int:
             prebudget_chars=int(meta.get("prebudget_chars", 0)),
             truncated=bool(meta.get("truncated", False)),
             data=data,
+            invocation=sys.argv[1:],
         )
         return exit_code
     except AgentQError as exc:
+        if root is None:
+            try:
+                root = repo_root(".")
+            except Exception:
+                root = None
         if root is not None:
             record_event(
                 root,
-                command=getattr(args, "command", "unknown"),
+                command=getattr(args, "command", "unknown") if args else (sys.argv[1] if len(sys.argv) > 1 else "unknown"),
                 duration_ms=round((time.perf_counter() - start) * 1000),
                 tool_status="error",
                 agentq_exit_code=2,
                 error_type=type(exc).__name__,
+                error_message=str(exc),
+                invocation=sys.argv[1:],
             )
-        if getattr(args, "format", "text") == "json":
+        if getattr(args, "format", "text") == "json" if args else False:
             print(json.dumps({"error": str(exc), "type": "AgentQError"}, indent=2), file=sys.stderr)
         else:
             print(f"agentq: {exc}", file=sys.stderr)

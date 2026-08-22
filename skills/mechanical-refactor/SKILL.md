@@ -4,29 +4,25 @@ description: Execute controlled mechanical renames, literal or regex replacement
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. ast-grep is required for syntax-aware transformations.
 metadata:
-  version: "1.2.1"
+  version: "1.3.0"
   mutation: "explicit-only"
 ---
 
 # Mechanical Refactor
-
-```bash
-AQ=~/.agents/skills/mechanical-refactor/scripts/agentq
-```
 
 ## Required sequence
 
 1. Inspect the current Git state and refuse to conflate unrelated edits:
 
    ```bash
-   "$AQ" git-status
+   agentq git-status
    ```
 
 2. Count and sample without mutation:
 
    ```bash
-   "$AQ" codemod-scan 'OldName' --path packages --samples 15
-   "$AQ" codemod-scan '$A && $A()' --mode ast --lang ts --rewrite '$A?.()' --path apps/web
+   agentq codemod-scan 'OldName' --path packages --samples 15
+   agentq codemod-scan '$A && $A()' --mode ast --lang ts --rewrite '$A?.()' --path apps/web
    ```
 
 3. Confirm that representative matches cover every intended syntactic and semantic shape. Separate heterogeneous cases rather than using one clever regex.
@@ -34,13 +30,13 @@ AQ=~/.agents/skills/mechanical-refactor/scripts/agentq
 4. Run the apply command without `--apply` once. Add an expected-count guard when the count is stable:
 
    ```bash
-   "$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37
+   agentq codemod-apply 'OldName' 'NewName' --path packages --expect-count 37
    ```
 
 5. Mutate only with explicit authorization from the task:
 
    ```bash
-   "$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37 --apply
+   agentq codemod-apply 'OldName' 'NewName' --path packages --expect-count 37 --apply
    ```
 
 6. Inspect a bounded diff and run the smallest relevant formatter, typecheck, and tests.

@@ -88,8 +88,9 @@ def test_plan_data(
     mode: str = "standard",
     dependents: str = "auto",
     include_build: bool = False,
+    changed_override: list[str] | None = None,
 ) -> dict[str, Any]:
-    changed = changed_files(root, base)
+    changed = sorted(set(changed_override)) if changed_override is not None else changed_files(root, base)
     packages = discover_workspace(root)
     manager = package_manager(root)
     forward, reverse = workspace_graph(packages)

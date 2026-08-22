@@ -217,7 +217,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         link.symlink_to(AGENTQ)
         result = subprocess.run([str(link), "--version"], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertIn("agentq 1.2.4", result.stdout)
+        self.assertIn("agentq 1.3.0", result.stdout)
 
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -607,13 +607,18 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(located["total"], 1)
         self.assertEqual(located["candidates"][0]["path"], "packages/a/src/index.ts")
 
-        refs = self.data("ts-nav", "references", "OldName", "--path", "packages")
+        refs = self.data("ts-nav", "refs", "OldName", "--path", "packages")
         self.assertEqual(refs["resolution_mode"], "symbol")
         self.assertGreaterEqual(refs["total"], 2)
         paths = {item["path"] for item in refs["results"]}
         self.assertIn("packages/b/src/index.ts", paths)
 
-        exact = self.data("ts-nav", "references", "--file", "packages/a/src/index.ts", "--line", "1", "--column", "18")
+        overview = self.data("ts-nav", "overview", "OldName", "--path", "packages")
+        self.assertEqual(overview["resolution_mode"], "symbol")
+        self.assertIn("references", overview)
+        self.assertIn("declaration_span", overview)
+
+        exact = self.data("ts-nav", "references", "packages/a/src/index.ts:1:18")
         self.assertEqual(exact["resolution_mode"], "position")
         self.assertGreaterEqual(exact["total"], 2)
 
@@ -628,9 +633,114 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(picked["candidate_count"], 2)
 
         stats = self.data("stats", "--since", "all")
-        self.assertEqual(stats["navigation"]["semantic_calls"], 5)
+        self.assertEqual(stats["navigation"]["semantic_calls"], 6)
         self.assertEqual(stats["navigation"]["semantic_actions"]["references"], 4)
+        self.assertEqual(stats["navigation"]["semantic_actions"]["overview"], 1)
         self.assertEqual(stats["navigation"]["semantic_ambiguous"], 1)
+
+
+    def test_compatibility_aliases_avoid_common_agent_cli_failures(self) -> None:
+        read = self.data("read", "packages/a/src/index.ts", "--lines", "1:3")
+        self.assertEqual(read["items"][0]["start"], 1)
+        self.assertEqual(read["items"][0]["end"], 3)
+
+        search = self.data(
+            "search", "OldName", "--path", "packages/a", "packages/b",
+            "--max-results", "180", "--samples-per-file", "20",
+        )
+        self.assertGreaterEqual(search["matching_files"], 2)
+        self.assertGreaterEqual(search["total_matching_lines"], 3)
+
+        missing = self.aq("search", "OldName", "--path", "does/not/exist", expect=2)
+        self.assertIn("search path does not exist", missing.stderr)
+        self.assertNotIn("rg exited", missing.stderr)
+        self.assertNotIn("usage:", missing.stderr)
+
+    def test_search_totals_are_truthful_and_sampling_is_explicit(self) -> None:
+        path = self.repo / "packages/a/src/many.ts"
+        path.write_text("".join(f"export const sample{i} = 'Needle'\n" for i in range(12)), encoding="utf-8")
+        data = self.data(
+            "search", "Needle", "--path", "packages/a/src/many.ts",
+            "--samples-per-file", "3", "--max-results", "180",
+        )
+        self.assertEqual(data["total_matching_lines"], 12)
+        self.assertEqual(data["matching_files"], 1)
+        self.assertEqual(data["shown"], 3)
+        self.assertEqual(data["coverage"], "sampled")
+        self.assertEqual(data["match_file_summary"][0]["matching_lines"], 12)
+
+    def test_search_crops_around_match_and_classifies_config_generated(self) -> None:
+        long = self.repo / "packages/a/src/long.ts"
+        long.write_text("x" * 320 + "CENTER_NEEDLE" + "y" * 320 + "\n", encoding="utf-8")
+        cropped = self.data("search", "CENTER_NEEDLE", "--path", "packages/a/src/long.ts", "--max-chars", "80")
+        self.assertIn("CENTER_NEEDLE", cropped["hits"][0]["text"])
+
+        config = self.repo / "vitest.config.ts"
+        generated = self.repo / "packages/a/src/database.generated.ts"
+        config.write_text("export const marker = 'ROLE_MARK'\n", encoding="utf-8")
+        generated.write_text("export const marker = 'ROLE_MARK'\n", encoding="utf-8")
+        roles = self.data("search", "ROLE_MARK", "--samples-per-file", "10")
+        by_path = {item["path"]: item["role"] for item in roles["match_file_summary"]}
+        self.assertEqual(by_path["vitest.config.ts"], "config")
+        self.assertEqual(by_path["packages/a/src/database.generated.ts"], "generated")
+
+    def test_repeated_unchanged_read_is_suppressed_inside_task(self) -> None:
+        self.data("task", "begin")
+        first = self.data("read", "packages/a/src/index.ts:1-3")
+        self.assertEqual(len(first["items"][0]["lines"]), 3)
+        second = self.data("read", "packages/a/src/index.ts:1-3")
+        self.assertTrue(second["items"][0]["suppressed"])
+        self.assertEqual(second["items"][0]["lines"], [])
+        forced = self.data("read", "packages/a/src/index.ts:1-3", "--repeat")
+        self.assertEqual(len(forced["items"][0]["lines"]), 3)
+
+    def test_task_changes_excludes_unchanged_preexisting_dirty_files(self) -> None:
+        self.change_a("\nexport const beforeTask = true\n")
+        self.data("task", "begin")
+        initial = self.data("task", "changes")
+        self.assertEqual(initial["files"], [])
+        self.assertIn("packages/a/src/index.ts", initial["excluded_preexisting_unchanged"])
+        task_diff = self.data("git-diff", "--task")
+        self.assertEqual(task_diff["total_files"], 0)
+        task_verify = self.data("verify-task", "--dry-run")
+        self.assertEqual(task_verify["changed_files"], [])
+
+        self.change_a("\nexport const duringTask = true\n")
+        current = self.data("task", "changes")
+        self.assertIn("packages/a/src/index.ts", current["files"])
+        self.assertIn("packages/a/src/index.ts", current["ambiguous_preexisting"])
+
+    def test_telemetry_records_private_fingerprints_transitions_and_coverage(self) -> None:
+        secret = "QUERY_THAT_MUST_NOT_APPEAR_74ca"
+        self.data("task", "begin")
+        self.data("search", secret)
+        self.data("read", "packages/a/src/index.ts:1-2")
+        self.data("task", "accept")
+        stats = self.data("stats", "--since", "all", "--detailed")
+        self.assertGreaterEqual(stats["invocation_chars"], 1)
+        self.assertTrue(any(item["transition"] == "search → read" for item in stats["transitions"]))
+        self.assertIsNotNone(stats["tasks"]["calls_distribution"]["p50"])
+        self.assertIn("instrumented_call_percent", stats["measurement"])
+        raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn(secret, raw)
+        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        search_event = next(event for event in events if event.get("command") == "search")
+        self.assertIn("query_fingerprint", search_event["metrics"])
+
+    def test_budgeted_json_keeps_useful_data(self) -> None:
+        path = self.repo / "packages/a/src/many-budget.ts"
+        path.write_text("".join(f"export const n{i} = 'BUDGET_HIT'\n" for i in range(80)), encoding="utf-8")
+        argv = [
+            str(AGENTQ), "search", "--repo", str(self.repo), "--format", "json",
+            "--budget", "900", "BUDGET_HIT", "--path", "packages/a/src/many-budget.ts",
+            "--max-results", "80", "--samples-per-file", "80",
+        ]
+        result = subprocess.run(argv, text=True, capture_output=True, env=self.env)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["query"], "BUDGET_HIT")
+        self.assertTrue(data["_agentq"]["truncated"])
+        self.assertIn("total_matching_lines", data)
 
     def test_benchmark_fallback_or_hyperfine(self) -> None:
         data = self.data("benchmark", "--warmup", "0", "--runs", "2", "--command", "python3 -c 'pass'")
