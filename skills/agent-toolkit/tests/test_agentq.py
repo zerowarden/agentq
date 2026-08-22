@@ -215,7 +215,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         link.symlink_to(AGENTQ)
         result = subprocess.run([str(link), "--version"], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertIn("agentq 1.2.1", result.stdout)
+        self.assertIn("agentq 1.2.2", result.stdout)
 
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -358,6 +358,58 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertLessEqual(stats["window_end"] - stats["window_start"], 7 * 86400 + 2)
         raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
         self.assertNotIn(thread, raw)
+
+    def test_read_overlap_is_version_aware_and_private(self) -> None:
+        self.data("task", "begin")
+        first = self.data("read", "packages/a/src/index.ts:1-3")
+        self.assertNotIn("read_overlap", first)
+        second = self.data("read", "packages/a/src/index.ts:2-4")
+        self.assertEqual(second["read_overlap"]["overlap_lines"], 2)
+        self.assertEqual(second["read_overlap"]["scope"], "task")
+
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["reads"]["tracked_calls"], 2)
+        self.assertEqual(stats["reads"]["unique_files"], 1)
+        self.assertEqual(stats["reads"]["reread_ranges"], 1)
+        self.assertEqual(stats["reads"]["overlap_lines"], 2)
+
+        raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("packages/a/src/index.ts", raw)
+
+        path = self.repo / "packages/a/src/index.ts"
+        path.write_text(path.read_text(encoding="utf-8") + "\nexport const versionChanged = 1\n", encoding="utf-8")
+        third = self.data("read", "packages/a/src/index.ts:2-4")
+        self.assertNotIn("read_overlap", third)
+
+    def test_explicit_task_boundaries_produce_per_accepted_task_metrics(self) -> None:
+        begin = self.data("task", "begin")
+        self.assertEqual(begin["status"], "active")
+        status = self.data("task", "status")
+        self.assertTrue(status["active"])
+        self.data("search", "OldName")
+        self.data("read", "packages/a/src/index.ts:1-3")
+        accepted = self.data("task", "accept")
+        self.assertEqual(accepted["status"], "accepted")
+
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["tasks"]["accepted"], 1)
+        self.assertEqual(stats["tasks"]["active"], 0)
+        self.assertEqual(stats["tasks"]["attributed_calls"], 2)
+        self.assertEqual(stats["tasks"]["accepted_operation_calls"], 2)
+        self.assertEqual(stats["tasks"]["calls_per_accepted_task"], 2.0)
+        self.assertEqual(stats["tasks"]["reads_per_accepted_task"], 1.0)
+        self.assertGreater(stats["tasks"]["token_proxy_per_accepted_task"], 0)
+        self.assertNotIn("task", {row["command"] for row in stats["commands"]})
+
+    def test_task_state_is_repo_scoped_not_codex_thread_scoped(self) -> None:
+        self.data("task", "begin")
+        self.data("search", "OldName", extra_env={"CODEX_THREAD_ID": "thread-a"})
+        self.data("search", "Wrapped", extra_env={"CODEX_THREAD_ID": "thread-b"})
+        self.data("task", "accept")
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["tasks"]["accepted"], 1)
+        self.assertEqual(stats["tasks"]["attributed_calls"], 2)
+        self.assertEqual(stats["threads"], 2)
 
     def test_stats_plain_render_uses_semantic_markers_and_local_window(self) -> None:
         self.data("run", "--", "python3", "-c", "raise SystemExit(3)")

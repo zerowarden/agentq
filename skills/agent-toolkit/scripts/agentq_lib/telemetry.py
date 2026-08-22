@@ -19,9 +19,10 @@ from statistics import median
 from typing import Any, Iterable
 
 from .common import AgentQError, bound_output, human_bytes
+from .tasking import current_task_id, current_task_state
 
-SCHEMA = 2
-ACCEPTED_SCHEMAS = {1, 2}
+SCHEMA = 3
+ACCEPTED_SCHEMAS = {1, 2, 3}
 MAX_EVENT_BYTES = 4096
 MAX_HOT_BYTES = 10 * 1024 * 1024
 SPARKS = "▁▂▃▄▅▆▇█"
@@ -112,10 +113,49 @@ def _metric_int(data: dict[str, Any], key: str) -> int:
     return 0
 
 
-def event_metrics(command: str, data: dict[str, Any] | None) -> dict[str, int | float | str | bool]:
+def _read_path_id(root: Path, path_text: str) -> str:
+    return hashlib.sha256(f"{_repo_id(root)}:{path_text}".encode("utf-8")).hexdigest()[:16]
+
+
+def _read_version_id(path: Path) -> str:
+    try:
+        stat_result = path.stat()
+        payload = f"{stat_result.st_size}:{stat_result.st_mtime_ns}"
+    except OSError:
+        payload = "unknown"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_ranges(root: Path, data: dict[str, Any] | None, *, limit: int = 24) -> list[dict[str, Any]]:
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return []
+    ranges: list[dict[str, Any]] = []
+    for item in data["items"]:
+        if not isinstance(item, dict) or item.get("refused"):
+            continue
+        path_text = item.get("path")
+        start = item.get("start")
+        end = item.get("end")
+        if not isinstance(path_text, str) or not isinstance(start, int) or not isinstance(end, int):
+            continue
+        path = Path(path_text)
+        actual = path if path.is_absolute() else root / path
+        ranges.append({
+            "file": _read_path_id(root, path_text),
+            "version": _read_version_id(actual),
+            "start": max(1, start),
+            "end": max(start, end),
+            "lines": max(0, end - start + 1),
+        })
+        if len(ranges) >= limit:
+            break
+    return ranges
+
+
+def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
-    metrics: dict[str, int | float | str | bool] = {}
+    metrics: dict[str, Any] = {}
     for key in (
         "shown", "total", "files", "matches", "changed_files", "changed_packages",
         "dependent_packages", "affected_packages", "planned_steps", "executed_steps",
@@ -137,6 +177,17 @@ def event_metrics(command: str, data: dict[str, Any] | None) -> dict[str, int | 
         metrics["child_exit_code"] = data["exit_code"]
         if bool(data.get("timed_out")):
             metrics["child_timed_out"] = True
+    if command == "read":
+        ranges = _read_ranges(root, data)
+        if ranges:
+            metrics["read_ranges"] = ranges
+            metrics["read_range_count"] = len(ranges)
+            metrics["read_lines"] = sum(int(item["lines"]) for item in ranges)
+    if command == "task":
+        if isinstance(data.get("action"), str):
+            metrics["task_action"] = data["action"]
+        if isinstance(data.get("status"), str):
+            metrics["task_status"] = data["status"]
     return metrics
 
 
@@ -171,9 +222,11 @@ def record_event(
     """Append privacy-minimized local telemetry. Never raises into agent work."""
     if not telemetry_enabled() or command == "stats":
         return
+    if command == "task" and isinstance(data, dict) and data.get("action") == "status":
+        return
     try:
         canonical = "verify-changed" if command == "verified-changed" else command
-        metrics = event_metrics(canonical, data)
+        metrics = event_metrics(root, canonical, data)
         source_chars = int(metrics.get("raw_output_chars") or metrics.get("output_chars") or 0)
         source_lines = int(metrics.get("raw_output_lines") or metrics.get("output_lines") or 0)
         subject_status, subject_exit_code = _subject_status(canonical, data)
@@ -184,6 +237,7 @@ def record_event(
             "repo_id": _repo_id(root),
             "repo_name": root.name[:80],
             "thread_id": _codex_thread_id(),
+            "task_id": (str(data.get("task_id")) if canonical == "task" and isinstance(data, dict) and data.get("task_id") else current_task_id(root)),
             "command": canonical,
             "tool_status": "ok" if tool_status == "ok" else "error",
             "agentq_exit_code": int(agentq_exit_code),
@@ -208,6 +262,10 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     schema = int(event.get("schema", 1))
     if schema == SCHEMA:
         return event
+    if schema == 2:
+        converted = dict(event)
+        converted.update({"schema": SCHEMA, "task_id": None})
+        return converted
 
     # v1 telemetry treated child/verification failures as agentq failures. Recover
     # the distinction when metrics contain the child/verification result.
@@ -230,6 +288,7 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     converted.update({
         "schema": SCHEMA,
         "thread_id": None,
+        "task_id": None,
         "tool_status": tool_status,
         "agentq_exit_code": 0 if tool_status == "ok" else 2,
         "subject_status": subject_status,
@@ -268,6 +327,143 @@ def load_events() -> tuple[list[dict[str, Any]], dict[str, int]]:
         source_name = "archive" if path == archive_file() else "hot"
         sources[source_name] = sources.get(source_name, 0) + count
     return sorted(by_id.values(), key=lambda item: float(item.get("time", 0))), sources
+
+
+def _range_overlap(intervals: list[tuple[int, int]], start: int, end: int) -> int:
+    overlap = 0
+    for existing_start, existing_end in intervals:
+        left = max(start, existing_start)
+        right = min(end, existing_end)
+        if left <= right:
+            overlap += right - left + 1
+    return min(max(0, end - start + 1), overlap)
+
+
+def _merge_interval(intervals: list[tuple[int, int]], start: int, end: int) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for current_start, current_end in sorted([*intervals, (start, end)]):
+        if not merged or current_start > merged[-1][1] + 1:
+            merged.append((current_start, current_end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], current_end))
+    return merged
+
+
+def read_efficiency(events: list[dict[str, Any]]) -> dict[str, Any]:
+    reads = [event for event in events if event.get("command") == "read"]
+    seen_files: set[str] = set()
+    coverage: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    total_lines = 0
+    overlap_lines = 0
+    range_count = 0
+    reread_ranges = 0
+    fully_redundant = 0
+    tracked_events = 0
+
+    for event in reads:
+        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
+        ranges = metrics.get("read_ranges") if isinstance(metrics.get("read_ranges"), list) else []
+        if ranges:
+            tracked_events += 1
+        for item in ranges:
+            if not isinstance(item, dict):
+                continue
+            file_id = item.get("file")
+            version = item.get("version")
+            start = item.get("start")
+            end = item.get("end")
+            if not isinstance(file_id, str) or not isinstance(version, str) or not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if end < start:
+                continue
+            range_count += 1
+            line_count = end - start + 1
+            total_lines += line_count
+            if file_id in seen_files:
+                reread_ranges += 1
+            seen_files.add(file_id)
+            key = (file_id, version)
+            prior = coverage[key]
+            overlap = _range_overlap(prior, start, end)
+            overlap_lines += overlap
+            if overlap >= line_count and line_count:
+                fully_redundant += 1
+            coverage[key] = _merge_interval(prior, start, end)
+
+    return {
+        "calls": len(reads),
+        "tracked_calls": tracked_events,
+        "ranges": range_count,
+        "unique_files": len(seen_files),
+        "reread_ranges": reread_ranges,
+        "total_lines": total_lines,
+        "unique_lines": max(0, total_lines - overlap_lines),
+        "overlap_lines": overlap_lines,
+        "overlap_percent": _percent(overlap_lines, total_lines),
+        "fully_redundant_ranges": fully_redundant,
+    }
+
+
+def read_overlap_advice(root: Path, data: dict[str, Any]) -> dict[str, Any] | None:
+    current_ranges = _read_ranges(root, data)
+    if not current_ranges:
+        return None
+    events, _ = load_events()
+    repo = _repo_id(root)
+    task_id = current_task_id(root)
+    thread_id = _codex_thread_id()
+    now = time.time()
+
+    prior_events: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("repo_id") != repo or event.get("command") != "read":
+            continue
+        if task_id:
+            if event.get("task_id") != task_id:
+                continue
+        elif thread_id:
+            if event.get("thread_id") != thread_id:
+                continue
+        elif now - float(event.get("time", 0)) > 30 * 60:
+            continue
+        prior_events.append(event)
+
+    prior_coverage: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    for event in prior_events:
+        metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
+        for item in metrics.get("read_ranges") or []:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("file", "")), str(item.get("version", "")))
+            start, end = item.get("start"), item.get("end")
+            if key[0] and key[1] and isinstance(start, int) and isinstance(end, int):
+                prior_coverage[key] = _merge_interval(prior_coverage[key], start, end)
+
+    overlapping = 0
+    overlap_lines = 0
+    fully_covered = 0
+    total_lines = 0
+    for item in current_ranges:
+        key = (str(item["file"]), str(item["version"]))
+        start, end = int(item["start"]), int(item["end"])
+        lines = end - start + 1
+        total_lines += lines
+        overlap = _range_overlap(prior_coverage.get(key, []), start, end)
+        if overlap:
+            overlapping += 1
+            overlap_lines += overlap
+        if overlap >= lines and lines:
+            fully_covered += 1
+
+    if not overlapping:
+        return None
+    return {
+        "overlapping_ranges": overlapping,
+        "overlap_lines": overlap_lines,
+        "overlap_percent": _percent(overlap_lines, total_lines),
+        "fully_covered_ranges": fully_covered,
+        "scope": "task" if task_id else "thread" if thread_id else "recent-session",
+    }
 
 
 def archive_hot_events() -> dict[str, Any]:
@@ -373,6 +569,47 @@ def _measurement(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def task_efficiency(
+    root: Path,
+    all_events: list[dict[str, Any]],
+    selected_events: list[dict[str, Any]],
+    operation_events: list[dict[str, Any]],
+    *,
+    all_repos: bool,
+) -> dict[str, Any]:
+    task_events = [event for event in selected_events if event.get("command") == "task" and event.get("task_id")]
+    starts = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "begin"}
+    accepted = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "accept"}
+    abandoned = {str(event["task_id"]) for event in task_events if (event.get("metrics") or {}).get("task_action") == "abandon"}
+    attributed = [event for event in operation_events if event.get("task_id")]
+
+    accepted_operations = [
+        event for event in all_events
+        if event.get("command") != "task" and event.get("task_id") in accepted
+    ]
+    accepted_visible = sum(int(event.get("visible_chars", 0)) for event in accepted_operations)
+    accepted_count = len(accepted)
+
+    active_state = None if all_repos else current_task_state(root)
+    return {
+        "started": len(starts),
+        "accepted": accepted_count,
+        "abandoned": len(abandoned),
+        "active": 1 if active_state else 0,
+        "attributed_calls": len(attributed),
+        "unattributed_calls": max(0, len(operation_events) - len(attributed)),
+        "attribution_percent": _percent(len(attributed), len(operation_events)),
+        "accepted_operation_calls": len(accepted_operations),
+        "accepted_visible_chars": accepted_visible,
+        "visible_chars_per_accepted_task": round(accepted_visible / accepted_count) if accepted_count else None,
+        "token_proxy_per_accepted_task": round(accepted_visible / 4 / accepted_count) if accepted_count else None,
+        "calls_per_accepted_task": round(len(accepted_operations) / accepted_count, 1) if accepted_count else None,
+        "reads_per_accepted_task": round(sum(event.get("command") == "read" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
+        "runs_per_accepted_task": round(sum(event.get("command") == "run" for event in accepted_operations) / accepted_count, 1) if accepted_count else None,
+        "note": "Task metrics require explicit agentq task begin/accept boundaries; Codex threads are not treated as tasks.",
+    }
+
+
 def stats_data(
     root: Path,
     *,
@@ -391,11 +628,12 @@ def stats_data(
         event for event in events
         if (cutoff is None or float(event.get("time", 0)) >= cutoff)
         and (all_repos or event.get("repo_id") == repo_id)
-        and (not operations or event.get("command") in operations)
+        and (not operations or event.get("command") in operations or event.get("command") == "task")
     ]
+    operation_events = [event for event in selected if event.get("command") != "task"]
 
     commands: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for event in selected:
+    for event in operation_events:
         commands[str(event.get("command", "unknown"))].append(event)
 
     command_rows: list[dict[str, Any]] = []
@@ -425,14 +663,14 @@ def stats_data(
             "suppressed_chars": measurement["avoided_chars"],
         })
 
-    visible_chars = sum(int(event.get("visible_chars", 0)) for event in selected)
-    measurement = _measurement(selected)
-    tool_ok = sum(event.get("tool_status") == "ok" for event in selected)
-    tool_errors = len(selected) - tool_ok
-    thread_ids = {str(event["thread_id"]) for event in selected if event.get("thread_id")}
-    fallback_sessions = _gap_session_count(selected)
+    visible_chars = sum(int(event.get("visible_chars", 0)) for event in operation_events)
+    measurement = _measurement(operation_events)
+    tool_ok = sum(event.get("tool_status") == "ok" for event in operation_events)
+    tool_errors = len(operation_events) - tool_ok
+    thread_ids = {str(event["thread_id"]) for event in operation_events if event.get("thread_id")}
+    fallback_sessions = _gap_session_count(operation_events)
 
-    project_run_events = [event for event in selected if event.get("command") == "run"]
+    project_run_events = [event for event in operation_events if event.get("command") == "run"]
     project_commands = {
         "runs": len(project_run_events),
         "passed": sum(event.get("subject_status") == "passed" for event in project_run_events),
@@ -440,7 +678,7 @@ def stats_data(
         "timed_out": sum(event.get("subject_status") == "timeout" for event in project_run_events),
     }
 
-    verification_events = [event for event in selected if event.get("command") == "verify-changed"]
+    verification_events = [event for event in operation_events if event.get("command") == "verify-changed"]
     verification_modes = Counter(
         str((event.get("metrics") or {}).get("verification_mode", "unknown"))
         for event in verification_events
@@ -462,7 +700,7 @@ def stats_data(
     }
 
     recent_events = []
-    for event in reversed(selected[-recent:]):
+    for event in reversed(operation_events[-recent:]):
         metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
         recent_events.append({
             "time": float(event.get("time", 0)),
@@ -480,12 +718,18 @@ def stats_data(
 
     if cutoff is not None:
         window_start = cutoff
-    elif selected:
-        window_start = float(selected[0].get("time", now))
+    elif operation_events:
+        window_start = float(operation_events[0].get("time", now))
     else:
         window_start = now
-    activity = _activity_buckets(selected, window_start, now)
-    repos = Counter(str(event.get("repo_name", "?")) for event in selected)
+    activity = _activity_buckets(operation_events, window_start, now)
+    repos = Counter(str(event.get("repo_name", "?")) for event in operation_events)
+    reads = read_efficiency(operation_events)
+    navigation = {
+        "outline_calls": sum(event.get("command") == "outline" for event in operation_events),
+        "semantic_calls": sum(event.get("command") == "ts-nav" for event in operation_events),
+    }
+    tasks = task_efficiency(root, events, selected, operation_events, all_repos=all_repos)
 
     return {
         "schema": SCHEMA,
@@ -494,21 +738,21 @@ def stats_data(
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "window_start": window_start,
         "window_end": now,
-        "events": len(selected),
+        "events": len(operation_events),
         "threads": len(thread_ids),
         "fallback_sessions": fallback_sessions,
         "sessions": len(thread_ids) + fallback_sessions,
         "tool_ok": tool_ok,
         "tool_errors": tool_errors,
-        "tool_reliability": _percent(tool_ok, len(selected)),
+        "tool_reliability": _percent(tool_ok, len(operation_events)),
         # v1.2.0 JSON aliases; these now refer only to agentq/tool health.
         "successes": tool_ok,
         "failures": tool_errors,
-        "success_rate": _percent(tool_ok, len(selected)),
-        "duration_ms": sum(int(event.get("duration_ms", 0)) for event in selected),
+        "success_rate": _percent(tool_ok, len(operation_events)),
+        "duration_ms": sum(int(event.get("duration_ms", 0)) for event in operation_events),
         "visible_chars": visible_chars,
         "visible_token_proxy": round(visible_chars / 4),
-        "truncations": sum(bool(event.get("truncated")) for event in selected),
+        "truncations": sum(bool(event.get("truncated")) for event in operation_events),
         "measurement": measurement,
         "source_chars": measurement["measured_source_chars"],
         "suppressed_chars": measurement["avoided_chars"],
@@ -518,12 +762,16 @@ def stats_data(
         "activity": activity,
         "recent": recent_events,
         "verification": verification,
+        "reads": reads,
+        "navigation": navigation,
+        "tasks": tasks,
         "repositories": [{"name": name, "events": count} for name, count in repos.most_common(10)],
         "sources": sources,
         "archive_result": archive_result,
         "measurement_note": (
             "visible token proxy is visible characters divided by four; it is not provider token accounting. "
-            "Measured reduction is shown only for operations where agentq captured source command output."
+            "Measured reduction is shown only for operations where agentq captured source command output. "
+            "Read overlap is measured only for v1.2.2+ version-aware ranges; per-task values require explicit task boundaries."
         ),
     }
 
@@ -616,6 +864,9 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
 
     project = data["project_commands"]
     measured = data["measurement"]
+    reads = data.get("reads") or {}
+    navigation = data.get("navigation") or {}
+    tasks = data.get("tasks") or {}
     lines.extend([
         f"activity     {data['events']} calls · {data['sessions']} contexts ({data['threads']} Codex threads) · agentq {reliability}",
         f"project run  {project['passed']} passed · {project['failed']} failed · {project['timed_out']} timeout",
@@ -626,6 +877,28 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
             else "measured     — (no source-output measurement in this window)"
         ),
     ])
+
+    reads = data.get("reads") or {}
+    navigation = data.get("navigation") or {}
+    if reads.get("calls"):
+        tracked = int(reads.get("tracked_calls", 0))
+        overlap = _pct(reads.get("overlap_percent")) if tracked else "—"
+        lines.append(
+            f"reads        {reads.get('calls', 0)} calls · tracked {tracked} · {reads.get('unique_files', 0)} files · "
+            f"{reads.get('reread_ranges', 0)} rereads · overlap {overlap} · {reads.get('fully_redundant_ranges', 0)} redundant · "
+            f"nav {navigation.get('semantic_calls', 0)} semantic/{navigation.get('outline_calls', 0)} outline"
+        )
+    tasks = data.get("tasks") or {}
+    if tasks.get("started") or tasks.get("accepted") or tasks.get("abandoned") or tasks.get("active"):
+        per_task = (
+            f" · ~{tasks['token_proxy_per_accepted_task']:,} tokens/accepted · {tasks['calls_per_accepted_task']} calls/accepted"
+            if tasks.get("token_proxy_per_accepted_task") is not None
+            else ""
+        )
+        lines.append(
+            f"tasks        {tasks.get('accepted', 0)} accepted · {tasks.get('active', 0)} active · "
+            f"{tasks.get('abandoned', 0)} abandoned · attributed {_pct(tasks.get('attribution_percent'))}{per_task}"
+        )
 
     if data["events"] >= 10 and len(data["activity"]) > 1:
         values = [int(item["calls"]) for item in data["activity"]]
@@ -708,6 +981,9 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
 
     project = data["project_commands"]
     measured = data["measurement"]
+    reads = data.get("reads") or {}
+    navigation = data.get("navigation") or {}
+    tasks = data.get("tasks") or {}
 
     def pair(line: Text, label: str, value: str, style: str = "bold") -> None:
         if len(line.plain):
@@ -765,6 +1041,43 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
             pair(summary3, "saved", human_bytes(measured["avoided_chars"]), "green bold")
             pair(summary3, "reduction", _pct(measured["reduction_percent"]), "green")
         summary_lines.append(summary3)
+
+    if reads.get("calls"):
+        read_line = Text()
+        pair(read_line, "reads", str(reads.get("calls", 0)), "bold")
+        tracked = int(reads.get("tracked_calls", 0))
+        if tracked != int(reads.get("calls", 0)):
+            pair(read_line, "tracked", str(tracked), "yellow" if tracked else "dim")
+        pair(read_line, "files", str(reads.get("unique_files", 0)), "bold")
+        if reads.get("reread_ranges"):
+            pair(read_line, "rereads", str(reads["reread_ranges"]), "yellow")
+        if tracked and reads.get("overlap_percent") is not None:
+            overlap_value = float(reads["overlap_percent"])
+            overlap_style = "green" if overlap_value < 10 else "yellow" if overlap_value < 30 else "red"
+            pair(read_line, "overlap", _pct(overlap_value), overlap_style)
+        if reads.get("fully_redundant_ranges"):
+            pair(read_line, "redundant", str(reads["fully_redundant_ranges"]), "red")
+        pair(
+            read_line,
+            "nav",
+            f"{navigation.get('semantic_calls', 0)} semantic/{navigation.get('outline_calls', 0)} outline",
+            "cyan" if navigation.get("semantic_calls") or navigation.get("outline_calls") else "dim",
+        )
+        summary_lines.append(read_line)
+
+    if tasks.get("started") or tasks.get("accepted") or tasks.get("abandoned") or tasks.get("active"):
+        task_line = Text()
+        pair(task_line, "tasks", f"{tasks.get('accepted', 0)} accepted", "green" if tasks.get("accepted") else "dim")
+        if tasks.get("active"):
+            pair(task_line, "active", str(tasks["active"]), "cyan")
+        if tasks.get("abandoned"):
+            pair(task_line, "abandoned", str(tasks["abandoned"]), "yellow")
+        if tasks.get("attribution_percent") is not None:
+            pair(task_line, "attributed", _pct(tasks["attribution_percent"]), "bold")
+        if tasks.get("token_proxy_per_accepted_task") is not None:
+            pair(task_line, "~tokens/accepted", _compact_int(int(tasks["token_proxy_per_accepted_task"])), "cyan")
+            pair(task_line, "calls/accepted", str(tasks["calls_per_accepted_task"]), "bold")
+        summary_lines.append(task_line)
 
     operations = Table(
         box=None,
@@ -889,7 +1202,7 @@ def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
             )
         sections.extend([Text(), section("Recent"), recent_table])
 
-    footer = Text("~tokens = visible chars / 4; saved is shown only when source output was captured.", style="dim")
+    footer = Text("~tokens = visible chars / 4; read overlap is version-aware; task metrics require explicit task boundaries.", style="dim")
     if data.get("archive_result"):
         archived = data["archive_result"]
         footer.append(f"  archive +{archived['added']} / {archived['total_archived']}", style="dim")

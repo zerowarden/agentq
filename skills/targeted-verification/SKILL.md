@@ -4,7 +4,7 @@ description: Use for tests, typechecks, lint, builds, and changed-code verificat
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Project commands must already be installed. Node/pnpm workspaces and Vitest receive specialized local planning.
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
   mutation: "command-dependent"
 ---
 
@@ -62,6 +62,7 @@ Use `--label` only when several retained logs would otherwise be ambiguous.
 - Escalate only after narrower checks pass or project policy requires it.
 - Do not rerun the same broad failing command without using its diagnostics.
 - Never treat `partial` or `unverified` as passing.
+- If an explicit `agentq task` is active and this verification satisfies that task's acceptance criteria, finish the measurement unit with `agentq task accept`. If the work is being dropped, use `agentq task abandon`; do not accept merely because one narrow check passed.
 
 ## Runtime behavior
 

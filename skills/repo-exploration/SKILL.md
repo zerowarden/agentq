@@ -4,7 +4,7 @@ description: Use for repository exploration, file discovery, code search, symbol
 license: MIT
 compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. ast-grep and Universal Ctags are optional.
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
   mutation: "none"
 ---
 
@@ -41,7 +41,20 @@ For operations covered here, use `agentq` instead of raw `tree`, `find`, `rg`, `
    "$AQ" read packages/contexts/dispatch/src/offers.ts:40-150 --max-lines 140
    "$AQ" read packages/contexts/dispatch/src/offers.ts --around 220 --context 30
    ```
-6. When same-named symbols, re-exports, aliases, or actual call/reference identity matter, switch to `semantic-code-navigation` rather than broadening lexical search.
+6. Before a second overlapping or non-adjacent read of the same source file, narrow structurally first: use `ts-nav` for a known TypeScript/JavaScript symbol, otherwise `outline --match` or a more specific `search`. Direct continuation of a truncated adjacent range is fine.
+7. When same-named symbols, re-exports, aliases, or actual call/reference identity matter, switch to `semantic-code-navigation` rather than broadening lexical search.
+
+## Long-lived thread measurement
+
+When one Codex thread intentionally handles multiple distinct fixes/features, do not treat the thread as one task. Mark each meaningful accepted-work unit once:
+
+```bash
+agentq task begin
+# implement + verify one coherent fix/feature
+agentq task accept
+```
+
+Use `agentq task abandon` if the work unit is dropped. Do not create new task boundaries for debugging substeps, individual edits, or verification retries.
 
 ## Output discipline
 

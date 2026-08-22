@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 DEFAULT_SKIP_PARTS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",

@@ -4,7 +4,7 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 license: MIT
 compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
   network: "runtime-offline"
 ---
 
@@ -47,7 +47,7 @@ codemod-scan, codemod-apply
 
 run, test-plan, verify-changed, audit, benchmark
 
-stats, doctor
+task, stats, doctor
 ```
 
 Inspect command-specific flags with:
@@ -57,6 +57,17 @@ Inspect command-specific flags with:
 ```
 
 ## Local efficiency telemetry
+
+For long-lived threads that contain several distinct fixes/features, use explicit task boundaries so stats are not distorted by thread length:
+
+```bash
+agentq task begin
+agentq task status
+agentq task accept   # only after the work unit meets its acceptance criteria
+agentq task abandon  # if the work unit is dropped
+```
+
+Task state is repository/worktree-scoped, so boundaries may be marked from Codex or a separate shell. Concurrent independent work should use separate worktrees. No task names or prompt text are stored.
 
 Inspect current-repository activity without exposing task content:
 

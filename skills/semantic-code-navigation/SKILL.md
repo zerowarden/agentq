@@ -4,7 +4,7 @@ description: Use for type-aware TypeScript/JavaScript definition, reference, and
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Node.js, and a TypeScript dependency resolvable from the repository. Uses only local project files.
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
   mutation: "none"
 ---
 
@@ -30,6 +30,7 @@ AQ=~/.agents/skills/semantic-code-navigation/scripts/agentq
 
 ## Guardrails
 
+- If an exact TypeScript/JavaScript symbol is already known, prefer semantic lookup before issuing another overlapping read of the same file.
 - Do not substitute a broad `rg SymbolName` when semantic identity matters.
 - Do not infer semantic equivalence from same-named lexical matches.
 - The repository must expose a usable `tsconfig.json` and local `typescript` package. If not, use bounded lexical/syntactic exploration and state the limitation.

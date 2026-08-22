@@ -15,6 +15,7 @@ from .common import (
     find_executable, is_sensitive_path, language_for, list_repo_files, parse_json_lines,
     redact_text, relpath, repo_root, run_cmd, safe_int,
 )
+from .telemetry import read_overlap_advice
 
 DEF_RE = re.compile(r"\b(?:export\s+)?(?:public\s+)?(?:async\s+)?(?:function|class|interface|type|enum|trait|struct|fn|def|const|let|var)\s+([A-Za-z_$][\w$]*)")
 IMPORT_RE = re.compile(r"^\s*(?:import|export\s+.*\s+from|from\s+\S+\s+import|use\s+|mod\s+|require\s*\()")
@@ -332,7 +333,15 @@ def read_data(
         if remaining <= 0:
             truncated = True
             break
-    return {"repo_root": str(root), "items": items, "truncated": truncated, "max_lines": max_lines}
+    data = {"repo_root": str(root), "items": items, "truncated": truncated, "max_lines": max_lines}
+    advice = read_overlap_advice(root, data)
+    if advice:
+        data["read_overlap"] = advice
+    return data
+
+
+def _pct_hint(value: Any) -> str:
+    return f"{float(value):.1f}% overlap" if isinstance(value, (int, float)) else "overlap detected"
 
 
 def render_read(data: dict[str, Any]) -> str:
@@ -350,6 +359,13 @@ def render_read(data: dict[str, Any]) -> str:
         blocks.append("\n".join(lines))
     if data["truncated"]:
         blocks.append(f"Global read cap reached ({data['max_lines']} lines). Read only the next necessary range.")
+    overlap = data.get("read_overlap")
+    if isinstance(overlap, dict):
+        blocks.append(
+            f"read overlap: {overlap.get('overlap_lines', 0)} lines already seen in this {overlap.get('scope', 'session')} "
+            f"({_pct_hint(overlap.get('overlap_percent'))}); before another overlapping read, prefer ts-nav for a known "
+            "TypeScript/JavaScript symbol or outline/search to narrow the next range."
+        )
     return "\n\n".join(blocks)
 
 

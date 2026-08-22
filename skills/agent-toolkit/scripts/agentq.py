@@ -38,6 +38,7 @@ from agentq_lib.search import (
     repo_map_data,
     search_data,
 )
+from agentq_lib.tasking import render_task, task_data
 from agentq_lib.telemetry import print_stats, record_event, render_stats, stats_data, watch_stats
 from agentq_lib.testplan import render_test_plan, test_plan_data
 from agentq_lib.tsnav import render_ts_nav, ts_nav_data
@@ -124,6 +125,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="report runtime/tool readiness and privacy defaults")
     add_common(p)
+
+    p = sub.add_parser("task", help="mark explicit task boundaries for per-task efficiency telemetry")
+    add_common(p)
+    p.add_argument("action", choices=("begin", "status", "accept", "abandon"))
 
     p = sub.add_parser("stats", help="visualize local agentq activity and output suppression")
     add_common(p)
@@ -292,6 +297,8 @@ def execute(args: argparse.Namespace, root: Path) -> int:
     command = args.command
     if command == "doctor":
         emit(args, doctor_data(root), render_doctor)
+    elif command == "task":
+        emit(args, task_data(root, args.action), render_task)
     elif command == "stats":
         if args.watch:
             if args.format != "text":
