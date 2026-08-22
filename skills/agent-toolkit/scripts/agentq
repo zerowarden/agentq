@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+
+SOURCE=${BASH_SOURCE[0]}
+while [[ -h "$SOURCE" ]]; do
+  DIR="$(CDPATH= cd -P -- "$(dirname -- "$SOURCE")" && pwd)"
+  TARGET="$(readlink -- "$SOURCE")"
+  if [[ "$TARGET" = /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$DIR/$TARGET"
+  fi
+done
+SCRIPT_DIR="$(CDPATH= cd -P -- "$(dirname -- "$SOURCE")" && pwd)"
+exec python3 "$SCRIPT_DIR/agentq.py" "$@"
