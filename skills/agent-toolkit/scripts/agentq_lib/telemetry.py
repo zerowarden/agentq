@@ -692,133 +692,209 @@ def rich_available() -> bool:
         return False
 
 
+def _compact_int(value: int) -> str:
+    if value < 1_000:
+        return str(value)
+    if value < 1_000_000:
+        return f"{value / 1_000:.1f}k".rstrip("0").rstrip(".")
+    return f"{value / 1_000_000:.1f}m".rstrip("0").rstrip(".")
+
+
 def _rich_dashboard(data: dict[str, Any], *, utc: bool = False) -> Any:
-    from rich import box
-    from rich.columns import Columns
+    """Render a dense, Jest/Vite-style dashboard without full-width chrome."""
     from rich.console import Group
-    from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
 
     project = data["project_commands"]
     measured = data["measurement"]
-    title = Text()
-    title.append("agentq", style="bold")
-    title.append(f" · {data['scope']} · {data['since']}")
-    header = Panel(
-        Group(title, Text(_window_label(data, utc), style="dim")),
-        box=box.ROUNDED,
-        padding=(0, 1),
-    )
 
-    def card(label: str, value: str, detail: str = "") -> Panel:
-        body = Text()
-        body.append(value, style="bold")
-        if detail:
-            body.append("\n" + detail, style="dim")
-        return Panel(body, title=label, box=box.ROUNDED, padding=(0, 1), expand=True)
+    def pair(line: Text, label: str, value: str, style: str = "bold") -> None:
+        if len(line.plain):
+            line.append("  ")
+        line.append(label + " ", style="dim")
+        line.append(value, style=style)
 
-    cards = Columns([
-        card("Invocations", str(data["events"]), f"{data['sessions']} contexts · {data['threads']} Codex threads"),
-        card("agentq", _pct(data.get("tool_reliability")), f"{data['tool_errors']} tool errors"),
-        card("Project runs", f"{project['passed']}✓  {project['failed']}◇", f"{project['timed_out']} timeouts"),
-        card("Visible", human_bytes(data["visible_chars"]), f"~{data['visible_token_proxy']:,} token proxy"),
-    ], equal=True, expand=True)
+    def section(name: str) -> Text:
+        text = Text()
+        text.append(name, style="bold cyan")
+        return text
 
-    exposure = Table(box=box.SIMPLE_HEAVY, expand=True, show_header=True, header_style="bold")
-    exposure.add_column("Context exposure")
-    exposure.add_column("Value", justify="right")
-    exposure.add_row("Visible output", human_bytes(data["visible_chars"]))
-    exposure.add_row("Token proxy", f"~{data['visible_token_proxy']:,}")
-    exposure.add_row("Budget truncations", str(data["truncations"]))
+    header = Text()
+    header.append("agentq", style="bold cyan")
+    header.append(f"  {data['scope']}", style="bold")
+    header.append(f"  {data['since']}", style="dim")
+
+    window = Text(_window_label(data, utc), style="dim")
+
+    summary1 = Text()
+    pair(summary1, "calls", str(data["events"]), "bold")
+    pair(summary1, "contexts", str(data["sessions"]), "bold")
+    if data["threads"]:
+        pair(summary1, "threads", str(data["threads"]), "bold")
+    reliability = data.get("tool_reliability")
+    reliability_style = "green" if reliability is not None and reliability >= 99 else "yellow"
+    if reliability is not None and reliability < 95:
+        reliability_style = "red"
+    pair(summary1, "agentq", _pct(reliability), reliability_style)
+    if data["tool_errors"]:
+        pair(summary1, "errors", str(data["tool_errors"]), "red bold")
+
+    summary2 = Text()
+    summary2.append("runs ", style="dim")
+    summary2.append(str(project["passed"]), style="green bold")
+    summary2.append(" passed")
+    summary2.append("  ")
+    summary2.append(str(project["failed"]), style="red bold" if project["failed"] else "green")
+    summary2.append(" failed")
+    if project["timed_out"]:
+        summary2.append(f"  {project['timed_out']} timeout", style="yellow")
+    pair(summary2, "visible", human_bytes(data["visible_chars"]), "bold")
+    pair(summary2, "~tokens", _compact_int(int(data["visible_token_proxy"])), "cyan")
+    if data["truncations"]:
+        pair(summary2, "cuts", str(data["truncations"]), "yellow")
+
+    summary_lines: list[Any] = [header, window, Text(), summary1, summary2]
     if measured["instrumented_calls"]:
-        exposure.add_row("Measured source", human_bytes(measured["measured_source_chars"]))
+        summary3 = Text()
         if measured["overhead_chars"]:
-            exposure.add_row("Wrapper overhead", human_bytes(measured["overhead_chars"]))
+            pair(summary3, "measured", human_bytes(measured["measured_source_chars"]), "bold")
+            pair(summary3, "wrapper overhead", human_bytes(measured["overhead_chars"]), "yellow")
         else:
-            exposure.add_row("Measured avoided", human_bytes(measured["avoided_chars"]))
-            exposure.add_row("Measured reduction", _pct(measured["reduction_percent"]))
-    else:
-        exposure.add_row("Measured reduction", "—")
+            pair(summary3, "measured", human_bytes(measured["measured_source_chars"]), "bold")
+            pair(summary3, "saved", human_bytes(measured["avoided_chars"]), "green bold")
+            pair(summary3, "reduction", _pct(measured["reduction_percent"]), "green")
+        summary_lines.append(summary3)
 
-    activity_renderable: Any | None = None
-    if data["events"] >= 10 and len(data["activity"]) > 1:
-        values = [int(item["calls"]) for item in data["activity"]]
-        activity_renderable = Panel(
-            Text(_sparkline(values, width=min(56, max(20, shutil.get_terminal_size((100, 30)).columns - 26))), style="cyan"),
-            title="Activity",
-            subtitle=f"{_time_label(data['window_start'], utc, True)} → {_time_label(data['window_end'], utc, True)}",
-            box=box.ROUNDED,
-        )
+    operations = Table(
+        box=None,
+        expand=False,
+        show_header=True,
+        header_style="dim bold",
+        padding=(0, 1),
+        collapse_padding=True,
+    )
+    operations.add_column("", no_wrap=True)
+    operations.add_column("Operation", no_wrap=True, max_width=22)
+    operations.add_column("Calls", justify="right", no_wrap=True)
+    operations.add_column("Median", justify="right", no_wrap=True)
+    operations.add_column("Visible", justify="right", no_wrap=True)
+    operations.add_column("Result", no_wrap=True)
+    operations.add_column("Saved", justify="right", no_wrap=True)
 
-    operations = Table(box=box.SIMPLE_HEAVY, expand=True, show_header=True, header_style="bold")
-    operations.add_column("Operation", no_wrap=True)
-    operations.add_column("Calls", justify="right")
-    operations.add_column("Tool", justify="right")
-    operations.add_column("Subject", justify="right")
-    operations.add_column("Median", justify="right")
-    operations.add_column("Visible", justify="right")
-    operations.add_column("Reduction", justify="right")
     for row in data["commands"][:16]:
-        subject = "—"
-        if row["subject_passes"] or row["subject_failures"]:
-            subject = f"{row['subject_passes']}✓/{row['subject_failures']}◇"
+        if row["tool_errors"]:
+            marker = Text("✗", style="red bold")
+        elif row["subject_failures"]:
+            marker = Text("◇", style="yellow bold")
+        else:
+            marker = Text("✓", style="green bold")
+
+        result = Text()
+        if row["tool_errors"]:
+            result.append(f"{row['tool_errors']} tool err", style="red")
+        elif row["subject_passes"] or row["subject_failures"]:
+            if row["subject_passes"]:
+                result.append(f"{row['subject_passes']}✓", style="green")
+            if row["subject_failures"]:
+                if len(result.plain):
+                    result.append(" ")
+                result.append(f"{row['subject_failures']}✗", style="red")
+
+        saved = Text()
+        if row["instrumented_calls"]:
+            if row["overhead_chars"]:
+                saved.append(f"+{human_bytes(row['overhead_chars'])}", style="yellow")
+            elif row["reduction_percent"] is not None:
+                saved.append(f"↓{row['reduction_percent']:.1f}%", style="green")
+
         operations.add_row(
+            marker,
             row["command"],
             str(row["calls"]),
-            f"{row['tool_ok']}✓/{row['tool_errors']}✗",
-            subject,
             _duration(row["median_ms"]),
             human_bytes(row["visible_chars"]),
-            _measurement_label(row),
+            result,
+            saved,
         )
 
-    sections: list[Any] = [header, cards, exposure]
-    if activity_renderable is not None:
-        sections.append(activity_renderable)
-    sections.append(Panel(operations, title="Operations", box=box.ROUNDED, padding=(0, 1)))
+    sections: list[Any] = [*summary_lines, Text(), section("Operations"), operations]
 
     verification = data["verification"]
     if verification["runs"]:
-        verify_table = Table(box=box.SIMPLE, expand=True, show_header=False)
-        verify_table.add_column("metric")
-        verify_table.add_column("value", justify="right")
-        verify_table.add_row("Runs", str(verification["runs"]))
-        verify_table.add_row("Passed / failed / partial", f"{verification['passed']} / {verification['failed']} / {verification['partial']}")
-        verify_table.add_row("Checks / failed", f"{verification['checks_executed']} / {verification['checks_failed']}")
-        verify_table.add_row("Changed / affected packages", f"{verification['changed_packages']} / {verification['affected_packages']}")
-        sections.append(Panel(verify_table, title="Verification", box=box.ROUNDED, padding=(0, 1)))
+        verify = Text()
+        total_status = verification["passed"] + verification["failed"] + verification["partial"] + verification["planned"]
+        if verification["failed"]:
+            verify.append("✗ ", style="red bold")
+        elif verification["partial"]:
+            verify.append("◇ ", style="yellow bold")
+        elif verification["passed"]:
+            verify.append("✓ ", style="green bold")
+        elif verification["planned"]:
+            verify.append("• ", style="cyan bold")
+        else:
+            verify.append("• ", style="dim")
+
+        verify.append(f"{verification['runs']} run" + ("s" if verification["runs"] != 1 else ""), style="bold")
+        if total_status:
+            if verification["passed"]:
+                verify.append(f"  {verification['passed']} passed", style="green")
+            if verification["failed"]:
+                verify.append(f"  {verification['failed']} failed", style="red")
+            if verification["partial"]:
+                verify.append(f"  {verification['partial']} partial", style="yellow")
+            if verification["planned"]:
+                verify.append(f"  {verification['planned']} planned", style="cyan")
+        else:
+            verify.append("  status n/a", style="dim")
+        verify.append(f"  {verification['checks_executed']} checks", style="dim")
+        verify.append(f"  {verification['changed_files']} files → {verification['affected_packages']} pkgs", style="dim")
+        sections.extend([Text(), section("Verification"), verify])
 
     if data.get("recent"):
-        recent_table = Table(box=box.SIMPLE, expand=True, show_header=True, header_style="bold")
-        recent_table.add_column("")
-        recent_table.add_column("Time", no_wrap=True)
-        recent_table.add_column("Operation")
-        recent_table.add_column("Duration", justify="right")
-        recent_table.add_column("Visible", justify="right")
-        recent_table.add_column("Result")
+        recent_table = Table(
+            box=None,
+            expand=False,
+            show_header=False,
+            padding=(0, 1),
+            collapse_padding=True,
+        )
+        recent_table.add_column("", no_wrap=True)
+        recent_table.add_column("Time", style="dim", no_wrap=True)
+        recent_table.add_column("Operation", no_wrap=True, max_width=22)
+        recent_table.add_column("Duration", justify="right", style="dim", no_wrap=True)
+        recent_table.add_column("Visible", justify="right", style="dim", no_wrap=True)
+        recent_table.add_column("Result", no_wrap=True)
+
         for event in data["recent"]:
-            marker = _recent_marker(event)
-            result = event.get("subject_status") or ("tool ok" if event.get("tool_status") == "ok" else "tool error")
-            if event.get("subject_exit_code") is not None:
-                result += f" ({event['subject_exit_code']})"
+            status = _recent_marker(event)
+            marker_style = "green bold" if status == "✓" else "yellow bold" if status == "◇" else "red bold"
+            result = Text()
+            if event.get("tool_status") != "ok":
+                result.append("tool error", style="red")
+            elif event.get("subject_status") in {"failed", "timeout", "partial", "unverified"}:
+                result.append(str(event["subject_status"]), style="yellow" if event["subject_status"] != "failed" else "red")
+                if event.get("subject_exit_code") is not None:
+                    result.append(f" ({event['subject_exit_code']})", style="dim")
+            elif event.get("subject_status") == "passed":
+                result.append("passed", style="green")
+
             recent_table.add_row(
-                marker,
+                Text(status, style=marker_style),
                 _time_label(event["time"], utc),
                 event["command"],
                 _duration(event["duration_ms"]),
                 human_bytes(event["visible_chars"]),
                 result,
             )
-        sections.append(Panel(recent_table, title="Recent", box=box.ROUNDED, padding=(0, 1)))
+        sections.extend([Text(), section("Recent"), recent_table])
 
-    footer = Text(data["measurement_note"], style="dim")
+    footer = Text("~tokens = visible chars / 4; saved is shown only when source output was captured.", style="dim")
     if data.get("archive_result"):
         archived = data["archive_result"]
-        footer.append(f"\narchive: +{archived['added']} events; {archived['total_archived']} persistent", style="dim")
-    sections.append(footer)
+        footer.append(f"  archive +{archived['added']} / {archived['total_archived']}", style="dim")
+    sections.extend([Text(), footer])
     return Group(*sections)
-
 
 def print_stats(data: dict[str, Any], *, color: str = "auto", plain: bool = False, utc: bool = False, budget: int = 12000) -> None:
     use_rich = not plain and sys.stdout.isatty() and rich_available()

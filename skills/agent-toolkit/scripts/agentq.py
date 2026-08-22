@@ -128,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stats", help="visualize local agentq activity and output suppression")
     add_common(p)
     p.add_argument("--since", default="7d", help="all, or duration such as 24h, 7d, or 4w")
-    p.add_argument("--recent", type=nonnegative_int, default=12)
+    p.add_argument("--recent", type=nonnegative_int, default=8)
     p.add_argument("--operation", action="append", default=[], help="filter by operation; repeatable")
     p.add_argument("--all-repos", action="store_true", help="aggregate all locally observed repositories")
     p.add_argument("--watch", type=positive_float, help="refresh terminal dashboard every N seconds")
