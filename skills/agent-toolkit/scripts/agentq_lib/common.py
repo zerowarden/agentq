@@ -13,66 +13,154 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-VERSION = "1.2.1"
+from .redaction import SECRET_PATTERNS, redact_text
+
+VERSION = "1.8.0"
 
 DEFAULT_SKIP_PARTS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
-    "target", "coverage", ".next", ".nuxt", ".svelte-kit", ".turbo",
-    ".parcel-cache", ".cache", "__pycache__", ".mypy_cache",
-    ".pytest_cache", ".ruff_cache", ".venv", "venv", ".tox",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    ".tox",
 }
 
 SENSITIVE_NAMES = {
-    ".env", ".npmrc", ".pypirc", ".netrc", "credentials", "credentials.json",
-    "secrets.json", "secrets.yaml", "secrets.yml", "id_rsa", "id_ed25519",
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "credentials",
+    "credentials.json",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+    "id_rsa",
+    "id_ed25519",
 }
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
 SENSITIVE_PARTS = {".ssh", ".aws", ".gnupg", "secrets", "credentials"}
 SAFE_ENV_SUFFIXES = (".example", ".sample", ".template", ".dist")
 
 DEFAULT_RG_EXCLUDES = [
-    "!.git/**", "!.hg/**", "!.svn/**", "!node_modules/**", "!vendor/**",
-    "!dist/**", "!build/**", "!target/**", "!coverage/**", "!.next/**",
-    "!.nuxt/**", "!.svelte-kit/**", "!.turbo/**", "!.parcel-cache/**",
-    "!.cache/**", "!__pycache__/**", "!.mypy_cache/**", "!.pytest_cache/**",
-    "!.ruff_cache/**", "!.venv/**", "!venv/**", "!.tox/**",
+    "!.git/**",
+    "!.hg/**",
+    "!.svn/**",
+    "!node_modules/**",
+    "!vendor/**",
+    "!dist/**",
+    "!build/**",
+    "!target/**",
+    "!coverage/**",
+    "!.next/**",
+    "!.nuxt/**",
+    "!.svelte-kit/**",
+    "!.turbo/**",
+    "!.parcel-cache/**",
+    "!.cache/**",
+    "!__pycache__/**",
+    "!.mypy_cache/**",
+    "!.pytest_cache/**",
+    "!.ruff_cache/**",
+    "!.venv/**",
+    "!venv/**",
+    "!.tox/**",
 ]
 SENSITIVE_RG_EXCLUDES = [
-    "!.env", "!*.pem", "!*.key", "!*.p12", "!*.pfx",
-    "!*.jks", "!*.keystore", "!**/.ssh/**", "!**/.aws/**", "!**/.gnupg/**",
-    "!**/credentials/**", "!**/secrets/**", "!**/id_rsa", "!**/id_ed25519",
+    "!.env",
+    "!*.pem",
+    "!*.key",
+    "!*.p12",
+    "!*.pfx",
+    "!*.jks",
+    "!*.keystore",
+    "!**/.ssh/**",
+    "!**/.aws/**",
+    "!**/.gnupg/**",
+    "!**/credentials/**",
+    "!**/secrets/**",
+    "!**/id_rsa",
+    "!**/id_ed25519",
 ]
 SENSITIVE_RG_REINCLUDES: list[str] = []
 
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.S), "[REDACTED_PRIVATE_KEY]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{24,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "[REDACTED_JWT]"),
-    (re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|service[_-]?role[_-]?key|private[_-]?key)\b(\s*[:=]\s*)([^\s,;\]}]{6,})"), r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)(https?://[^:/\s]+:)([^@/\s]+)(@)"), r"\1[REDACTED]\3"),
-]
 
 ROLE_PATTERNS = {
-    "test": re.compile(r"(^|/)(tests?|__tests__|spec)(/|$)|(?:^|[._-])(test|spec)\.[^.]+$", re.I),
+    "test": re.compile(
+        r"(^|/)(tests?|__tests__|spec)(/|$)|(?:^|[._-])(test|spec)\.[^.]+$", re.I
+    ),
     "docs": re.compile(r"(^|/)(docs?|examples?)(/|$)|\.(md|mdx|rst|adoc|txt)$", re.I),
-    "config": re.compile(r"(^|/)(\.github|config|configs|migrations|supabase)(/|$)|(^|/)(package\.json|tsconfig[^/]*\.json|pyproject\.toml|cargo\.toml|.*\.(ya?ml|toml|ini|cfg))$", re.I),
-    "generated": re.compile(r"(^|/)(generated|dist|build|coverage|snapshots?|__snapshots__)(/|$)|\.(min\.js|map|lock)$", re.I),
+    "config": re.compile(
+        r"(^|/)(\.github|config|configs|migrations|supabase)(/|$)|"
+        r"(^|/)(package\.json|tsconfig[^/]*\.json|pyproject\.toml|cargo\.toml|"
+        r"[^/]+\.config\.(?:[cm]?[jt]s|tsx?)|.*\.(?:ya?ml|toml|ini|cfg))$",
+        re.I,
+    ),
+    "generated": re.compile(
+        r"(^|/)(generated|dist|build|coverage|snapshots?|__snapshots__)(/|$)|"
+        r"(?:\.generated|\.gen)\.(?:[cm]?[jt]sx?|py|rs|go)$|\.(?:min\.js|map|lock)$",
+        re.I,
+    ),
 }
 
 LANG_BY_SUFFIX = {
-    ".ts": "TypeScript", ".tsx": "TSX", ".mts": "TypeScript", ".cts": "TypeScript",
-    ".js": "JavaScript", ".jsx": "JSX", ".mjs": "JavaScript", ".cjs": "JavaScript",
-    ".py": "Python", ".rs": "Rust", ".go": "Go", ".java": "Java",
-    ".kt": "Kotlin", ".kts": "Kotlin", ".c": "C", ".h": "C/C++",
-    ".cc": "C++", ".cpp": "C++", ".hpp": "C++", ".cs": "C#",
-    ".rb": "Ruby", ".php": "PHP", ".swift": "Swift", ".sql": "SQL",
-    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell", ".fish": "Fish",
-    ".json": "JSON", ".yaml": "YAML", ".yml": "YAML", ".toml": "TOML",
-    ".md": "Markdown", ".mdx": "MDX", ".css": "CSS", ".scss": "SCSS",
-    ".html": "HTML", ".vue": "Vue", ".svelte": "Svelte",
+    ".ts": "TypeScript",
+    ".tsx": "TSX",
+    ".mts": "TypeScript",
+    ".cts": "TypeScript",
+    ".js": "JavaScript",
+    ".jsx": "JSX",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
+    ".py": "Python",
+    ".rs": "Rust",
+    ".go": "Go",
+    ".java": "Java",
+    ".kt": "Kotlin",
+    ".kts": "Kotlin",
+    ".c": "C",
+    ".h": "C/C++",
+    ".cc": "C++",
+    ".cpp": "C++",
+    ".hpp": "C++",
+    ".cs": "C#",
+    ".rb": "Ruby",
+    ".php": "PHP",
+    ".swift": "Swift",
+    ".sql": "SQL",
+    ".sh": "Shell",
+    ".bash": "Shell",
+    ".zsh": "Shell",
+    ".fish": "Fish",
+    ".json": "JSON",
+    ".yaml": "YAML",
+    ".yml": "YAML",
+    ".toml": "TOML",
+    ".md": "Markdown",
+    ".mdx": "MDX",
+    ".css": "CSS",
+    ".scss": "SCSS",
+    ".html": "HTML",
+    ".vue": "Vue",
+    ".svelte": "Svelte",
 }
 
 
@@ -92,16 +180,21 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text)
 
 
-def redact_text(text: str) -> str:
-    result = text
-    for pattern, replacement in SECRET_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
-
-
 def compact_line(text: str, max_chars: int = 240) -> str:
     text = strip_ansi(text).replace("\r", "").rstrip("\n")
     text = redact_text(text)
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 15)] + " …[truncated]"
+
+
+def truncate_line(text: str, max_chars: int = 240) -> str:
+    """Truncate a line that is already redacted (no re-redaction).
+
+    Used by streamed output where :func:`redact_text` has already been applied,
+    so calling it again would mangle already-redacted tokens.
+    """
+    text = strip_ansi(text).replace("\r", "").rstrip("\n")
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 15)] + " …[truncated]"
@@ -128,6 +221,24 @@ def classify_path(path: str | Path) -> str:
     return "source"
 
 
+def scope_match(path: str, scopes: list[str]) -> bool:
+    if not scopes or scopes == ["."]:
+        return True
+    normalized = path.replace(os.sep, "/")
+    for scope in scopes:
+        value = scope.replace(os.sep, "/")
+        while value.startswith("./"):
+            value = value[2:]
+        value = value.rstrip("/")
+        if (
+            value in {"", "."}
+            or normalized == value
+            or normalized.startswith(value + "/")
+        ):
+            return True
+    return False
+
+
 def find_executable(name: str) -> str | None:
     aliases = {
         "fd": ["fd", "fdfind"],
@@ -152,7 +263,9 @@ def find_executable(name: str) -> str | None:
 def tool_version(executable: str) -> str:
     for flags in (["--version"], ["-V"], ["version"]):
         try:
-            result = subprocess.run([executable, *flags], text=True, capture_output=True, timeout=5)
+            result = subprocess.run(
+                [executable, *flags], text=True, capture_output=True, timeout=5
+            )
         except Exception:
             continue
         text = strip_ansi((result.stdout or result.stderr).strip())
@@ -171,22 +284,41 @@ def run_cmd(
     input_text: str | None = None,
 ) -> Completed:
     merged = os.environ.copy()
-    merged.update({"NO_COLOR": "1", "CLICOLOR": "0", "TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat"})
+    merged.update(
+        {
+            "NO_COLOR": "1",
+            "CLICOLOR": "0",
+            "TERM": "dumb",
+            "PAGER": "cat",
+            "GIT_PAGER": "cat",
+        }
+    )
     if env:
         merged.update(env)
     try:
         proc = subprocess.run(
-            list(args), cwd=str(cwd) if cwd else None, text=True, input=input_text,
-            capture_output=True, timeout=timeout, env=merged,
+            list(args),
+            cwd=str(cwd) if cwd else None,
+            text=True,
+            input=input_text,
+            capture_output=True,
+            timeout=timeout,
+            env=merged,
         )
     except FileNotFoundError as exc:
         raise AgentQError(f"required command not found: {args[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise AgentQError(f"command timed out after {timeout}s: {' '.join(args)}") from exc
-    completed = Completed(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        raise AgentQError(
+            f"command timed out after {timeout}s: {' '.join(args)}"
+        ) from exc
+    completed = Completed(
+        args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr
+    )
     if check and proc.returncode != 0:
         detail = compact_line(proc.stderr or proc.stdout or "command failed", 500)
-        raise AgentQError(f"command failed ({proc.returncode}): {' '.join(args)}\n{detail}")
+        raise AgentQError(
+            f"command failed ({proc.returncode}): {' '.join(args)}\n{detail}"
+        )
     return completed
 
 
@@ -201,13 +333,9 @@ def repo_root(start: str | Path = ".") -> Path:
 
 
 def ensure_within(root: Path, path: Path, *, allow_outside: bool = False) -> Path:
-    resolved = path.expanduser()
-    if not resolved.is_absolute():
-        resolved = root / resolved
-    resolved = resolved.resolve()
-    if not allow_outside and resolved != root and root not in resolved.parents:
-        raise AgentQError(f"path is outside repository root: {resolved}")
-    return resolved
+    from .paths import _resolve_absolute
+
+    return _resolve_absolute(root, path, allow_outside=allow_outside)
 
 
 def relpath(root: Path, path: Path) -> str:
@@ -218,12 +346,20 @@ def relpath(root: Path, path: Path) -> str:
 
 
 def list_repo_files(root: Path, *, include_untracked: bool = True) -> list[str]:
-    if (root / ".git").exists() or run_cmd(["git", "rev-parse", "--is-inside-work-tree"], cwd=root, timeout=5).returncode == 0:
+    if (root / ".git").exists() or run_cmd(
+        ["git", "rev-parse", "--is-inside-work-tree"], cwd=root, timeout=5
+    ).returncode == 0:
         args = ["git", "ls-files", "-z", "--cached"]
         if include_untracked:
             args += ["--others", "--exclude-standard"]
         result = run_cmd(args, cwd=root, timeout=30, check=True)
-        return sorted({item for item in result.stdout.split("\0") if item and not is_skipped(item)})
+        return sorted(
+            {
+                item
+                for item in result.stdout.split("\0")
+                if item and not is_skipped(item)
+            }
+        )
     rg = find_executable("rg")
     if rg:
         args = [rg, "--files", "--hidden"]
@@ -231,7 +367,13 @@ def list_repo_files(root: Path, *, include_untracked: bool = True) -> list[str]:
             args += ["--glob", glob]
         result = run_cmd(args, cwd=root, timeout=30)
         if result.returncode in (0, 1):
-            return sorted({line for line in result.stdout.splitlines() if line and not is_skipped(line)})
+            return sorted(
+                {
+                    line
+                    for line in result.stdout.splitlines()
+                    if line and not is_skipped(line)
+                }
+            )
     files: list[str] = []
     for path in root.rglob("*"):
         if path.is_file() and not is_skipped(path.relative_to(root).as_posix()):
@@ -283,7 +425,9 @@ def cache_dir(root: Path) -> Path:
         if target is not None:
             return target
 
-    raise AgentQError("no writable runtime directory available; tried: " + ", ".join(attempted))
+    raise AgentQError(
+        "no writable runtime directory available; tried: " + ", ".join(attempted)
+    )
 
 
 def write_private_log(root: Path, label: str, text: str) -> Path:
@@ -302,32 +446,14 @@ def write_private_log(root: Path, label: str, text: str) -> Path:
 def bound_output(text: str, budget: int) -> tuple[str, bool]:
     if budget <= 0 or len(text) <= budget:
         return text, False
-    marker = f"\n… [agentq output truncated at {budget} chars; narrow scope or raise --budget]"
+    marker = (
+        f"\n… [complete records omitted at {budget} chars; narrow the command scope]"
+    )
     cutoff = max(0, budget - len(marker))
     head = text[:cutoff]
     newline = head.rfind("\n")
-    if newline >= max(0, cutoff - 800):
-        head = head[:newline]
-    return head.rstrip() + marker, True
-
-
-def render(data: Any, *, fmt: str = "text", text: str | None = None, budget: int = 12000) -> None:
-    if fmt == "json":
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        if budget > 0 and len(payload) > budget:
-            payload = json.dumps({
-                "truncated": True,
-                "reason": "structured output exceeds agentq character budget",
-                "chars": len(payload),
-                "budget": budget,
-                "hint": "narrow scope or explicitly raise --budget",
-            }, ensure_ascii=False, separators=(",", ":"))
-        print(payload)
-        return
-    if text is None:
-        text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    bounded, _ = bound_output(str(text).rstrip(), budget)
-    print(bounded)
+    head = head[:newline] if newline >= 0 else ""
+    return (head.rstrip() + marker if head else marker.lstrip()), True
 
 
 def add_rg_excludes(args: list[str], *, include_sensitive: bool = False) -> None:

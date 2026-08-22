@@ -1,0 +1,563 @@
+"""Typed request contracts and their wire codecs.
+
+``OperationRequest`` separates semantic query identity (``options``) from
+presentation options (``output_format``, ``budget.output_chars``). The accepted
+request cannot silently change during a continuation: a ``ContinuationRequest``
+is decoded from the persisted command and re-validated before execution.
+"""
+
+from __future__ import annotations
+
+import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Generic, TypeVar
+
+from ._base import (
+    ContractError,
+    optional_int,
+    optional_number,
+    optional_str,
+    reject_unknown_keys,
+    require_bool,
+    require_int,
+    require_mapping,
+    require_relative_posix,
+    require_schema,
+    require_str,
+    require_tag,
+    require_unique_strings,
+)
+
+REQUEST_SCHEMA = "agentq.request/v1"
+CONTINUATION_SCHEMA = "agentq.continuation/v1"
+CONTINUATION_TTL_SECONDS = 60 * 60
+
+KNOWN_OPERATIONS = frozenset(
+    {
+        "doctor",
+        "task",
+        "stats",
+        "files",
+        "search",
+        "read",
+        "repo-map",
+        "outline",
+        "git-status",
+        "git-diff",
+        "git-history",
+        "git-structural",
+        "dependencies",
+        "impact",
+        "codemod-scan",
+        "codemod-apply",
+        "run",
+        "test-plan",
+        "verify",
+        "verify-changed",
+        "verified-changed",
+        "verify-task",
+        "ts-nav",
+        "inspect",
+        "audit",
+        "benchmark",
+    }
+)
+
+
+class OutputFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
+    COMPACT_JSON = "compact-json"
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    """Optional host identity; a task may span contexts, never overrides one."""
+
+    task_id: str | None = None
+    session_id: str | None = None
+    consumer_id: str | None = None
+    context_epoch: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "consumer_id": self.consumer_id,
+            "context_epoch": self.context_epoch,
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any, *, what: str = "request context") -> RequestContext:
+        if value is None:
+            return cls()
+        payload = require_mapping(value, what)
+        reject_unknown_keys(
+            payload, ("task_id", "session_id", "consumer_id", "context_epoch"), what
+        )
+        return cls(
+            task_id=optional_str(payload.get("task_id"), f"{what}.task_id"),
+            session_id=optional_str(payload.get("session_id"), f"{what}.session_id"),
+            consumer_id=optional_str(payload.get("consumer_id"), f"{what}.consumer_id"),
+            context_epoch=optional_str(
+                payload.get("context_epoch"), f"{what}.context_epoch"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Budget:
+    """Collection limits and the output-character budget are different facts."""
+
+    output_chars: int = 0
+    max_scan_records: int | None = None
+    retained_artifact_limit: int | None = None
+    execution_deadline_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        require_int(self.output_chars, "budget.output_chars", minimum=0)
+        optional_int(self.max_scan_records, "budget.max_scan_records", minimum=0)
+        optional_int(
+            self.retained_artifact_limit, "budget.retained_artifact_limit", minimum=0
+        )
+        if self.execution_deadline_seconds is not None:
+            if isinstance(self.execution_deadline_seconds, bool) or not isinstance(
+                self.execution_deadline_seconds, (int, float)
+            ):
+                raise ContractError(
+                    "budget.execution_deadline_seconds must be a number or null"
+                )
+            if self.execution_deadline_seconds < 0:
+                raise ContractError("budget.execution_deadline_seconds must be >= 0")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "output_chars": self.output_chars,
+            "max_scan_records": self.max_scan_records,
+            "retained_artifact_limit": self.retained_artifact_limit,
+            "execution_deadline_seconds": self.execution_deadline_seconds,
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any, *, what: str = "budget") -> Budget:
+        if value is None:
+            return cls()
+        payload = require_mapping(value, what)
+        reject_unknown_keys(
+            payload,
+            (
+                "output_chars",
+                "max_scan_records",
+                "retained_artifact_limit",
+                "execution_deadline_seconds",
+            ),
+            what,
+        )
+        return cls(
+            output_chars=require_int(
+                payload.get("output_chars", 0), f"{what}.output_chars", minimum=0
+            ),
+            max_scan_records=optional_int(
+                payload.get("max_scan_records"), f"{what}.max_scan_records", minimum=0
+            ),
+            retained_artifact_limit=optional_int(
+                payload.get("retained_artifact_limit"),
+                f"{what}.retained_artifact_limit",
+                minimum=0,
+            ),
+            execution_deadline_seconds=optional_number(
+                payload.get("execution_deadline_seconds"),
+                f"{what}.execution_deadline_seconds",
+                minimum=0,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class SearchOptions:
+    query: str = ""
+    mode: str = "fixed"
+    word: bool = False
+    case: str = "smart"
+    globs: tuple[str, ...] = ()
+    types: tuple[str, ...] = ()
+    view: str = "auto"
+    limit: int = 80
+    per_file: int = 8
+    context: int = 0
+    max_chars: int = 240
+    max_files: int = 40
+    scan_cap: int = 5000
+    coverage_policy: str = "auto"
+    include_sensitive: bool = False
+
+    def __post_init__(self) -> None:
+        require_str(self.query, "search.query", allow_empty=True)
+        if self.mode not in {"fixed", "regex"}:
+            raise ContractError(f"unsupported search mode: {self.mode!r}")
+        if self.case not in {"smart", "sensitive", "insensitive"}:
+            raise ContractError(f"unsupported search case: {self.case!r}")
+        if self.view not in {"auto", "summary", "snippets", "matches"}:
+            raise ContractError(f"unsupported search view: {self.view!r}")
+        if self.coverage_policy not in {"fast", "auto", "exact"}:
+            raise ContractError(
+                f"unsupported search coverage policy: {self.coverage_policy!r}"
+            )
+        require_bool(self.word, "search.word")
+        require_bool(self.include_sensitive, "search.include_sensitive")
+        for name, minimum in (
+            ("limit", 1),
+            ("per_file", 1),
+            ("context", 0),
+            ("max_chars", 1),
+            ("max_files", 1),
+            ("scan_cap", 1),
+        ):
+            require_int(getattr(self, name), f"search.{name}", minimum=minimum)
+        for name in ("globs", "types"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise ContractError(f"search.{name} must be a tuple of strings")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "mode": self.mode,
+            "word": self.word,
+            "case": self.case,
+            "globs": list(self.globs),
+            "types": list(self.types),
+            "view": self.view,
+            "limit": self.limit,
+            "per_file": self.per_file,
+            "context": self.context,
+            "max_chars": self.max_chars,
+            "max_files": self.max_files,
+            "scan_cap": self.scan_cap,
+            "coverage_policy": self.coverage_policy,
+            "include_sensitive": self.include_sensitive,
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any, *, what: str = "search options") -> SearchOptions:
+        payload = require_mapping(value, what)
+        reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
+        globs = payload.get("globs") or []
+        types = payload.get("types") or []
+        if not isinstance(globs, list) or not isinstance(types, list):
+            raise ContractError(f"{what}.globs and {what}.types must be arrays")
+        return cls(
+            query=require_str(
+                payload.get("query", ""), f"{what}.query", allow_empty=True
+            ),
+            mode=require_str(payload.get("mode", "fixed"), f"{what}.mode"),
+            word=require_bool(payload.get("word", False), f"{what}.word"),
+            case=require_str(payload.get("case", "smart"), f"{what}.case"),
+            globs=tuple(str(item) for item in globs),
+            types=tuple(str(item) for item in types),
+            view=require_str(payload.get("view", "auto"), f"{what}.view"),
+            limit=require_int(payload.get("limit", 80), f"{what}.limit", minimum=1),
+            per_file=require_int(
+                payload.get("per_file", 8), f"{what}.per_file", minimum=1
+            ),
+            context=require_int(
+                payload.get("context", 0), f"{what}.context", minimum=0
+            ),
+            max_chars=require_int(
+                payload.get("max_chars", 240), f"{what}.max_chars", minimum=1
+            ),
+            max_files=require_int(
+                payload.get("max_files", 40), f"{what}.max_files", minimum=1
+            ),
+            scan_cap=require_int(
+                payload.get("scan_cap", 5000), f"{what}.scan_cap", minimum=1
+            ),
+            coverage_policy=require_str(
+                payload.get("coverage_policy", "auto"), f"{what}.coverage_policy"
+            ),
+            include_sensitive=require_bool(
+                payload.get("include_sensitive", False), f"{what}.include_sensitive"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DiffSelection:
+    staged: bool = False
+    unstaged: bool = False
+    base: str | None = None
+    range_value: str | None = None
+    paths: tuple[str, ...] = ()
+    task_scope: bool = False
+    view: str = "stat"
+    context: int = 2
+    max_files: int = 40
+    max_hunks: int = 60
+    max_lines: int = 700
+
+    def __post_init__(self) -> None:
+        selectors = [
+            self.staged,
+            self.unstaged,
+            self.base is not None,
+            self.range_value is not None,
+        ]
+        if sum(1 for selector in selectors if selector) > 1:
+            raise ContractError("diff selection contains conflicting selectors")
+        require_bool(self.staged, "diff.staged")
+        require_bool(self.unstaged, "diff.unstaged")
+        require_bool(self.task_scope, "diff.task_scope")
+        optional_str(self.base, "diff.base")
+        optional_str(self.range_value, "diff.range_value")
+        if self.view not in {"stat", "patch", "hunks"}:
+            raise ContractError(f"unsupported diff view: {self.view!r}")
+        for name, minimum in (
+            ("context", 0),
+            ("max_files", 1),
+            ("max_hunks", 1),
+            ("max_lines", 1),
+        ):
+            require_int(getattr(self, name), f"diff.{name}", minimum=minimum)
+        for path in self.paths:
+            require_relative_posix(path, "diff.paths entry", allow_root=True)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "staged": self.staged,
+            "unstaged": self.unstaged,
+            "base": self.base,
+            "range_value": self.range_value,
+            "paths": list(self.paths),
+            "task_scope": self.task_scope,
+            "view": self.view,
+            "context": self.context,
+            "max_files": self.max_files,
+            "max_hunks": self.max_hunks,
+            "max_lines": self.max_lines,
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any, *, what: str = "diff selection") -> DiffSelection:
+        payload = require_mapping(value, what)
+        reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
+        paths = payload.get("paths") or []
+        if not isinstance(paths, list):
+            raise ContractError(f"{what}.paths must be an array")
+        return cls(
+            staged=require_bool(payload.get("staged", False), f"{what}.staged"),
+            unstaged=require_bool(payload.get("unstaged", False), f"{what}.unstaged"),
+            base=optional_str(payload.get("base"), f"{what}.base"),
+            range_value=optional_str(payload.get("range_value"), f"{what}.range_value"),
+            paths=tuple(str(item) for item in paths),
+            task_scope=require_bool(
+                payload.get("task_scope", False), f"{what}.task_scope"
+            ),
+            view=require_str(payload.get("view", "stat"), f"{what}.view"),
+            context=require_int(
+                payload.get("context", 2), f"{what}.context", minimum=0
+            ),
+            max_files=require_int(
+                payload.get("max_files", 40), f"{what}.max_files", minimum=1
+            ),
+            max_hunks=require_int(
+                payload.get("max_hunks", 60), f"{what}.max_hunks", minimum=1
+            ),
+            max_lines=require_int(
+                payload.get("max_lines", 700), f"{what}.max_lines", minimum=1
+            ),
+        )
+
+
+OptionsT = TypeVar("OptionsT")
+
+_REQUEST_FIELDS = (
+    "schema",
+    "operation",
+    "request_id",
+    "repo_id",
+    "worktree_id",
+    "context",
+    "options",
+    "scopes",
+    "budget",
+    "output_format",
+    "repeat",
+)
+
+
+@dataclass(frozen=True)
+class OperationRequest(Generic[OptionsT]):
+    """One accepted operation: semantic options plus presentation policy."""
+
+    operation: str
+    request_id: str
+    repo_id: str
+    worktree_id: str
+    options: OptionsT
+    context: RequestContext = field(default_factory=RequestContext)
+    scopes: tuple[str, ...] = ()
+    budget: Budget = field(default_factory=Budget)
+    output_format: str = OutputFormat.TEXT.value
+    repeat: bool = False
+    schema: str = REQUEST_SCHEMA
+
+    def __post_init__(self) -> None:
+        require_schema(self.schema, REQUEST_SCHEMA, "request schema")
+        require_tag(self.operation, "request.operation")
+        if self.operation not in KNOWN_OPERATIONS:
+            raise ContractError(f"unknown request operation: {self.operation!r}")
+        require_str(self.request_id, "request.request_id")
+        require_str(self.repo_id, "request.repo_id")
+        require_str(self.worktree_id, "request.worktree_id")
+        if not isinstance(self.context, RequestContext):
+            raise ContractError("request.context must be a RequestContext")
+        if not isinstance(self.budget, Budget):
+            raise ContractError("request.budget must be a Budget")
+        if self.output_format not in {item.value for item in OutputFormat}:
+            raise ContractError(
+                f"unsupported request output format: {self.output_format!r}"
+            )
+        require_bool(self.repeat, "request.repeat")
+        for scope in self.scopes:
+            require_relative_posix(scope, "request scopes entry", allow_root=True)
+        require_unique_strings(self.scopes, "request scopes")
+
+    def to_wire(self, options_encoder) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "operation": self.operation,
+            "request_id": self.request_id,
+            "repo_id": self.repo_id,
+            "worktree_id": self.worktree_id,
+            "context": self.context.to_wire(),
+            "options": options_encoder(self.options),
+            "scopes": list(self.scopes),
+            "budget": self.budget.to_wire(),
+            "output_format": self.output_format,
+            "repeat": self.repeat,
+        }
+
+    @classmethod
+    def from_wire(
+        cls, value: Any, options_decoder, *, what: str = "request"
+    ) -> OperationRequest:
+        payload = require_mapping(value, what)
+        reject_unknown_keys(payload, _REQUEST_FIELDS, what)
+        return cls(
+            schema=require_schema(
+                payload.get("schema"), REQUEST_SCHEMA, f"{what}.schema"
+            ),
+            operation=require_tag(payload.get("operation"), f"{what}.operation"),
+            request_id=require_str(payload.get("request_id"), f"{what}.request_id"),
+            repo_id=require_str(payload.get("repo_id"), f"{what}.repo_id"),
+            worktree_id=require_str(payload.get("worktree_id"), f"{what}.worktree_id"),
+            context=RequestContext.from_wire(
+                payload.get("context"), what=f"{what}.context"
+            ),
+            options=options_decoder(payload.get("options")),
+            scopes=tuple(
+                require_str(item, f"{what}.scopes entry")
+                for item in payload.get("scopes") or []
+            ),
+            budget=Budget.from_wire(payload.get("budget"), what=f"{what}.budget"),
+            output_format=require_str(
+                payload.get("output_format", "text"), f"{what}.output_format"
+            ),
+            repeat=require_bool(payload.get("repeat", False), f"{what}.repeat"),
+        )
+
+
+@dataclass(frozen=True)
+class ContinuationRequest:
+    """An executable continuation decoded from persisted state and re-validated."""
+
+    cursor: str
+    operation: str
+    argv: tuple[str, ...]
+    repo_id: str
+    context_id: str
+    workspace_id: str | None = None
+    expires_at: float | None = None
+    schema: str = CONTINUATION_SCHEMA
+
+    def __post_init__(self) -> None:
+        require_schema(self.schema, CONTINUATION_SCHEMA, "continuation schema")
+        require_str(self.cursor, "continuation.cursor")
+        require_tag(self.operation, "continuation.operation")
+        if self.operation not in KNOWN_OPERATIONS - {"continue"}:
+            raise ContractError(
+                f"continuation operation is not executable: {self.operation!r}"
+            )
+        if not self.argv or not all(
+            isinstance(item, str) and item for item in self.argv
+        ):
+            raise ContractError(
+                "continuation.argv must contain at least the command name"
+            )
+        if any("\x00" in item for item in self.argv):
+            raise ContractError("continuation.argv contains a NUL byte")
+        require_str(self.repo_id, "continuation.repo_id")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "cursor": self.cursor,
+            "operation": self.operation,
+            "command": shlex.join(self.argv),
+            "repo_id": self.repo_id,
+            "context_id": self.context_id,
+            "workspace_id": self.workspace_id,
+            "expires_at": self.expires_at,
+        }
+
+    @classmethod
+    def from_record(
+        cls,
+        record: Mapping[str, Any],
+        *,
+        cursor: str,
+        repo_id: str,
+        context_id: str,
+        now: float | None = None,
+        what: str = "continuation record",
+    ) -> ContinuationRequest:
+        payload = require_mapping(record, what)
+        reject_unknown_keys(payload, ("command", "workspace", "expires_at"), what)
+        command = require_str(payload.get("command"), f"{what}.command")
+        try:
+            argv = tuple(shlex.split(command))
+        except ValueError as exc:
+            raise ContractError(f"{what}.command is not parseable: {exc}") from exc
+        if len(argv) < 2:
+            raise ContractError(f"{what}.command must invoke an agentq operation")
+        executable = argv[0].rsplit("/", 1)[-1]
+        if executable not in {"agentq", "agentq.py"}:
+            raise ContractError(f"{what}.command must start with the agentq executable")
+        operation = require_tag(argv[1], f"{what}.operation")
+        if operation not in KNOWN_OPERATIONS - {"continue"}:
+            raise ContractError(
+                f"{what}.command is not an executable operation: {operation!r}"
+            )
+        expires = payload.get("expires_at")
+        if expires is not None and (
+            isinstance(expires, bool) or not isinstance(expires, (int, float))
+        ):
+            raise ContractError(f"{what}.expires_at must be a number")
+        if now is not None and expires is not None and float(expires) <= now:
+            raise ContractError("continuation has expired")
+        workspace = payload.get("workspace")
+        if workspace is not None and not isinstance(workspace, str):
+            raise ContractError(f"{what}.workspace must be a string or null")
+        return cls(
+            cursor=cursor,
+            operation=operation,
+            argv=argv,
+            repo_id=repo_id,
+            context_id=context_id,
+            workspace_id=workspace,
+            expires_at=None if expires is None else float(expires),
+        )

@@ -8,11 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from .common import AgentQError, list_repo_files, relpath, run_cmd
+from .common import AgentQError, list_repo_files, run_cmd
 
-DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+DEPENDENCY_FIELDS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
-TEST_RE = re.compile(r"(?:^|/)(?:__tests__|tests?|spec)(?:/|$)|(?:^|[._-])(?:test|spec)\.[^.]+$", re.I)
+TEST_RE = re.compile(
+    r"(?:^|/)(?:__tests__|tests?|spec)(?:/|$)|(?:^|[._-])(?:test|spec)\.[^.]+$", re.I
+)
 CONFIG_RE = re.compile(
     r"(^|/)(?:vitest\.config\.|vite\.config\.|eslint\.config\.|package\.json$|"
     r"tsconfig[^/]*\.json$|turbo\.json$|nx\.json$|jest\.config\.)",
@@ -68,7 +75,11 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def package_manager(root: Path) -> str:
-    if (root / "pnpm-lock.yaml").exists() or (root / "pnpm-workspace.yaml").exists() or (root / "pnpm-workspace.yml").exists():
+    if (
+        (root / "pnpm-lock.yaml").exists()
+        or (root / "pnpm-workspace.yaml").exists()
+        or (root / "pnpm-workspace.yml").exists()
+    ):
         return "pnpm"
     if (root / "yarn.lock").exists():
         return "yarn"
@@ -130,7 +141,11 @@ def _package_json_workspace_patterns(root: Path) -> list[str]:
 def workspace_patterns(root: Path) -> list[str]:
     patterns = _pnpm_workspace_patterns(root) or _package_json_workspace_patterns(root)
     # Preserve order but remove duplicates.
-    return list(dict.fromkeys(pattern.strip().rstrip("/") for pattern in patterns if pattern.strip()))
+    return list(
+        dict.fromkeys(
+            pattern.strip().rstrip("/") for pattern in patterns if pattern.strip()
+        )
+    )
 
 
 def _brace_expand(pattern: str) -> list[str]:
@@ -139,11 +154,15 @@ def _brace_expand(pattern: str) -> list[str]:
         return [pattern]
     out: list[str] = []
     for item in match.group(1).split(","):
-        out.extend(_brace_expand(pattern[: match.start()] + item.strip() + pattern[match.end() :]))
+        out.extend(
+            _brace_expand(
+                pattern[: match.start()] + item.strip() + pattern[match.end() :]
+            )
+        )
     return out
 
 
-def _matches_pattern(path: str, pattern: str) -> bool:
+def matches_pattern(path: str, pattern: str) -> bool:
     path = path.strip("/") or "."
     pattern = pattern.strip().strip("/") or "."
     if pattern == ".":
@@ -166,14 +185,22 @@ def _allowed_by_patterns(path: str, patterns: list[str]) -> bool:
         value = original[1:] if negative else original
         for expanded in _brace_expand(value):
             (negatives if negative else positives).append(expanded)
-    included = any(_matches_pattern(path, pattern) for pattern in positives) if positives else True
-    excluded = any(_matches_pattern(path, pattern) for pattern in negatives)
+    included = (
+        any(matches_pattern(path, pattern) for pattern in positives)
+        if positives
+        else True
+    )
+    excluded = any(matches_pattern(path, pattern) for pattern in negatives)
     return included and not excluded
 
 
 def discover_workspace(root: Path) -> dict[str, WorkspacePackage]:
     patterns = workspace_patterns(root)
-    manifests = [rel for rel in list_repo_files(root) if PurePosixPath(rel).name == "package.json"]
+    manifests = [
+        rel
+        for rel in list_repo_files(root)
+        if PurePosixPath(rel).name == "package.json"
+    ]
     root_manifest = root / "package.json"
     if root_manifest.is_file() and "package.json" not in manifests:
         manifests.insert(0, "package.json")
@@ -197,11 +224,15 @@ def discover_workspace(root: Path) -> dict[str, WorkspacePackage]:
     }
     packages: dict[str, WorkspacePackage] = {}
     for path, obj, is_root in raw:
-        name = str(obj.get("name") or (root.name if is_root else PurePosixPath(path).name))
+        name = str(
+            obj.get("name") or (root.name if is_root else PurePosixPath(path).name)
+        )
         scripts_obj = obj.get("scripts")
         scripts = {
             str(key): str(value)
-            for key, value in (scripts_obj.items() if isinstance(scripts_obj, dict) else [])
+            for key, value in (
+                scripts_obj.items() if isinstance(scripts_obj, dict) else []
+            )
             if isinstance(value, str)
         }
         local_deps: set[str] = set()
@@ -228,7 +259,9 @@ def discover_workspace(root: Path) -> dict[str, WorkspacePackage]:
     return packages
 
 
-def workspace_graph(packages: dict[str, WorkspacePackage]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+def workspace_graph(
+    packages: dict[str, WorkspacePackage],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     by_name = {pkg.name: key for key, pkg in packages.items()}
     forward: dict[str, set[str]] = {key: set() for key in packages}
     reverse: dict[str, set[str]] = {key: set() for key in packages}
@@ -245,11 +278,15 @@ def workspace_graph(packages: dict[str, WorkspacePackage]) -> tuple[dict[str, se
 def changed_files(root: Path, base: str | None = None) -> list[str]:
     changed: set[str] = set()
     if base:
-        result = run_cmd(["git", "diff", "--name-only", "-z", f"{base}...HEAD"], cwd=root, timeout=30)
+        result = run_cmd(
+            ["git", "diff", "--name-only", "-z", f"{base}...HEAD"], cwd=root, timeout=30
+        )
         if result.returncode not in (0, 1):
             raise AgentQError(f"unable to diff base {base!r}")
         changed.update(item for item in result.stdout.split("\0") if item)
-    result = run_cmd(["git", "status", "--porcelain=v1", "-z"], cwd=root, timeout=30, check=True)
+    result = run_cmd(
+        ["git", "status", "--porcelain=v1", "-z"], cwd=root, timeout=30, check=True
+    )
     records = [item for item in result.stdout.split("\0") if item]
     index = 0
     while index < len(records):
@@ -276,7 +313,9 @@ def owner_for_file(path: str, packages: dict[str, WorkspacePackage]) -> str | No
     return max(candidates, default=(0, None))[1]
 
 
-def transitive_dependents(start: Iterable[str], reverse: dict[str, set[str]], *, depth: int | None) -> dict[str, int]:
+def transitive_dependents(
+    start: Iterable[str], reverse: dict[str, set[str]], *, depth: int | None
+) -> dict[str, int]:
     queue = deque((item, 0) for item in start)
     seen = set(start)
     distances: dict[str, int] = {}
@@ -302,7 +341,9 @@ def dependency_order(keys: Iterable[str], forward: dict[str, set[str]]) -> list[
     def visit(node: str) -> None:
         if node in permanent:
             return
-        if node in temporary:  # Preserve determinism in cycles; cycle reporting belongs to dependencies.
+        if (
+            node in temporary
+        ):  # Preserve determinism in cycles; cycle reporting belongs to dependencies.
             return
         temporary.add(node)
         for dependency in sorted(forward.get(node, set())):
@@ -323,7 +364,13 @@ def is_global_change(path: str) -> bool:
         return True
     if normalized.startswith(".github/workflows/"):
         return True
-    return bool(re.fullmatch(r"(?:tsconfig|eslint|vitest|vite|jest)[^/]*\.(?:json|js|cjs|mjs|ts)", normalized, re.I))
+    return bool(
+        re.fullmatch(
+            r"(?:tsconfig|eslint|vitest|vite|jest)[^/]*\.(?:json|js|cjs|mjs|ts)",
+            normalized,
+            re.I,
+        )
+    )
 
 
 def is_docs_only(paths: list[str]) -> bool:
@@ -350,16 +397,24 @@ def is_public_contract_change(path: str) -> bool:
     )
 
 
-def has_vitest(pkg: WorkspacePackage, root: Path, packages: dict[str, WorkspacePackage] | None = None) -> bool:
+def has_vitest(
+    pkg: WorkspacePackage,
+    root: Path,
+    packages: dict[str, WorkspacePackage] | None = None,
+) -> bool:
     dependency_names = set(pkg.manifest.get("dependencies") or {})
     dependency_names.update(pkg.manifest.get("devDependencies") or {})
     dependency_names.update(pkg.manifest.get("peerDependencies") or {})
     dependency_names.update(pkg.manifest.get("optionalDependencies") or {})
-    if "vitest" in dependency_names or any("vitest" in command for command in pkg.scripts.values()):
+    if "vitest" in dependency_names or any(
+        "vitest" in command for command in pkg.scripts.values()
+    ):
         return True
     root_pkg = (packages or {}).get(".")
     if root_pkg and root_pkg is not pkg:
-        root_deps = set(root_pkg.manifest.get("dependencies") or {}) | set(root_pkg.manifest.get("devDependencies") or {})
+        root_deps = set(root_pkg.manifest.get("dependencies") or {}) | set(
+            root_pkg.manifest.get("devDependencies") or {}
+        )
         if "vitest" in root_deps:
             return True
     return (root / "node_modules" / ".bin" / "vitest").exists()
@@ -401,5 +456,7 @@ def workspace_summary(root: Path) -> dict[str, Any]:
         "packages": len(packages),
         "edges": sum(len(value) for value in forward.values()),
         "roots": [pkg.name for pkg in packages.values() if pkg.root],
-        "leaf_packages": sorted(pkg.name for key, pkg in packages.items() if not reverse.get(key)),
+        "leaf_packages": sorted(
+            pkg.name for key, pkg in packages.items() if not reverse.get(key)
+        ),
     }

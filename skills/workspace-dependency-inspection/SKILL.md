@@ -4,35 +4,31 @@ description: Inspect local monorepo package dependencies and dependents from pac
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Cargo metadata is used locally and offline when Cargo is available.
 metadata:
-  version: "1.2.1"
+  version: "1.8.0"
   mutation: "none"
 ---
 
 # Workspace Dependency Inspection
-
-```bash
-AQ=~/.agents/skills/workspace-dependency-inspection/scripts/agentq
-```
 
 ## Workflow
 
 Get a compact workspace-level overview:
 
 ```bash
-"$AQ" dependencies --limit 100
+agentq dependencies --limit 100
 ```
 
 Inspect direct and transitive local dependencies/dependents for one package:
 
 ```bash
-"$AQ" dependencies --target '@app/dispatch' --depth 2 --limit 80
-"$AQ" dependencies --target packages/contexts/dispatch --depth 3
+agentq dependencies --target '@app/dispatch' --depth 2 --limit 80
+agentq dependencies --target packages/contexts/dispatch --depth 3
 ```
 
 For changed-code verification, use the same graph through:
 
 ```bash
-"$AQ" verify-changed --dry-run
+agentq verify-changed --dry-run
 ```
 
 This identifies changed packages and affected local dependents before executing checks.

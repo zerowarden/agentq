@@ -33,7 +33,7 @@ if ! command -v apt-cache >/dev/null 2>&1; then
 fi
 
 required=(git ripgrep python3)
-recommended=(jq universal-ctags shellcheck shfmt fd-find python3-rich)
+recommended=(jq universal-ctags shellcheck shfmt fd-find)
 optional_apt=(hyperfine tokei)
 
 available=()
@@ -52,9 +52,6 @@ APT packages available on this system:
 Cargo tools (if Cargo is installed and --no-cargo is not set):
   ast-grep difftastic
   hyperfine/tokei only when not already available after APT installation
-
-Optional terminal renderer:
-  python3-rich — responsive stats dashboard; plain fallback remains built in
 
 Not auto-installed:
   Gitleaks — install a pinned official release separately, then configure it per repository

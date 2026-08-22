@@ -11,8 +11,14 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 ```bash
 "$AQ" repo-map
 "$AQ" files offer --path packages --limit 40
-"$AQ" search 'AssignmentOffer' --path packages/contexts/dispatch --limit 60
-"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --type ts --limit 30
+
+# Known TypeScript/JavaScript or Python identifier: use one overview first.
+"$AQ" inspect AssignmentOffer --path packages/contexts/dispatch
+"$AQ" inspect calculate_total --path packages/services
+
+# Unknown symbol, string, configuration key, or semantic fallback.
+"$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60 --format compact-json
+"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --type ts --limit 30 --format compact-json
 "$AQ" outline packages/contexts/dispatch/src --public --limit 120
 "$AQ" read packages/contexts/dispatch/src/offers.ts:50-180
 ```
@@ -42,11 +48,35 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 "$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37 --apply
 ```
 
+## Task boundaries
+
+```bash
+# Status is the default action.
+"$AQ" task
+
+# One independently acceptable outcome. A thread may contain several.
+"$AQ" task begin
+# ...investigate, edit, debug, and verify the same outcome...
+"$AQ" task next       # accept current outcome and begin the next
+"$AQ" task accept     # finish without starting another
+"$AQ" task abandon    # only when intentionally discarded
+```
+
 ## Verification and review
 
 ```bash
-"$AQ" run --label dispatch-tests -- pnpm --filter @app/dispatch test
-"$AQ" run --cwd crates/engine --label cargo-check -- cargo check
+"$AQ" run -- pnpm --filter @app/dispatch test
+"$AQ" run --cwd crates/engine -- cargo check
 "$AQ" audit --base origin/main
+"$AQ" git-diff --task --hunks
+"$AQ" verify
 "$AQ" benchmark --warmup 3 --runs 15 --command 'command-a' --command 'command-b'
+```
+
+## Statistics
+
+```bash
+"$AQ" stats
+"$AQ" stats --detailed
+"$AQ" stats --watch 2
 ```

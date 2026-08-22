@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+from .common import AgentQError
+
+
+@dataclass(frozen=True)
+class RepoPath:
+    """A filesystem path confined to a single repository root.
+
+    The absolute form is resolved (symlinks collapsed) and the relative form is
+    computed exactly once so every downstream provider reuses the same value.
+    """
+
+    root: Path
+    absolute: Path
+    relative: str
+
+
+@dataclass(frozen=True)
+class RepoScope:
+    """A normalized repository scope: a root plus a confined :class:`RepoPath`."""
+
+    root: Path
+    path: RepoPath
+
+
+def _resolve_absolute(
+    root: Path, value: str | Path, *, allow_outside: bool = False
+) -> Path:
+    """Resolve *value* against *root* and return an absolute, symlink-resolved path.
+
+    A resolved path is accepted only when it equals the root or is a descendant
+    of the root, unless ``allow_outside`` is explicitly set (the distinct
+    capability used only by ``read --allow-outside``).
+    """
+    root_abs = Path(root).expanduser().resolve()
+    raw = Path(value).expanduser()
+    candidate = raw if raw.is_absolute() else (root_abs / raw)
+    resolved = candidate.resolve()
+    if not allow_outside and resolved != root_abs and root_abs not in resolved.parents:
+        raise AgentQError(f"path is outside repository root: {resolved}")
+    return resolved
+
+
+def resolve_repo_path(
+    root: Path, value: str | Path, *, must_exist: bool = False
+) -> RepoPath:
+    """Normalize a single user-supplied path into a confined :class:`RepoPath`.
+
+    Symlinks that escape the repository are rejected; symlinks that stay inside
+    are accepted because their resolved target remains a descendant of the root.
+    """
+    root_abs = Path(root).expanduser().resolve()
+    absolute = _resolve_absolute(root_abs, value, allow_outside=False)
+    if must_exist and not absolute.exists():
+        raise AgentQError(f"path does not exist within repository: {value}")
+    relative = (
+        "." if absolute == root_abs else absolute.relative_to(root_abs).as_posix()
+    )
+    return RepoPath(root=root_abs, absolute=absolute, relative=relative)
+
+
+def resolve_repo_scopes(root: Path, values: Sequence[str | Path]) -> list[RepoScope]:
+    """Normalize a list of scopes (defaulting to the repository root).
+
+    Every scope is confined and required to exist before any provider receives it.
+    """
+    root_abs = Path(root).expanduser().resolve()
+    items: list[str | Path] = list(values) if values else ["."]
+    scopes: list[RepoScope] = []
+    for value in items:
+        rp = resolve_repo_path(root_abs, value, must_exist=True)
+        scopes.append(RepoScope(root=root_abs, path=rp))
+    return scopes

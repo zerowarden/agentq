@@ -6,9 +6,21 @@ from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, compact_line, find_executable, run_cmd
+from .evidence import (
+    RESULT_LIMIT,
+    SAMPLED,
+    SYNTACTIC,
+    complete as complete_coverage,
+    coverage as coverage_block,
+)
 from .workspace import discover_workspace
 
-DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+DEPENDENCY_FIELDS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
 
 
 def _node_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -30,11 +42,13 @@ def _node_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
             if dependency_name not in by_name:
                 continue
             for kind in kinds:
-                edges.append({
-                    "from": f"node:{pkg.name}",
-                    "to": f"node:{dependency_name}",
-                    "kind": kind,
-                })
+                edges.append(
+                    {
+                        "from": f"node:{pkg.name}",
+                        "to": f"node:{dependency_name}",
+                        "kind": kind,
+                    }
+                )
     return nodes, edges
 
 
@@ -44,7 +58,9 @@ def _cargo_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
         return [], []
     result = run_cmd(
         [cargo, "metadata", "--format-version", "1", "--no-deps", "--offline"],
-        cwd=root, timeout=90, env={"CARGO_NET_OFFLINE": "true"},
+        cwd=root,
+        timeout=90,
+        env={"CARGO_NET_OFFLINE": "true"},
     )
     if result.returncode != 0:
         return [], []
@@ -54,7 +70,11 @@ def _cargo_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
         return [], []
     packages = obj.get("packages") or []
     workspace_members = set(obj.get("workspace_members") or [])
-    local_by_name = {str(pkg.get("name")): pkg for pkg in packages if pkg.get("name") and pkg.get("id") in workspace_members}
+    local_by_name = {
+        str(pkg.get("name")): pkg
+        for pkg in packages
+        if pkg.get("name") and pkg.get("id") in workspace_members
+    }
     nodes = []
     edges = []
     for name, pkg in local_by_name.items():
@@ -63,16 +83,28 @@ def _cargo_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
             path = manifest.relative_to(root).as_posix()
         except ValueError:
             path = str(manifest)
-        nodes.append({"id": f"cargo:{name}", "ecosystem": "cargo", "name": name, "path": path, "private": False})
+        nodes.append(
+            {
+                "id": f"cargo:{name}",
+                "ecosystem": "cargo",
+                "name": name,
+                "path": path,
+                "private": False,
+            }
+        )
         for dep in pkg.get("dependencies") or []:
             dep_name = str(dep.get("name", ""))
             if dep_name in local_by_name:
                 kind = str(dep.get("kind") or "normal")
-                edges.append({"from": f"cargo:{name}", "to": f"cargo:{dep_name}", "kind": kind})
+                edges.append(
+                    {"from": f"cargo:{name}", "to": f"cargo:{dep_name}", "kind": kind}
+                )
     return nodes, edges
 
 
-def _cycles(node_ids: list[str], adjacency: dict[str, list[str]], limit: int = 20) -> list[list[str]]:
+def _cycles(
+    node_ids: list[str], adjacency: dict[str, list[str]], limit: int = 20
+) -> list[list[str]]:
     index = 0
     indices: dict[str, int] = {}
     low: dict[str, int] = {}
@@ -100,7 +132,9 @@ def _cycles(node_ids: list[str], adjacency: dict[str, list[str]], limit: int = 2
                 component.append(item)
                 if item == node:
                     break
-            if len(component) > 1 or (component and component[0] in adjacency.get(component[0], [])):
+            if len(component) > 1 or (
+                component and component[0] in adjacency.get(component[0], [])
+            ):
                 found.append(sorted(component))
 
     for node in node_ids:
@@ -109,7 +143,9 @@ def _cycles(node_ids: list[str], adjacency: dict[str, list[str]], limit: int = 2
     return found[:limit]
 
 
-def _walk(start: str, graph: dict[str, list[str]], depth: int, limit: int) -> list[dict[str, Any]]:
+def _walk(
+    start: str, graph: dict[str, list[str]], depth: int, limit: int
+) -> list[dict[str, Any]]:
     queue = deque([(start, 0)])
     seen = {start}
     out = []
@@ -128,7 +164,9 @@ def _walk(start: str, graph: dict[str, list[str]], depth: int, limit: int) -> li
     return out
 
 
-def dependencies_data(root: Path, *, target: str | None = None, depth: int = 2, limit: int = 100) -> dict[str, Any]:
+def dependencies_data(
+    root: Path, *, target: str | None = None, depth: int = 2, limit: int = 100
+) -> dict[str, Any]:
     node_nodes, node_edges = _node_graph(root)
     cargo_nodes, cargo_edges = _cargo_graph(root)
     nodes = node_nodes + cargo_nodes
@@ -149,17 +187,28 @@ def dependencies_data(root: Path, *, target: str | None = None, depth: int = 2, 
 
     selected: list[str] = []
     if target:
-        exact = [node["id"] for node in nodes if target in {node["id"], node["name"], node["path"], str(Path(node["path"]).parent)}]
+        exact = [
+            node["id"]
+            for node in nodes
+            if target
+            in {node["id"], node["name"], node["path"], str(Path(node["path"]).parent)}
+        ]
         if not exact:
             lowered = target.lower()
-            exact = [node["id"] for node in nodes if lowered in node["name"].lower() or lowered in node["path"].lower()]
+            exact = [
+                node["id"]
+                for node in nodes
+                if lowered in node["name"].lower() or lowered in node["path"].lower()
+            ]
         selected = exact[:10]
         if not selected:
             raise AgentQError(f"no workspace package matched: {target}")
 
     cycles = _cycles(list(by_id), forward)
     data: dict[str, Any] = {
-        "repo_root": str(root), "nodes": len(nodes), "edges": len(edges),
+        "repo_root": str(root),
+        "nodes": len(nodes),
+        "edges": len(edges),
         "ecosystems": dict(Counter(node["ecosystem"] for node in nodes)),
         "top_depended_on": [
             {**by_id[node_id], "direct_dependents": count}
@@ -177,18 +226,40 @@ def dependencies_data(root: Path, *, target: str | None = None, depth: int = 2, 
         for node_id in selected:
             deps = _walk(node_id, forward, depth, limit)
             dependents = _walk(node_id, reverse, depth, limit)
-            targets.append({
-                **by_id[node_id],
-                "dependencies": [{**by_id[item["id"]], "distance": item["distance"]} for item in deps],
-                "dependents": [{**by_id[item["id"]], "distance": item["distance"]} for item in dependents],
-                "dependencies_truncated": len(deps) >= limit,
-                "dependents_truncated": len(dependents) >= limit,
-            })
+            targets.append(
+                {
+                    **by_id[node_id],
+                    "dependencies": [
+                        {**by_id[item["id"]], "distance": item["distance"]}
+                        for item in deps
+                    ],
+                    "dependents": [
+                        {**by_id[item["id"]], "distance": item["distance"]}
+                        for item in dependents
+                    ],
+                    "dependencies_truncated": len(deps) >= limit,
+                    "dependents_truncated": len(dependents) >= limit,
+                }
+            )
         data["target"] = target
         data["matches"] = targets
+        data["coverage"] = (
+            coverage_block(SAMPLED, RESULT_LIMIT)
+            if any(
+                item["dependencies_truncated"] or item["dependents_truncated"]
+                for item in targets
+            )
+            else complete_coverage()
+        )
     else:
         data["packages"] = nodes[:limit]
         data["packages_truncated"] = len(nodes) > limit
+        data["coverage"] = (
+            coverage_block(SAMPLED, RESULT_LIMIT)
+            if data["packages_truncated"]
+            else complete_coverage()
+        )
+    data["provenance"] = SYNTACTIC
     return data
 
 
@@ -200,16 +271,28 @@ def render_dependencies(data: dict[str, Any]) -> str:
     for match in data.get("matches", []):
         lines.append(f"\n{match['name']} [{match['ecosystem']}] — {match['path']}")
         lines.append(f"  dependencies ({len(match['dependencies'])}):")
-        lines.extend(f"    d={item['distance']} {item['name']} — {item['path']}" for item in match["dependencies"])
+        lines.extend(
+            f"    d={item['distance']} {item['name']} — {item['path']}"
+            for item in match["dependencies"]
+        )
         lines.append(f"  dependents ({len(match['dependents'])}):")
-        lines.extend(f"    d={item['distance']} {item['name']} — {item['path']}" for item in match["dependents"])
+        lines.extend(
+            f"    d={item['distance']} {item['name']} — {item['path']}"
+            for item in match["dependents"]
+        )
     if not data.get("matches"):
         if data["top_depended_on"]:
             lines.append("\nmost depended-on packages:")
-            lines.extend(f"  {item['direct_dependents']:>3} {item['name']} — {item['path']}" for item in data["top_depended_on"])
+            lines.extend(
+                f"  {item['direct_dependents']:>3} {item['name']} — {item['path']}"
+                for item in data["top_depended_on"]
+            )
         if data["top_dependencies"]:
             lines.append("\npackages with most local dependencies:")
-            lines.extend(f"  {item['direct_dependencies']:>3} {item['name']} — {item['path']}" for item in data["top_dependencies"])
+            lines.extend(
+                f"  {item['direct_dependencies']:>3} {item['name']} — {item['path']}"
+                for item in data["top_dependencies"]
+            )
     if data["cycles"]:
         lines.append("\ncycles:")
         lines.extend("  " + " -> ".join(cycle + [cycle[0]]) for cycle in data["cycles"])
