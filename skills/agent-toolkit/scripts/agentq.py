@@ -39,7 +39,22 @@ from agentq_lib.search import (
     search_data,
 )
 from agentq_lib.tasking import render_task, task_data
-from agentq_lib.telemetry import print_stats, record_event, render_stats, stats_data, watch_stats
+from agentq_lib.telemetry import (
+    archive_hot_events,
+    install_persistence,
+    print_stats,
+    record_event,
+    remove_persistence,
+    render_archive,
+    render_persistence,
+    render_reset,
+    render_stats,
+    render_storage,
+    reset_telemetry,
+    stats_data,
+    storage_data,
+    watch_stats,
+)
 from agentq_lib.testplan import render_test_plan, test_plan_data
 from agentq_lib.tsnav import render_ts_nav, ts_nav_data
 from agentq_lib.verifychanged import render_verify_changed, verify_changed_data
@@ -140,7 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     p.add_argument("--plain", action="store_true", help="force dependency-free plain-text rendering")
     p.add_argument("--utc", action="store_true", help="display timestamps in UTC instead of local time")
-    p.add_argument("--archive", action="store_true", help="persist hot /tmp telemetry under XDG_STATE_HOME")
+    p.add_argument("--archive", action="store_true", help="persist hot /tmp telemetry under XDG_STATE_HOME before rendering stats")
+    admin = p.add_mutually_exclusive_group()
+    admin.add_argument("--archive-only", action="store_true", help="archive hot telemetry without computing/rendering stats")
+    admin.add_argument("--storage", action="store_true", help="show hot/persistent storage and archive-timer status")
+    admin.add_argument("--reset", action="store_true", help="reset telemetry for the current repository; combine with --all-repos deliberately")
+    admin.add_argument("--install-persistence", action="store_true", help="install and enable the user-level systemd archive timer")
+    admin.add_argument("--remove-persistence", action="store_true", help="disable and remove the user-level systemd archive timer")
+    p.add_argument("--hot-only", action="store_true", help="with --reset, remove only volatile /tmp telemetry")
+    p.add_argument("--force", action="store_true", help="with --reset, allow reset while an agentq task is active")
+    p.add_argument("--persistence-interval", default="5min", help="with --install-persistence; default 5min")
 
     p = sub.add_parser("files", help="find repository paths with bounded ranked output")
     add_common(p); add_scope(p); add_sensitive(p)
@@ -300,6 +324,30 @@ def execute(args: argparse.Namespace, root: Path) -> int:
     elif command == "task":
         emit(args, task_data(root, args.action), render_task)
     elif command == "stats":
+        administrative = any((args.archive_only, args.storage, args.reset, args.install_persistence, args.remove_persistence))
+        if args.archive and administrative:
+            raise AgentQError("--archive cannot be combined with stats administrative actions")
+        if args.hot_only and not args.reset:
+            raise AgentQError("--hot-only requires --reset")
+        if args.force and not args.reset:
+            raise AgentQError("--force requires --reset")
+        if args.watch and administrative:
+            raise AgentQError("--watch cannot be combined with stats administrative actions")
+        if args.archive_only:
+            emit(args, archive_hot_events(), render_archive)
+            return 0
+        if args.storage:
+            emit(args, storage_data(root), render_storage)
+            return 0
+        if args.install_persistence:
+            emit(args, install_persistence(interval=args.persistence_interval), render_persistence)
+            return 0
+        if args.remove_persistence:
+            emit(args, remove_persistence(), render_persistence)
+            return 0
+        if args.reset:
+            emit(args, reset_telemetry(root, all_repos=args.all_repos, hot_only=args.hot_only, force=args.force), render_reset)
+            return 0
         if args.watch:
             if args.format != "text":
                 raise AgentQError("--watch requires --format text")
@@ -398,7 +446,17 @@ def main() -> int:
     start = time.perf_counter()
     root: Path | None = None
     try:
-        root = repo_root(args.repo)
+        stats_repo_optional = (
+            getattr(args, "command", None) == "stats"
+            and any((
+                getattr(args, "archive_only", False),
+                getattr(args, "storage", False),
+                getattr(args, "install_persistence", False),
+                getattr(args, "remove_persistence", False),
+                getattr(args, "reset", False) and getattr(args, "all_repos", False),
+            ))
+        )
+        root = Path(args.repo).expanduser().resolve() if stats_repo_optional else repo_root(args.repo)
         exit_code = execute(args, root)
         data = getattr(args, "_agentq_data", None)
         meta = getattr(args, "_agentq_render_meta", {})

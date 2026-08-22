@@ -4,7 +4,7 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 license: MIT
 compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
 metadata:
-  version: "1.2.2"
+  version: "1.2.3"
   network: "runtime-offline"
 ---
 
@@ -77,7 +77,7 @@ Inspect current-repository activity without exposing task content:
 ~/.agents/skills/agent-toolkit/scripts/agentq stats --plain
 ```
 
-Interactive terminals use Rich when `python3-rich` is installed; plain and JSON modes remain dependency-free. Tool failures are kept separate from child-command failures, unknown reduction is not reported as zero, and timestamps display locally unless `--utc` is set. Telemetry is local, privacy-minimized, and disabled with `AGENTQ_TELEMETRY=0`. Run `agentq stats --archive` from a normal shell when persistent history is wanted.
+Interactive terminals use Rich when `python3-rich` is installed; plain and JSON modes remain dependency-free. Tool failures are kept separate from child-command failures, unknown reduction is not reported as zero, and timestamps display locally unless `--utc` is set. Telemetry is local, privacy-minimized, and disabled with `AGENTQ_TELEMETRY=0`. Hot telemetry remains sandbox-safe under `/tmp`; install the optional user-level systemd archive timer from a normal shell with `agentq stats --install-persistence`. Inspect storage with `agentq stats --storage`. Reset current-repository history with `agentq stats --reset`; use `--hot-only` to leave archived history untouched and `--all-repos` to intentionally reset every repository.
 
 ## Optional dependencies
 

@@ -215,7 +215,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         link.symlink_to(AGENTQ)
         result = subprocess.run([str(link), "--version"], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertIn("agentq 1.2.2", result.stdout)
+        self.assertIn("agentq 1.2.3", result.stdout)
 
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -331,6 +331,86 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertTrue(self.archive.is_file())
         self.assertEqual(self.archive.stat().st_mode & 0o777, 0o600)
 
+
+    def test_stats_archive_only_is_idempotent_and_storage_reads_both_sources(self) -> None:
+        self.data("search", "OldName")
+        first = self.data("stats", "--archive-only", "--all-repos")
+        second = self.data("stats", "--archive-only", "--all-repos")
+        self.assertEqual(first["added"], 1)
+        self.assertEqual(second["added"], 0)
+        storage = self.data("stats", "--storage")
+        self.assertEqual(storage["persistent"]["events"], 1)
+        self.assertEqual(storage["hot"]["events"], 1)
+        stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["events"], 1)
+
+    def test_stats_reset_current_repo_preserves_other_repo_and_hot_only_preserves_archive(self) -> None:
+        self.data("search", "OldName")
+        self.data("stats", "--archive-only", "--all-repos")
+
+        other = Path(self.temp.name) / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        argv = [str(AGENTQ), "search", "--repo", str(other), "--format", "json", "nothing"]
+        result = subprocess.run(argv, text=True, capture_output=True, env=self.env)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+        reset = self.data("stats", "--reset")
+        self.assertGreaterEqual(reset["hot_removed"] + reset["persistent_removed"], 1)
+        current = self.data("stats", "--since", "all")
+        self.assertEqual(current["events"], 0)
+        all_stats = self.data("stats", "--since", "all", "--all-repos")
+        self.assertEqual(all_stats["events"], 1)
+
+        self.data("search", "OldName")
+        self.data("stats", "--archive-only", "--all-repos")
+        self.data("search", "Wrapped")
+        hot_reset = self.data("stats", "--reset", "--hot-only")
+        self.assertGreaterEqual(hot_reset["hot_removed"], 1)
+        after = self.data("stats", "--since", "all")
+        self.assertGreaterEqual(after["events"], 1)  # archived event intentionally remains
+
+    def test_stats_reset_refuses_active_task_without_force(self) -> None:
+        self.data("task", "begin")
+        result = self.aq("stats", "--reset", expect=2)
+        self.assertIn("task is active", result.stderr)
+        forced = self.data("stats", "--reset", "--force")
+        self.assertEqual(forced["active_tasks_preserved"], 1)
+        self.data("task", "abandon")
+
+    def test_stats_persistence_installer_writes_and_controls_user_units(self) -> None:
+        config = Path(self.temp.name) / "config"
+        fake_systemctl = self.bin / "systemctl-agentq-test"
+        fake_systemctl.write_text(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            case "$*" in
+              *is-active*) echo active ;;
+              *is-enabled*) echo enabled ;;
+            esac
+            exit 0
+        """), encoding="utf-8")
+        fake_systemctl.chmod(0o755)
+        env = {
+            "XDG_CONFIG_HOME": str(config),
+            "AGENTQ_SYSTEMCTL": str(fake_systemctl),
+        }
+        installed = self.data("stats", "--install-persistence", "--persistence-interval", "5min", extra_env=env)
+        self.assertEqual(installed["active"], "active")
+        timer = config / "systemd/user/agentq-archive.timer"
+        service = config / "systemd/user/agentq-archive.service"
+        self.assertTrue(timer.is_file())
+        self.assertTrue(service.is_file())
+        self.assertIn("OnUnitActiveSec=5min", timer.read_text(encoding="utf-8"))
+        self.assertIn("stats --archive-only --all-repos", service.read_text(encoding="utf-8"))
+        self.assertIn("StandardOutput=null", service.read_text(encoding="utf-8"))
+        storage = self.data("stats", "--storage", extra_env=env)
+        self.assertTrue(storage["timer"]["installed"] )
+        self.assertEqual(storage["timer"]["active"], "active")
+        removed = self.data("stats", "--remove-persistence", extra_env=env)
+        self.assertEqual(len(removed["removed"]), 2)
+        self.assertFalse(timer.exists())
+        self.assertFalse(service.exists())
 
     def test_stats_distinguishes_tool_health_from_child_command_failure(self) -> None:
         self.data("run", "--", "python3", "-c", "raise SystemExit(7)")

@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,6 +27,9 @@ ACCEPTED_SCHEMAS = {1, 2, 3}
 MAX_EVENT_BYTES = 4096
 MAX_HOT_BYTES = 10 * 1024 * 1024
 SPARKS = "▁▂▃▄▅▆▇█"
+ARCHIVE_SERVICE = "agentq-archive.service"
+ARCHIVE_TIMER = "agentq-archive.timer"
+DEFAULT_ARCHIVE_INTERVAL = "5min"
 
 
 def telemetry_enabled() -> bool:
@@ -60,6 +64,326 @@ def archive_file() -> Path:
         return path if path.suffix else path / "events.jsonl"
     state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     return state / "agentq" / "events.jsonl"
+
+
+def systemd_user_dir() -> Path:
+    config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config / "systemd" / "user"
+
+
+def _systemctl_path() -> str | None:
+    override = os.environ.get("AGENTQ_SYSTEMCTL")
+    return override or shutil.which("systemctl")
+
+
+def _systemctl_status(unit: str, action: str) -> str:
+    executable = _systemctl_path()
+    if not executable:
+        return "unavailable"
+    try:
+        result = subprocess.run(
+            [executable, "--user", action, unit],
+            text=True, capture_output=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    text = (result.stdout or result.stderr).strip().splitlines()
+    if text:
+        return text[-1].strip()
+    return "yes" if result.returncode == 0 else "no"
+
+
+def _systemd_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _agentq_executable() -> str:
+    candidate = shutil.which("agentq")
+    if candidate:
+        return str(Path(candidate).absolute())
+    return str(Path(sys.argv[0]).absolute())
+
+
+def _valid_systemd_interval(value: str) -> str:
+    normalized = value.strip()
+    if not re.fullmatch(r"[1-9][0-9]*(?:s|sec|secs|min|mins|m|h|hr|hrs)", normalized, re.IGNORECASE):
+        raise AgentQError("persistence interval must look like 30s, 5min, or 1h")
+    return normalized
+
+
+def install_persistence(*, interval: str = DEFAULT_ARCHIVE_INTERVAL) -> dict[str, Any]:
+    interval = _valid_systemd_interval(interval)
+    # The install command is intended for a normal user shell. Persist the
+    # current hot set immediately so enabling the timer never leaves existing
+    # telemetry waiting for its first scheduled run.
+    initial_archive = archive_hot_events()
+    systemctl = _systemctl_path()
+    if not systemctl:
+        raise AgentQError("systemctl is unavailable; automatic telemetry persistence requires a systemd user session")
+
+    unit_dir = _secure_dir(systemd_user_dir())
+    service = unit_dir / ARCHIVE_SERVICE
+    timer = unit_dir / ARCHIVE_TIMER
+    executable = _agentq_executable()
+
+    environment_lines: list[str] = []
+    for key in ("AGENTQ_TELEMETRY_HOT", "AGENTQ_TELEMETRY_STATE"):
+        value = os.environ.get(key)
+        if value:
+            environment_lines.append(f"Environment={_systemd_quote(f'{key}={value}')}" )
+
+    service_text = "\n".join([
+        "[Unit]",
+        "Description=Persist agentq telemetry",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "UMask=0077",
+        *environment_lines,
+        f"ExecStart={_systemd_quote(executable)} stats --archive-only --all-repos",
+        "StandardOutput=null",
+        "StandardError=journal",
+        "",
+    ])
+    timer_text = "\n".join([
+        "[Unit]",
+        "Description=Periodically persist agentq telemetry",
+        "",
+        "[Timer]",
+        "OnBootSec=2min",
+        f"OnUnitActiveSec={interval}",
+        "AccuracySec=30s",
+        "Persistent=true",
+        f"Unit={ARCHIVE_SERVICE}",
+        "",
+        "[Install]",
+        "WantedBy=timers.target",
+        "",
+    ])
+
+    try:
+        service.write_text(service_text, encoding="utf-8")
+        timer.write_text(timer_text, encoding="utf-8")
+        service.chmod(0o600)
+        timer.chmod(0o600)
+        subprocess.run([systemctl, "--user", "daemon-reload"], check=True, timeout=5)
+        subprocess.run([systemctl, "--user", "enable", "--now", ARCHIVE_TIMER], check=True, timeout=8)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise AgentQError(f"unable to install agentq archive timer: {exc}") from exc
+
+    return {
+        "action": "install-persistence",
+        "service": str(service),
+        "timer": str(timer),
+        "interval": interval,
+        "active": _systemctl_status(ARCHIVE_TIMER, "is-active"),
+        "enabled": _systemctl_status(ARCHIVE_TIMER, "is-enabled"),
+        "initial_archive": initial_archive,
+    }
+
+
+def remove_persistence() -> dict[str, Any]:
+    systemctl = _systemctl_path()
+    unit_dir = systemd_user_dir()
+    service = unit_dir / ARCHIVE_SERVICE
+    timer = unit_dir / ARCHIVE_TIMER
+    if systemctl:
+        subprocess.run([systemctl, "--user", "disable", "--now", ARCHIVE_TIMER], check=False, timeout=8)
+    removed: list[str] = []
+    for path in (timer, service):
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(str(path))
+        except OSError as exc:
+            raise AgentQError(f"unable to remove {path}: {exc}") from exc
+    if systemctl:
+        subprocess.run([systemctl, "--user", "daemon-reload"], check=False, timeout=5)
+    return {"action": "remove-persistence", "removed": removed}
+
+
+def _file_storage(path: Path, repo_id: str | None = None) -> dict[str, Any]:
+    events = list(_iter_jsonl(path)) if path.exists() else []
+    current = sum(event.get("repo_id") == repo_id for event in events) if repo_id else None
+    try:
+        info = path.stat()
+        size = info.st_size
+        modified = info.st_mtime
+    except OSError:
+        size = 0
+        modified = None
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "events": len(events),
+        "current_repo_events": current,
+        "bytes": int(size),
+        "modified": modified,
+    }
+
+
+def storage_data(root: Path | None = None) -> dict[str, Any]:
+    repo_id = _repo_id(root) if root else None
+    hot = _file_storage(hot_file(), repo_id)
+    rotated = _file_storage(hot_file().with_suffix(".jsonl.1"), repo_id)
+    persistent = _file_storage(archive_file(), repo_id)
+    timer_path = systemd_user_dir() / ARCHIVE_TIMER
+    interval = None
+    if timer_path.exists():
+        try:
+            match = re.search(r"^OnUnitActiveSec=(.+)$", timer_path.read_text(encoding="utf-8"), re.MULTILINE)
+            interval = match.group(1).strip() if match else None
+        except OSError:
+            pass
+    return {
+        "hot": hot,
+        "hot_rotated": rotated,
+        "persistent": persistent,
+        "timer": {
+            "unit": str(timer_path),
+            "installed": timer_path.exists(),
+            "active": _systemctl_status(ARCHIVE_TIMER, "is-active") if timer_path.exists() else "not-installed",
+            "enabled": _systemctl_status(ARCHIVE_TIMER, "is-enabled") if timer_path.exists() else "not-installed",
+            "interval": interval,
+        },
+    }
+
+
+def _rewrite_excluding_repo(path: Path, repo_id: str) -> int:
+    if not path.exists():
+        return 0
+    _secure_dir(path.parent)
+    temporary = path.parent / f".{path.name}.reset-{os.getpid()}-{secrets.token_hex(4)}"
+    removed = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as source, temporary.open("w", encoding="utf-8") as target:
+            for line in source:
+                keep = True
+                try:
+                    event = json.loads(line)
+                    if isinstance(event, dict) and event.get("repo_id") == repo_id:
+                        keep = False
+                except json.JSONDecodeError:
+                    pass
+                if keep:
+                    target.write(line)
+                else:
+                    removed += 1
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise AgentQError(f"unable to reset telemetry file {path}: {exc}") from exc
+    return removed
+
+
+def _active_task_count() -> int:
+    tasks = hot_dir() / "tasks"
+    try:
+        return sum(1 for path in tasks.iterdir() if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return 0
+
+
+def reset_telemetry(root: Path, *, all_repos: bool = False, hot_only: bool = False, force: bool = False) -> dict[str, Any]:
+    active = _active_task_count() if all_repos else (1 if current_task_state(root) else 0)
+    if active and not force:
+        scope = "one or more repositories" if all_repos else "this repository/worktree"
+        raise AgentQError(f"an agentq task is active for {scope}; accept/abandon it first or pass --force")
+
+    repo_id = _repo_id(root)
+    persistent_removed = 0
+    hot_removed = 0
+
+    # Persistent state is handled first. Under Codex sandboxing this fails before
+    # hot telemetry is modified, avoiding a misleading partial reset.
+    if not hot_only:
+        path = archive_file()
+        if all_repos:
+            persistent_removed = sum(1 for _ in _iter_jsonl(path))
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise AgentQError(f"unable to reset persistent telemetry {path}: {exc}") from exc
+        else:
+            persistent_removed = _rewrite_excluding_repo(path, repo_id)
+
+    for path in (hot_file().with_suffix(".jsonl.1"), hot_file()):
+        if all_repos:
+            hot_removed += sum(1 for _ in _iter_jsonl(path))
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise AgentQError(f"unable to reset hot telemetry {path}: {exc}") from exc
+        else:
+            hot_removed += _rewrite_excluding_repo(path, repo_id)
+
+    return {
+        "action": "reset",
+        "scope": "all-repositories" if all_repos else root.name,
+        "hot_only": bool(hot_only),
+        "hot_removed": hot_removed,
+        "persistent_removed": persistent_removed,
+        "active_tasks_preserved": active,
+    }
+
+
+def render_storage(data: dict[str, Any]) -> str:
+    def short_path(value: str) -> str:
+        home = str(Path.home())
+        return "~" + value[len(home):] if value.startswith(home + os.sep) else value
+
+    def age_label(value: float | None) -> str:
+        if value is None:
+            return ""
+        seconds = max(0, int(time.time() - value))
+        if seconds < 60:
+            return f"{seconds}s ago"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        if seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        return f"{seconds // 86400}d ago"
+
+    lines = ["agentq telemetry storage"]
+    for label, key in (("hot", "hot"), ("rotated", "hot_rotated"), ("persistent", "persistent")):
+        item = data[key]
+        current = item.get("current_repo_events")
+        suffix = f" · {current} current-repo" if current is not None else ""
+        updated = age_label(item.get("modified"))
+        updated_suffix = f" · updated {updated}" if updated else ""
+        lines.append(f"{label:<10} {human_bytes(item['bytes']):>9} · {item['events']} events{suffix}{updated_suffix} · {short_path(item['path'])}")
+    timer = data["timer"]
+    if timer["installed"]:
+        timer_bits = [timer["active"], timer["enabled"]]
+        if timer.get("interval"):
+            timer_bits.append(str(timer["interval"]))
+        lines.append(f"timer      {' · '.join(timer_bits)}")
+    else:
+        lines.append("timer      not installed")
+        lines.append("install    agentq stats --install-persistence")
+    return "\n".join(lines)
+
+
+def render_persistence(data: dict[str, Any]) -> str:
+    if data.get("action") == "install-persistence":
+        return f"archive timer installed · {data['interval']} · {data['active']} · {data['enabled']}"
+    return f"archive timer removed · {len(data.get('removed', []))} unit file(s)"
+
+
+def render_reset(data: dict[str, Any]) -> str:
+    total = int(data.get("hot_removed", 0)) + int(data.get("persistent_removed", 0))
+    scope = data.get("scope", "current repository")
+    detail = "hot only" if data.get("hot_only") else "hot + persistent"
+    return f"telemetry reset · {scope} · {total} events removed · {detail}"
+
+
+def render_archive(data: dict[str, Any]) -> str:
+    return f"telemetry archived · +{data.get('added', 0)} · {data.get('total_archived', 0)} persistent"
 
 
 def _repo_id(root: Path) -> str:
@@ -858,7 +1182,7 @@ def render_stats_plain(data: dict[str, Any], *, utc: bool = False) -> str:
         lines.extend([
             "No telemetry events in this scope.",
             "Run normal agentq commands, then use: agentq stats --since 7d",
-            "Persist history from a normal shell with: agentq stats --archive",
+            "Install persistence from a normal shell with: agentq stats --install-persistence",
         ])
         return "\n".join(lines)
 
