@@ -4,7 +4,7 @@ description: Execute controlled mechanical renames, literal or regex replacement
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. ast-grep is required for syntax-aware transformations.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   mutation: "explicit-only"
 ---
 

@@ -1,10 +1,10 @@
 ---
 name: targeted-verification
-description: Use for tests, typechecks, lint, builds, and changed-code verification. MUST use workspace-aware agentq verify-changed or bounded agentq run instead of raw verbose verification when covered. Prefer the narrowest affected ladder; do not start watch mode, servers, or interactive prompts.
+description: Use for tests, typechecks, lint, builds, and changed-code verification. MUST use workspace-aware agentq verify or bounded agentq run instead of raw verbose verification when covered. Canonical verify automatically uses the active task baseline when present; do not start watch mode, servers, or interactive prompts.
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Project commands must already be installed. Node/pnpm workspaces and Vitest receive specialized local planning.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   mutation: "command-dependent"
 ---
 
@@ -12,31 +12,31 @@ metadata:
 
 ## Changed-code default
 
-When an agentq task is active, prefer task-scoped verification so unrelated pre-existing dirty files do not inflate the plan:
+Use the canonical command:
 
 ```bash
-agentq verify-task --dry-run
-agentq verify-task
+agentq verify --dry-run
+agentq verify
 ```
 
-Outside an active task, use worktree/base-scoped verification:
+With an active agentq task, `verify` automatically scopes to files changed since that task baseline. Without an active task it verifies the worktree; `--base origin/main` requests base-scoped verification. Use explicit forms only when overriding that automatic choice:
 
 ```bash
-agentq verify-changed --dry-run
-agentq verify-changed --dry-run --base origin/main
-agentq verify-changed
+agentq verify-task                 # force active-task scope
+agentq verify-changed              # force worktree/base behavior
+agentq verify --base origin/main
 ```
 
-`agentq task changes`, `agentq git-diff --task`, and `agentq test-plan --task` expose the same task baseline explicitly.
+`agentq task changes`, `agentq git-diff --task`, and `agentq test-plan --task` expose the task baseline explicitly.
 
 `standard` mode verifies changed packages plus direct local dependents. Use narrower or broader modes deliberately:
 
 ```bash
-agentq verify-changed --mode focused
-agentq verify-changed --mode thorough
+agentq verify --mode focused
+agentq verify --mode thorough
 ```
 
-The legacy spelling `verified-changed` is accepted as an alias; prefer `verify-changed` in new instructions.
+The legacy spelling `verified-changed` remains accepted for compatibility. New instructions should use `verify` unless an explicit scope override is required. Dry-run results are reported as `DRY-RUN`, not as pending work.
 
 ## Explicit command fallback
 

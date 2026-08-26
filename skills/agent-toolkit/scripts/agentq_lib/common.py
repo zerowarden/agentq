@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 DEFAULT_SKIP_PARTS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
@@ -135,6 +135,20 @@ def classify_path(path: str | Path) -> str:
         if pattern.search(value):
             return role
     return "source"
+
+
+def scope_match(path: str, scopes: list[str]) -> bool:
+    if not scopes or scopes == ["."]:
+        return True
+    normalized = path.replace(os.sep, "/")
+    for scope in scopes:
+        value = scope.replace(os.sep, "/")
+        while value.startswith("./"):
+            value = value[2:]
+        value = value.rstrip("/")
+        if value in {"", "."} or normalized == value or normalized.startswith(value + "/"):
+            return True
+    return False
 
 
 def find_executable(name: str) -> str | None:
@@ -311,32 +325,12 @@ def write_private_log(root: Path, label: str, text: str) -> Path:
 def bound_output(text: str, budget: int) -> tuple[str, bool]:
     if budget <= 0 or len(text) <= budget:
         return text, False
-    marker = f"\n… [agentq output truncated at {budget} chars; narrow scope or raise --budget]"
+    marker = f"\n… [complete records omitted at {budget} chars; narrow the command scope]"
     cutoff = max(0, budget - len(marker))
     head = text[:cutoff]
     newline = head.rfind("\n")
-    if newline >= max(0, cutoff - 800):
-        head = head[:newline]
-    return head.rstrip() + marker, True
-
-
-def render(data: Any, *, fmt: str = "text", text: str | None = None, budget: int = 12000) -> None:
-    if fmt == "json":
-        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        if budget > 0 and len(payload) > budget:
-            payload = json.dumps({
-                "truncated": True,
-                "reason": "structured output exceeds agentq character budget",
-                "chars": len(payload),
-                "budget": budget,
-                "hint": "narrow scope or explicitly raise --budget",
-            }, ensure_ascii=False, separators=(",", ":"))
-        print(payload)
-        return
-    if text is None:
-        text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    bounded, _ = bound_output(str(text).rstrip(), budget)
-    print(bounded)
+    head = head[:newline] if newline >= 0 else ""
+    return (head.rstrip() + marker if head else marker.lstrip()), True
 
 
 def add_rg_excludes(args: list[str], *, include_sensitive: bool = False) -> None:

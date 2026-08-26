@@ -12,13 +12,13 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 "$AQ" repo-map
 "$AQ" files offer --path packages --limit 40
 
-# Known TypeScript/JavaScript identifier: navigate semantically first.
-"$AQ" ts-nav locate AssignmentOffer --path packages/contexts/dispatch
-"$AQ" ts-nav references AssignmentOffer --path packages/contexts/dispatch --limit 60
+# Known TypeScript/JavaScript or Python identifier: use one overview first.
+"$AQ" inspect AssignmentOffer --path packages/contexts/dispatch
+"$AQ" inspect calculate_total --path packages/services
 
 # Unknown symbol, string, configuration key, or semantic fallback.
-"$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60
-"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --type ts --limit 30
+"$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60 --format compact-json
+"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --type ts --limit 30 --format compact-json
 "$AQ" outline packages/contexts/dispatch/src --public --limit 120
 "$AQ" read packages/contexts/dispatch/src/offers.ts:50-180
 ```
@@ -68,6 +68,8 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 "$AQ" run -- pnpm --filter @app/dispatch test
 "$AQ" run --cwd crates/engine -- cargo check
 "$AQ" audit --base origin/main
+"$AQ" git-diff --task --hunks
+"$AQ" verify
 "$AQ" benchmark --warmup 3 --runs 15 --command 'command-a' --command 'command-b'
 ```
 

@@ -4,7 +4,7 @@ description: Use when an exact TypeScript/JavaScript symbol or exact source posi
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Node.js, and a TypeScript dependency resolvable from the repository. Uses only local project files.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   mutation: "none"
 ---
 

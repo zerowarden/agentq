@@ -1,22 +1,60 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
 
+from .budgeting import RenderedText, rendered_text
 from .common import AgentQError, classify_path, ensure_within, language_for, relpath
-from .search import outline_data, render_outline, render_search, search_data
+from .pythonnav import python_symbol_overview, render_python_overview
+from .search import outline_data, read_data, render_outline, render_read, render_search, search_data
 from .tsnav import render_ts_nav, ts_nav_data
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _TS_JS = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 
 
-def inspect_data(root: Path, target: str, paths: list[str], *, limit: int = 80, context: int = 2) -> dict[str, Any]:
+def inspect_data(
+    root: Path,
+    target: str,
+    paths: list[str],
+    *,
+    limit: int = 80,
+    context: int = 2,
+    line_anchors: list[int] | None = None,
+    line_ranges: list[tuple[int, int]] | None = None,
+    max_lines: int = 240,
+    repeat: bool = False,
+    budget: int = 0,
+    output_format: str = "text",
+) -> dict[str, Any]:
+    anchors = line_anchors or []
+    ranges = line_ranges or []
     candidate = ensure_within(root, Path(target))
     if candidate.exists():
         relative = relpath(root, candidate)
         if candidate.is_file():
+            if anchors or ranges:
+                wrapper = {
+                    "kind": "source-windows",
+                    "target": target,
+                    "path": relative,
+                    "role": classify_path(relative),
+                    "language": language_for(relative),
+                }
+                source_budget = budget
+                if budget > 0 and output_format in {"json", "compact-json"}:
+                    empty_wrapper = json.dumps(
+                        {**wrapper, "source": {}}, ensure_ascii=False, separators=(",", ":"),
+                    )
+                    source_budget = max(1, budget - (len(empty_wrapper) - 2))
+                source = read_data(
+                    root, [relative], line_anchors=anchors, line_ranges=ranges, context=context,
+                    max_lines=max_lines, max_chars=260, include_sensitive=False, repeat=repeat,
+                    cache_command="inspect", budget=source_budget, output_format=output_format,
+                )
+                return {**wrapper, "source": source}
             outline = outline_data(root, [relative], None, False, None, min(limit, 120))
             return {
                 "kind": "file",
@@ -26,6 +64,8 @@ def inspect_data(root: Path, target: str, paths: list[str], *, limit: int = 80, 
                 "language": language_for(relative),
                 "outline": outline,
             }
+        if anchors or ranges:
+            raise AgentQError("--line/--lines require inspect TARGET to be a file")
         return {
             "kind": "directory",
             "target": target,
@@ -46,6 +86,10 @@ def inspect_data(root: Path, target: str, paths: list[str], *, limit: int = 80, 
             semantic_error = str(exc)
         else:
             semantic_error = None
+
+        python = python_symbol_overview(root, target, paths, limit)
+        if python:
+            return {"kind": "python", "target": target, "python": python}
 
         lexical = search_data(
             root, target, paths,
@@ -71,14 +115,25 @@ def render_inspect(data: dict[str, Any], *, budget: int = 0) -> str:
     kind = data.get("kind")
     if kind == "semantic":
         return render_ts_nav(data["semantic"], budget=budget)
+    if kind == "python":
+        return render_python_overview(data["python"], budget=budget)
+    if kind == "source-windows":
+        return render_read(data["source"], budget=budget)
     if kind == "lexical":
         prefix = ""
         if data.get("semantic_unavailable"):
             prefix = "semantic unavailable; lexical fallback\n"
-        return prefix + render_search(data["search"], budget=max(0, budget - len(prefix)) if budget else 0)
+        rendered = render_search(data["search"], budget=max(0, budget - len(prefix)) if budget else 0)
+        return rendered_text(
+            prefix + rendered,
+            prebudget_chars=len(prefix) + (
+                rendered.prebudget_chars if isinstance(rendered, RenderedText) else len(rendered)
+            ),
+            truncated=rendered.truncated if isinstance(rendered, RenderedText) else False,
+        )
     if kind in {"file", "directory"}:
         header = f"inspect {data.get('path')}"
         if kind == "file":
             header += f" [{data.get('role')}; {data.get('language')}]"
-        return header + "\n" + render_outline(data["outline"])
-    return f"inspect {data.get('target', '?')}: no result"
+        return rendered_text(header + "\n" + render_outline(data["outline"]))
+    return rendered_text(f"inspect {data.get('target', '?')}: no result")

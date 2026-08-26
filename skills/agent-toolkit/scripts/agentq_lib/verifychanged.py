@@ -199,12 +199,21 @@ def _format_duration(seconds: float) -> str:
 
 
 def render_verify_changed(data: dict[str, Any]) -> str:
-    status = str(data["status"]).upper()
-    symbol = "PASS" if data.get("ok") else "PLAN" if data["status"] == "planned" else "SKIP" if data["status"].startswith("skipped") else "FAIL"
+    status_raw = str(data["status"])
+    status = "DRY-RUN" if status_raw == "planned" else status_raw.upper()
+    if status_raw == "planned":
+        symbol = "DRY"
+    elif data.get("ok"):
+        symbol = "PASS"
+    elif status_raw.startswith("skipped"):
+        symbol = "SKIP"
+    else:
+        symbol = "FAIL"
+    scope = str(data.get("verification_scope") or ("base" if data.get("base") else "worktree"))
     lines = [
-        f"{symbol}: verify-changed [{status}]",
-        f"workspace={data.get('workspace_packages', 0)} packages/{data.get('workspace_edges', 0)} edges  mode={data.get('mode')}  dependents={data.get('dependents')}",
-        f"changed={len(data.get('changed_files', []))} files/{len(data.get('changed_packages', []))} packages  affected={len(data.get('affected_packages', []))} packages",
+        f"{symbol}: verify [{status}] · scope={scope} · mode={data.get('mode')} · dependents={data.get('dependents')}",
+        f"changes: {len(data.get('changed_files', []))} files · {len(data.get('changed_packages', []))} changed pkgs · "
+        f"{len(data.get('affected_packages', []))} affected pkgs",
     ]
     if data.get("changed_packages"):
         lines.append("changed packages: " + ", ".join(data["changed_packages"][:12]))
@@ -212,17 +221,19 @@ def render_verify_changed(data: dict[str, Any]) -> str:
         lines.append("dependent packages: " + ", ".join(data["dependent_packages"][:12]) + (" …" if len(data["dependent_packages"]) > 12 else ""))
 
     if data.get("dry_run"):
-        lines.append(f"\nplanned checks: {data.get('selected_steps', 0)}/{data.get('planned_steps', 0)}")
+        lines.append(f"\ndry-run checks: {data.get('selected_steps', 0)}/{data.get('planned_steps', 0)}")
         for index, step in enumerate(data.get("plan", []), 1):
             lines.append(f"  {index:>2}. {step['kind']:<20} {step['package']}  cwd={step['cwd']}")
         if data.get("steps_limited"):
-            lines.append("  plan truncated by --max-steps")
+            lines.append("  dry-run truncated by --max-steps")
         return "\n".join(lines)
 
+    executed = int(data.get("executed_steps", 0))
+    passed = int(data.get("passed_steps", 0))
+    failed = int(data.get("failed_steps", 0))
     lines.append(
-        f"\nchecks: {data.get('passed_steps', 0)} passed / {data.get('failed_steps', 0)} failed / "
-        f"{data.get('executed_steps', 0)} executed of {data.get('planned_steps', 0)} planned  "
-        f"duration={_format_duration(float(data.get('duration_seconds', 0)))}"
+        f"\nchecks: {executed}/{data.get('planned_steps', 0)} executed · {passed} passed · {failed} failed · "
+        f"{_format_duration(float(data.get('duration_seconds', 0)))}"
     )
     for result in data.get("results", []):
         marker = "✓" if result["exit_code"] == 0 else "✗"
@@ -240,8 +251,8 @@ def render_verify_changed(data: dict[str, Any]) -> str:
     raw_lines = int(data.get("raw_output_lines", 0))
     if raw_chars or raw_lines:
         lines.append(f"\nraw command output captured locally: {raw_lines} lines / {raw_chars} chars")
-    if data.get("status") == "unverified":
+    if status_raw == "unverified":
         lines.append("\nNo deterministic verification command was found; inspect project scripts/instructions.")
-    if data.get("status") == "partial":
+    if status_raw == "partial":
         lines.append("\nVerification is partial; increase --max-steps or narrow the change set.")
     return "\n".join(lines)

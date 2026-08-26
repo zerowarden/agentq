@@ -16,7 +16,6 @@ The bundle is intentionally useful with only **Git**, **ripgrep**, and **Python 
 | Useful | ShellCheck | static analysis for shell scripts | Kubuntu package |
 | Useful | shfmt | deterministic shell formatting | Kubuntu package |
 | Useful | jq | manual inspection of `--format json` output | Kubuntu package |
-| Useful | Rich (`python3-rich`) | responsive local `agentq stats` dashboard and live refresh | Kubuntu package |
 | Useful | Tokei | fast local code statistics | Kubuntu package if available, otherwise Cargo |
 | Optional | fd (`fdfind` on Debian/Ubuntu) | ergonomic human filename discovery | Kubuntu `fd-find` package |
 | Optional | Gitleaks | local repository or directory secret scanning | official binary, Go install, or pinned pre-commit hook |
@@ -28,7 +27,6 @@ The bundle is intentionally useful with only **Git**, **ripgrep**, and **Python 
 - **Universal Ctags** can emit one JSON object per tag and accepts a file list, avoiding shell argument-length failures.
 - **Difftastic** makes selected dense code diffs easier to understand, but it is deliberately restricted to one file at a time in this bundle.
 - **Hyperfine** performs warmups and repeated measurements. Its output is reduced to the statistics required for comparison.
-- **Rich** is used only for human terminal presentation. It is optional; plain text and JSON remain built-in and dependency-free.
 - **Gitleaks** is local and redaction-aware, but it is not invoked automatically: repositories need their own allowlists/baselines, and a secret scan is materially different from a generic patch heuristic.
 
 ## Tools deliberately not required

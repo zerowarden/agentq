@@ -4,7 +4,7 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 license: MIT
 compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   network: "runtime-offline"
 ---
 
@@ -19,7 +19,7 @@ agentq doctor
 ~/.agents/skills/agent-toolkit/scripts/validate-skills
 ```
 
-Use `--format json` only when another program consumes the result.
+Use `search --format compact-json` for structured search results. Use legacy `--format json` only when a consumer requires its compatibility fields.
 
 ## Design constraints
 
@@ -28,6 +28,8 @@ Use `--format json` only when another program consumes the result.
 - Exclude sensitive paths and redact common secret-like values by default.
 - Keep full command output only in mode-`0600` redacted logs under the sandbox-safe runtime directory.
 - Store only allowlisted operational telemetry; query/command identity uses keyed local HMAC fingerprints, never raw queries, source text, command arguments, task names, or absolute repository paths.
+- When `AGENTQ_TELEMETRY=0`, normal commands must not read, write, or create telemetry storage or apply telemetry-backed output suppression.
+- Use only the bounded, hashed context cache for exact-repeat suppression; normal exploration commands must never scan telemetry history.
 - Never silently substitute lexical evidence for semantic proof.
 - Never mutate files unless a command has an explicit mutation flag.
 - Never download packages or execute `npx` during ordinary skill use.
@@ -43,7 +45,7 @@ dependencies, impact
 
 codemod-scan, codemod-apply
 
-run, test-plan, verify-changed, verify-task, audit, benchmark
+run, test-plan, verify, verify-changed, verify-task, audit, benchmark
 
 task, stats, doctor
 ```
@@ -84,12 +86,13 @@ Task state is repository/worktree-scoped. Concurrent independent tasks should us
 
 ```bash
 agentq stats --since 7d
-agentq stats --detailed            # adds recent activity
+agentq stats --detail              # failures, command chains, navigation, accepted-task outcomes, verification
+agentq stats --recent 8            # detailed mode plus 8 recent operations
 agentq stats --watch 2
 agentq stats --plain
 ```
 
-The operations table reports agentq/tool health separately from wrapped-command pass/fail counts. Interactive terminals use Rich when `python3-rich` is installed; plain and JSON modes remain dependency-free. Telemetry is local, privacy-minimized, and disabled with `AGENTQ_TELEMETRY=0`.
+The operations table reports only agentq/CLI health. Wrapped project-command outcomes are summarized separately. Accepted tasks track calls by command, visible characters, estimated tokens, same-context overlap, exact suppression, expanded retries, verification result, and correction calls. Character counts are authoritative; token counts are labeled estimates, and lower output with more retries or missed verification is a regression. `--detail` does not add a generic recent-command list; use `--recent N` when that transcript view is useful. Interactive terminals use the built-in ANSI renderer; plain and JSON modes remain dependency-free. Telemetry is local, privacy-minimized, and disabled with `AGENTQ_TELEMETRY=0`.
 
 Hot telemetry remains sandbox-safe under `/tmp`. From a normal shell:
 

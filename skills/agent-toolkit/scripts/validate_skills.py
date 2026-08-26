@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -33,6 +35,65 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, str], str]:
             value = value[1:-1]
         data[key.strip()] = value
     return data, text
+
+
+def _agentq_examples(text: str) -> list[str]:
+    commands: list[str] = []
+    pending = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if pending:
+            pending += " " + stripped
+        elif stripped.startswith("agentq "):
+            pending = stripped
+        else:
+            continue
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        commands.append(pending)
+        pending = ""
+    if pending:
+        commands.append(pending)
+    return commands
+
+
+def _validate_agentq_examples(skills_root: Path, skills: list[Path]) -> list[str]:
+    errors: list[str] = []
+    scripts_dir = skills_root / "agent-toolkit" / "scripts"
+    module_path = scripts_dir / "agentq.py"
+    if not module_path.is_file():
+        return ["cannot validate agentq examples: agentq.py missing"]
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        spec = importlib.util.spec_from_file_location("agentq_validate_module", module_path)
+        if spec is None or spec.loader is None:
+            return ["cannot validate agentq examples: module loader unavailable"]
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        parser = module.build_parser()
+        for skill in skills:
+            text = (skill / "SKILL.md").read_text(encoding="utf-8")
+            for command in _agentq_examples(text):
+                try:
+                    argv = shlex.split(command, comments=True)
+                except ValueError as exc:
+                    errors.append(f"{skill.name}: malformed agentq example {command!r}: {exc}")
+                    continue
+                if len(argv) < 2 or any("<command>" in token for token in argv):
+                    continue
+                try:
+                    parser.parse_args(argv[1:])
+                except (module.AgentQError, SystemExit) as exc:
+                    if isinstance(exc, SystemExit) and exc.code == 0:
+                        continue
+                    errors.append(f"{skill.name}: invalid agentq example {command!r}: {exc}")
+    finally:
+        try:
+            sys.path.remove(str(scripts_dir))
+        except ValueError:
+            pass
+    return errors
 
 
 def main() -> int:
@@ -116,6 +177,8 @@ def main() -> int:
         result = subprocess.run([str(agentq), "--version"], text=True, capture_output=True)
         if result.returncode != 0:
             errors.append("agentq --version failed")
+        else:
+            errors.extend(_validate_agentq_examples(skills_root, skills))
 
     print(f"skills: {len(skills)}")
     print(f"python files: {len(python_files)}")

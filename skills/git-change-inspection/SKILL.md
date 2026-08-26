@@ -4,7 +4,7 @@ description: Use for Git status, diff, history, patch review, and high-signal pa
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Git. Difftastic is optional for one-file syntax-aware diffs.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   mutation: "none"
 ---
 
@@ -48,5 +48,6 @@ Use `agentq git-*` for Git inspection covered by this skill. Do not issue raw un
 - Untracked files appear in status but not normal diff output; read only relevant files with repo-exploration.
 - Sensitive-file diff bodies are omitted.
 - A truncated patch is a signal to narrow scope, not raise every cap.
+- An identical task/thread-local diff may be summarized as unchanged instead of re-emitted. Use `agentq git-diff --repeat` only when the patch body must be shown again.
 - `git diff --check` failures are high priority.
 - This provides evidence, not semantic correctness or security approval.

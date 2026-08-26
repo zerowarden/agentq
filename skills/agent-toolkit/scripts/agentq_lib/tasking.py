@@ -5,12 +5,12 @@ import json
 import os
 import secrets
 import stat
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, run_cmd
+from .runtime import repo_id, secure_dir, telemetry_hot_dir
 from .workspace import changed_files
 
 _ACTION_ALIASES = {
@@ -22,32 +22,11 @@ _ACTION_ALIASES = {
 }
 
 
-def _secure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-    return path
-
-
-def _runtime_root() -> Path:
-    override = os.environ.get("AGENTQ_TELEMETRY_HOT")
-    if override:
-        return _secure_dir(Path(override).expanduser())
-    uid = os.getuid() if hasattr(os, "getuid") else "user"
-    return _secure_dir(Path(tempfile.gettempdir()) / f"agentq-{uid}" / "_telemetry")
-
-
-def _repo_id(root: Path) -> str:
-    return hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
-
-
 def _task_state_path(root: Path) -> Path:
     # Deliberately repo/worktree-scoped rather than Codex-thread-scoped. One
     # thread may complete several sequential tasks; concurrent tasks belong in
     # separate worktrees.
-    return _secure_dir(_runtime_root() / "tasks") / f"{_repo_id(root)}.json"
+    return secure_dir(telemetry_hot_dir() / "tasks") / f"{repo_id(root)}.json"
 
 
 def _read_state(root: Path) -> dict[str, Any] | None:

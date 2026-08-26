@@ -1,631 +1,149 @@
 # agentq
 
-`agentq` is a local CLI for inspecting, modifying, and verifying source repositories with bounded output.
+`agentq` is a local command-line helper for you and your coding agent. It finds the code that matters, summarizes changes, and runs checks without flooding the chat with thousands of lines of terminal output.
 
-It is intended for coding-agent workflows where raw commands such as `rg`, `git diff`, test runners, and compiler output can otherwise add large amounts of unnecessary context.
+Think of it as a quieter toolbox for vibe-coding: less scrolling, less repeated reading, and more room for the agent to focus on your actual code.
 
-`agentq` does not make network requests during normal operation. Repository searches and reads exclude common sensitive paths by default, and command logs redact common secret-like values.
+It can help you:
+
+- find files, text, and symbols;
+- read only the relevant parts of large files;
+- review Git changes in manageable chunks;
+- estimate what a change might affect;
+- run tests, lint, typechecks, and builds with concise results;
+- apply guarded codemods; and
+- track how efficiently an agent is working.
+
+Everything runs locally. Common secret and credential paths are excluded by default, and retained command logs redact common secret-like values.
 
 ## Requirements
 
-Required:
+- Python 3.10+
+- Git
+- [ripgrep](https://github.com/BurntSushi/ripgrep)
 
-* Python 3.10+
-* Git
-* [ripgrep](https://github.com/BurntSushi/ripgrep)
+Optional tools add richer outlines, diffs, audits, and benchmarks: ast-grep, Universal Ctags, Difftastic, ShellCheck, Gitleaks, Hyperfine, and others.
 
-Useful optional tools:
-
-* `rich` - terminal rendering for `agentq stats`
-* `ast-grep` - syntax-aware outlines and codemods
-* Universal Ctags - symbol outline fallback
-* Difftastic - structural file diffs
-* Hyperfine - reproducible benchmarks
-* `jq` - JSON inspection
-* `fd`, Tokei, ShellCheck, shfmt, Gitleaks
-
-Check the current environment with:
+Check what is available:
 
 ```bash
 agentq doctor
 ```
 
-## Installation
+## Install
+
+From this repository:
 
 ```bash
 mkdir -p ~/.local/bin
-ln -sf "$PWD/agent-toolkit/scripts/agentq" ~/.local/bin/agentq
-```
-
-Make sure `~/.local/bin` is on `PATH`, then check:
-
-```bash
+ln -sf "$PWD/skills/agent-toolkit/scripts/agentq" ~/.local/bin/agentq
 agentq --version
 agentq doctor
 ```
 
-Most commands operate on the repository containing the current directory. Use `--repo` to select another repository explicitly:
+Make sure `~/.local/bin` is on your `PATH`.
+
+## Quick start
+
+Most commands use the repository containing your current directory.
 
 ```bash
-agentq git-status --repo ~/Development/project
-```
-
-## Common options
-
-Most commands support:
-
-```text
---repo PATH          repository root
---format text|json   human or machine-readable output
---budget N           maximum model-visible characters
-```
-
-The default output budget is 12,000 characters.
-
-## Repository exploration
-
-### Find files
-
-```bash
-agentq files
-agentq files assignment-offer
-agentq files route --path apps/api
-```
-
-Results are bounded and sensitive paths are excluded by default.
-
-### Search source
-
-Search is fixed-string by default and reports exact matching-line/file totals separately from rendered samples:
-
-```bash
-agentq search AssignmentOffer
-agentq search 'foo.bar(' --path apps/api
-agentq search 'changes:' --path apps/api/src --view summary
-```
-
-`--path` accepts several scopes after one flag, and common agent aliases are accepted:
-
-```bash
-agentq search AuditEvent \
-  --path apps/api packages/contexts \
-  --max-results 180 \
-  --samples-per-file 8
-```
-
-`--limit` is the canonical spelling of `--max-results`; `--samples-per-file` is the clearer spelling of the retained `--per-file` alias. Sampling affects rendered evidence, not reported repository totals. Coverage is explicitly `complete` or `sampled`.
-
-Views are `auto`, `summary`, `snippets`, and `matches`. `auto` uses contextual snippets for small/exact lookups and grouped summaries for broad inventories. Context is attached directly to selected matches rather than emitted as a detached global section.
-
-Use regex explicitly:
-
-```bash
-agentq search '^export .*AssignmentOffer' --regex --path packages
-```
-
-### Inspect a target
-
-Use the single-entry inspector for routine exploration when the target is already known:
-
-```bash
-agentq inspect AssignmentOffer --path packages/contexts/dispatch
-agentq inspect apps/api/src/routes/jobs.ts
-agentq inspect "name: 'contract'" --path apps/api
-```
-
-Exact TypeScript/JavaScript identifiers use semantic overview when the project can load; literals and prefixes fall back to grouped lexical search.
-
-### Read source ranges
-
-```bash
-agentq read packages/dispatch/src/offers.ts
-agentq read packages/dispatch/src/offers.ts:40-120
-agentq read packages/dispatch/src/offers.ts --lines 40:120
-agentq read packages/dispatch/src/offers.ts --around 85 --context 20
-agentq read a.ts:20-70 b.ts:90-140 c.ts:1-45
-```
-
-`--lines START:END` is accepted for compatibility with common agent-generated syntax. Multiple exact ranges/files can be supplied in one command. Inside an active task/thread, a fully repeated unchanged range can be suppressed; `--repeat` forces it to be emitted again.
-
-### Repository map
-
-```bash
+# Understand the repo
 agentq repo-map
-```
+agentq search AssignmentOffer
+agentq inspect AssignmentOffer --path packages
+agentq read apps/api/src/routes.ts:40-120
 
-Returns a compact view of the repository and detected workspace manifests.
-
-### Symbol outline
-
-```bash
-agentq outline apps/api/src
-agentq outline packages/dispatch --match Assignment
-agentq outline packages/dispatch --public
-```
-
-`agentq` uses ast-grep or Ctags when available and falls back when they are not installed.
-
-## TypeScript and JavaScript navigation
-
-For a known TypeScript or JavaScript symbol, prefer one semantic overview instead of serial `locate`, `definition`, `references`, and `implementations` calls:
-
-```bash
-agentq ts-nav overview AssignmentOffer --path packages/contexts/dispatch
-```
-
-The overview resolves exact declaration candidates through the project TypeScript language service and returns the declaration span, definitions, references, implementations, and bounded source previews from one process.
-
-Primitive actions remain available when only one evidence class is needed:
-
-```bash
-agentq ts-nav definition AssignmentOffer --path packages/contexts/dispatch
-agentq ts-nav references AssignmentOffer --path packages/contexts/dispatch
-agentq ts-nav implementations AssignmentRepository --path packages
-```
-
-Common compact aliases are accepted: `def`, `refs`, and `impls`. Exact positions support both forms:
-
-```bash
-agentq ts-nav references --file apps/api/src/routes.ts --line 42 --column 17
-agentq ts-nav references apps/api/src/routes.ts:42:17
-```
-
-If a symbol is ambiguous, narrow `--path` or select the numbered candidate with `--pick N`. Identifier prefixes are lexical discovery, not exact semantic symbols; use `agentq search PREFIX` to obtain candidates.
-
-## Git inspection
-
-### Status
-
-```bash
+# Review changes
 agentq git-status
-```
-
-Uses Git porcelain output and returns a compact change summary.
-
-### Diff
-
-Start with a summary:
-
-```bash
 agentq git-diff
-```
+agentq audit
 
-Request a bounded patch only when needed:
-
-```bash
-agentq git-diff \
-  --patch \
-  --path apps/api/src \
-  --max-lines 300
-```
-
-Other useful modes:
-
-```bash
-agentq git-diff --staged
-agentq git-diff --unstaged
-agentq git-diff --base origin/main
-agentq git-diff --range HEAD~3..HEAD
-```
-
-### History
-
-```bash
-agentq git-history
-agentq git-history --path packages/dispatch --limit 15
-```
-
-### Structural diff
-
-When Difftastic is installed:
-
-```bash
-agentq git-structural apps/api/src/routes.ts
-```
-
-## Dependencies and impact
-
-Inspect local workspace dependencies:
-
-```bash
-agentq dependencies
-agentq dependencies --target @opsblock/dispatch
-agentq dependencies --target @opsblock/dispatch --depth 2
-```
-
-Estimate the blast radius of a symbol, file, directory, or public surface:
-
-```bash
-agentq impact AssignmentOffer
-agentq impact packages/contexts/dispatch
-agentq impact AssignmentOffer --path apps/api
-```
-
-Impact analysis is evidence for further inspection, not a complete static program analysis.
-
-## Codemods
-
-Always inspect a codemod before applying it.
-
-### Scan
-
-```bash
-agentq codemod-scan OldName \
-  --path packages
-```
-
-Regex mode:
-
-```bash
-agentq codemod-scan 'old_[a-z_]+' \
-  --mode regex \
-  --path packages
-```
-
-AST mode requires ast-grep:
-
-```bash
-agentq codemod-scan '$A && $A()' \
-  --mode ast \
-  --lang ts \
-  --rewrite '$A?.()' \
-  --path apps/web
-```
-
-### Apply
-
-`codemod-apply` is a dry run unless `--apply` is supplied:
-
-```bash
-agentq codemod-apply OldName NewName \
-  --path packages \
-  --expect-count 37
-```
-
-Apply after reviewing the result:
-
-```bash
-agentq codemod-apply OldName NewName \
-  --path packages \
-  --expect-count 37 \
-  --apply
-```
-
-`--expect-count` and `--max-files` can be used as safety guards.
-
-## Running commands
-
-Use `agentq run` to execute a command while keeping its model-visible output compact:
-
-```bash
+# Run checks without noisy output
 agentq run -- pnpm test
-agentq run -- pnpm --filter @opsblock/api typecheck
-agentq run -- cargo test
+agentq verify
 ```
 
-Useful options:
+These examples cover the usual loop: explore, edit, review, and verify. Run `agentq --help` or `agentq COMMAND --help` for the full command reference.
 
-```bash
-agentq run \
-  --timeout 300 \
-  --max-diagnostics 20 \
-  --tail-lines 20 \
-  -- \
-  pnpm test
-```
+## Focused output
 
-The full redacted command log is retained locally.
+`agentq` keeps results small enough to be useful in an AI conversation. It starts with summaries or selected evidence, then gives an exact follow-up command when more output is available.
 
-`--label` is optional and only gives the retained log a recognizable filename:
-
-```bash
-agentq run --label api-typecheck -- pnpm --filter api typecheck
-```
-
-## Affected verification
-
-### Plan
-
-Inspect what should be verified without running anything:
-
-```bash
-agentq test-plan
-agentq test-plan --base origin/main
-agentq test-plan --task
-```
-
-With an active task, `--task` uses the task-begin baseline and excludes unchanged files that were already dirty before the task. Inspect that scope directly with `agentq task changes` or `agentq git-diff --task`.
-
-Modes:
-
-```bash
-agentq test-plan --mode focused
-agentq test-plan --mode standard
-agentq test-plan --mode thorough
-```
-
-### Verify
-
-Run affected checks:
-
-```bash
-agentq verify-changed
-```
-
-For agent work tracked with `agentq task begin`, prefer task-scoped verification:
-
-```bash
-agentq verify-task
-agentq verify-task --dry-run
-```
-
-Include committed branch changes relative to a base:
-
-```bash
-agentq verify-changed --base origin/main
-```
-
-Useful modes:
-
-```bash
-agentq verify-changed --mode focused
-agentq verify-changed --mode standard
-agentq verify-changed --mode thorough
-```
-
-Control dependent packages:
-
-```bash
-agentq verify-changed --dependents none
-agentq verify-changed --dependents direct
-agentq verify-changed --dependents all
-```
-
-Inspect the plan without running commands:
-
-```bash
-agentq verify-changed --dry-run
-```
-
-Other options include:
+Common options include:
 
 ```text
---continue-on-failure
---include-build
---skip-lint
---offline
---timeout N
---max-steps N
---max-diagnostics N
+--repo PATH          choose a repository
+--path PATH...       narrow the scope
+--budget N           cap visible output
+--format text|json   choose human or machine output
 ```
 
-`verified-changed` is retained as an alias for `verify-changed`.
+The default output budget is 12,000 characters. Use `--repeat` when you intentionally want to show unchanged evidence again.
 
-## Task boundaries
+## A practical agent workflow
 
-Task tracking measures work per independently acceptable outcome.
+Start by locating the smallest useful piece of code. Inspect the change before asking for a full patch, then verify the affected area before widening to larger checks.
 
-One task is not one prompt, edit, test run, or Codex thread. A single thread may contain several sequential tasks.
-
-Start a task:
+For independently reviewable pieces of work, task boundaries keep measurements and diffs scoped to that outcome:
 
 ```bash
 agentq task begin
-```
-
-Check it:
-
-```bash
-agentq task status
-```
-
-Accept completed work:
-
-```bash
+# explore, edit, and verify
 agentq task accept
 ```
 
-`done` is an alias:
+While a task is active, `agentq verify` and `agentq git-diff --task` focus on changes made for that task, even if the worktree was already dirty.
+
+## Safe changes
+
+Codemods are dry runs unless explicitly applied. Match counts and file limits can be used as guardrails.
 
 ```bash
-agentq task done
+agentq codemod-apply OldName NewName --path packages --expect-count 12
 ```
 
-If a completed task is immediately followed by another distinct task in the same thread or worktree:
+Review the preview, then add `--apply` when it is correct.
+
+Impact analysis can point out likely callers, tests, docs, and package dependents before a shared name or file changes:
 
 ```bash
-agentq task next
+agentq impact AssignmentOffer
 ```
 
-This accepts the current task and starts the next one atomically.
+Treat the result as a guide for further inspection, not proof that every runtime dependency was found.
 
-Abandon work only when the outcome is intentionally discarded:
+## Stats
 
-```bash
-agentq task abandon
-```
-
-`cancel` is an alias.
-
-A useful rule is:
-
-> One task = one independently reviewable or acceptable outcome.
-
-Investigation, implementation, failed attempts, debugging, and verification for that outcome should stay inside the same task.
-
-For concurrent independent tasks, use separate Git worktrees.
-
-## Statistics
-
-Show the current repository's activity:
+`agentq stats` shows tool reliability, output volume, repeated reading, task activity, and verification outcomes. Use it to spot noisy or wasteful agent workflows without storing source code in telemetry.
 
 ```bash
 agentq stats
+agentq stats --detail
 ```
 
-Detailed output, including recent operations:
-
-```bash
-agentq stats --detailed
-```
-
-Choose a time window:
-
-```bash
-agentq stats --since 24h
-agentq stats --since 7d
-agentq stats --since 30d
-agentq stats --since all
-```
-
-Filter operations:
-
-```bash
-agentq stats --operation read
-agentq stats --operation search --operation run
-```
-
-Watch the dashboard live:
-
-```bash
-agentq stats --watch 2
-```
-
-Show all observed repositories:
-
-```bash
-agentq stats --all-repos
-```
-
-Machine-readable output:
-
-```bash
-agentq stats --format json
-```
-
-When JSON exceeds `--budget`, agentq preserves scalar metadata and as many complete list records as fit, with an `_agentq.omitted` summary. It does not replace the entire result with a truncation-only object.
-
-The displayed token figure is a proxy based on visible characters divided by four. It is intended for comparing tool-output volume, not provider billing.
-
-### Telemetry persistence
-
-Hot telemetry is written to a private directory under `/tmp` so sandboxed coding agents can write it without broader home-directory permissions.
-
-Install the user-level persistence timer:
-
-```bash
-agentq stats --install-persistence
-```
-
-The default archive interval is five minutes.
-
-Inspect storage:
-
-```bash
-agentq stats --storage
-```
-
-Archive immediately:
-
-```bash
-agentq stats --archive-only
-```
-
-Remove the timer:
-
-```bash
-agentq stats --remove-persistence
-```
-
-Persistent history is stored under:
-
-```text
-${XDG_STATE_HOME:-~/.local/state}/agentq/
-```
-
-### Reset statistics
-
-Reset telemetry for the current repository:
-
-```bash
-agentq stats --reset
-```
-
-Reset only volatile `/tmp` telemetry:
-
-```bash
-agentq stats --reset --hot-only
-```
-
-Reset telemetry for all repositories:
-
-```bash
-agentq stats --reset --all-repos
-```
-
-Reset is blocked while an `agentq task` is active unless `--force` is supplied.
-
-## Patch audit
-
-Inspect the current patch for common mechanical problems:
-
-```bash
-agentq audit
-agentq audit --staged
-agentq audit --base origin/main
-```
-
-The audit checks for bounded heuristic findings such as conflict markers, suspicious suppressions, debug output, whitespace problems, and secret-like additions.
-
-It is not a substitute for code review.
-
-## Benchmarking
-
-Benchmark commands with Hyperfine when available:
-
-```bash
-agentq benchmark \
-  --command 'pnpm test' \
-  --warmup 1 \
-  --runs 5
-```
-
-Compare commands:
-
-```bash
-agentq benchmark \
-  --command 'rg foo src' \
-  --command 'git grep foo -- src' \
-  --runs 10
-```
-
-A local Python fallback is used when Hyperfine is unavailable.
-
-## Privacy
-
-Normal `agentq` commands operate locally.
-
-By default:
-
-* common credential and secret paths are excluded from search and reads;
-* common secret-like values are redacted from retained command logs;
-* telemetry stores operational metadata rather than source contents, raw search queries, raw command arguments, or absolute repository paths; query/command identity uses a keyed local HMAC fingerprint;
-* telemetry can be disabled with:
+Telemetry is local and can be disabled completely:
 
 ```bash
 export AGENTQ_TELEMETRY=0
 ```
 
-Use `--include-sensitive` only when access to normally excluded paths is deliberate.
+## Privacy
 
-## JSON output
+By default, `agentq`:
 
-Most commands support structured output:
+- makes no network requests during normal use;
+- excludes common sensitive paths from searches and reads;
+- redacts common secret-like values from retained command logs; and
+- stores operational telemetry rather than source contents, raw queries, raw command arguments, or absolute repository paths.
+
+Use `--include-sensitive` only when access to excluded paths is deliberate.
+
+## More help
 
 ```bash
-agentq search AssignmentOffer --format json
-agentq git-status --format json
-agentq stats --format json
+agentq --help
+agentq COMMAND --help
 ```
 
-When JSON exceeds `--budget`, agentq preserves scalar metadata and as many complete list records as fit, with an `_agentq.omitted` summary. It does not replace the entire result with a truncation-only object.
+The skill documentation under [`skills/`](skills/) contains stricter workflows for coding agents.

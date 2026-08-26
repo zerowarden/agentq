@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
+from .budgeting import budget_text_records, rendered_text
 from .common import AgentQError, ensure_within, find_executable, run_cmd
 
 _TS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
@@ -63,6 +65,8 @@ def _symbol_ts_nav(
         raise AgentQError("TypeScript navigation returned invalid JSON") from exc
     if not data.get("ok"):
         raise AgentQError(data.get("error") or "TypeScript navigation failed")
+    data["paths"] = list(paths)
+    data["limit"] = limit
     return data
 
 
@@ -118,6 +122,23 @@ def _grouped_results(items: list[dict[str, Any]], *, indent: str = "  ") -> list
     return lines
 
 
+def _overview_continuation(data: dict[str, Any]) -> str:
+    argv = ["agentq", "ts-nav", "overview", str(data.get("symbol", "?"))]
+    paths = [str(path) for path in data.get("paths", [])]
+    if paths:
+        argv.extend(("--path", *paths))
+    candidate_count = int(data.get("candidate_count", 1))
+    if candidate_count > 1:
+        argv.extend(("--pick", str(data.get("candidate", 1))))
+    totals = [
+        int(section.get("total", 0))
+        for key in ("definition", "references", "implementations")
+        if isinstance((section := data.get(key)), dict)
+    ]
+    argv.extend(("--limit", str(max([int(data.get("limit", 80)) * 2, *totals]))))
+    return shlex.join(argv)
+
+
 def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
     candidates = data.get("candidates") if isinstance(data.get("candidates"), list) else None
     if candidates is not None and (data.get("action") == "locate" or data.get("ambiguous") or not candidates):
@@ -134,38 +155,45 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             lines.append("No semantic TypeScript/JavaScript declaration candidate was found in the requested scope.")
         elif data.get("ambiguous"):
             lines.append("resolution incomplete: narrow --path or select a candidate with --pick N")
-        return "\n".join(lines)
+        rendered, _ = budget_text_records(
+            lines[0], lines[1:], budget,
+            omission="… {count} complete semantic records omitted by render budget; narrow --path or lower --limit",
+        )
+        return rendered
 
     if data.get("action") == "overview":
+        sections = (("definition", "definitions"), ("references", "references"), ("implementations", "implementations"))
+        complete = not any(
+            bool((data.get(key) if isinstance(data.get(key), dict) else {}).get("truncated"))
+            for key, _ in sections
+        )
+        continuation = _overview_continuation(data)
         lines = [
-            f"ts overview {data.get('symbol', '?')} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)}",
+            f"ts overview {data.get('symbol', '?')} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)} "
+            f"[{'complete' if complete else 'sampled'}]",
             f"target {data['target']}:{data['line']}:{data['column']} · project {data['config']}",
         ]
         span = data.get("declaration_span")
         if isinstance(span, dict):
             lines.append(f"declaration span {span.get('start_line')}:{span.get('end_line')}")
-        sections = (("definition", "definitions"), ("references", "references"), ("implementations", "implementations"))
         for key, label in sections:
             section = data.get(key) if isinstance(data.get(key), dict) else {}
             items = section.get("results") if isinstance(section.get("results"), list) else []
             lines.append(f"\n{label} · {section.get('shown', len(items))}/{section.get('total', len(items))}")
             lines.extend(_grouped_results(items))
-            if section.get("truncated"):
-                lines.append("  … sampled; narrow scope for exhaustive semantic evidence")
-        text = "\n".join(lines)
-        if budget > 0 and len(text) > budget:
-            # Preserve whole source/result lines rather than cutting a path or preview mid-record.
-            marker = "\n… semantic overview omitted remaining complete records due render budget"
-            kept: list[str] = []
-            used = 0
-            for line in lines:
-                cost = len(line) + 1
-                if used + cost + len(marker) > budget:
-                    break
-                kept.append(line)
-                used += cost
-            return "\n".join(kept).rstrip() + marker
-        return text
+        if not complete:
+            lines.append(f"continue: {continuation}")
+        rendered, truncated = budget_text_records(
+            lines[0], lines[1:], budget,
+            omission=f"… {{count}} complete semantic overview records omitted; continue: {continuation}",
+        )
+        if truncated and complete:
+            rendered = rendered_text(
+                rendered.replace("[complete]", "[partial]", 1),
+                prebudget_chars=rendered.prebudget_chars,
+                truncated=True,
+            )
+        return rendered
 
     lines: list[str] = []
     if data.get("symbol"):
@@ -179,15 +207,8 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
     lines.extend(_grouped_results(data.get("results", [])))
     if data.get("truncated"):
         lines.append("coverage sampled; narrow the owning package for exhaustive semantic evidence")
-    text = "\n".join(lines)
-    if budget > 0 and len(text) > budget:
-        marker = "\n… semantic records omitted by render budget"
-        kept: list[str] = []
-        used = 0
-        for line in lines:
-            if used + len(line) + 1 + len(marker) > budget:
-                break
-            kept.append(line)
-            used += len(line) + 1
-        return "\n".join(kept).rstrip() + marker
-    return text
+    rendered, _ = budget_text_records(
+        lines[0], lines[1:], budget,
+        omission="… {count} complete semantic records omitted by render budget; narrow --path or lower --limit",
+    )
+    return rendered

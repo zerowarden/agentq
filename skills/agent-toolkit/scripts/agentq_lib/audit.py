@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import classify_path, compact_line, is_sensitive_path
-from .gitops import diff_data, status_data
+from .gitops import _parse_diff_header_paths, diff_data, status_data
 
 RULES: list[tuple[str, str, re.Pattern[str], str]] = [
     ("focused-test", "high", re.compile(r"\b(?:describe|test|it)\.only\s*\(|\b(?:fdescribe|fit)\s*\("), "focused test added"),
@@ -23,14 +23,17 @@ MANIFEST_NAMES = {"package.json", "pyproject.toml", "Cargo.toml", "pnpm-workspac
 LOCK_NAMES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "Cargo.lock", "uv.lock", "poetry.lock"}
 
 
-def _added_lines(patch: str) -> list[tuple[str, int | None, str]]:
+def _added_lines(patch: str, files: list[dict[str, Any]] | None = None) -> list[tuple[str, int | None, str]]:
     current = ""
+    file_index = 0
     new_line: int | None = None
     out = []
     for line in patch.splitlines():
         if line.startswith("diff --git "):
-            match = re.match(r"diff --git a/(.*?) b/(.*)", line)
-            current = match.group(2) if match else ""
+            item = files[file_index] if files and file_index < len(files) else None
+            parsed = _parse_diff_header_paths(line)
+            current = str(item["path"]) if item and isinstance(item.get("path"), str) else parsed[1] if parsed else ""
+            file_index += 1
             new_line = None
         elif line.startswith("@@"):
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
@@ -46,9 +49,38 @@ def _added_lines(patch: str) -> list[tuple[str, int | None, str]]:
     return out
 
 
-def audit_data(root: Path, *, staged: bool = False, base: str | None = None, max_findings: int = 100) -> dict[str, Any]:
+def audit_data(
+    root: Path,
+    *,
+    staged: bool = False,
+    base: str | None = None,
+    paths: list[str] | None = None,
+    task_scope: bool = False,
+    max_findings: int = 100,
+) -> dict[str, Any]:
     status = status_data(root, limit=200)
-    diff = diff_data(root, staged=staged, base=base, patch=True, context=1, max_files=200, max_hunks=500, max_lines=100_000)
+    if task_scope and not paths:
+        diff = {
+            "scope": "active-task", "total_files": 0, "total_added": 0, "total_deleted": 0,
+            "files": [], "diff_check_ok": True, "diff_check": [], "patch": "",
+        }
+    else:
+        diff = diff_data(
+            root, staged=staged, base=base, paths=paths, patch=True,
+            context=1, max_files=200, max_hunks=500, max_lines=100_000,
+        )
+        if task_scope:
+            diff["scope"] = "active-task"
+    if paths is not None:
+        selected = set(paths)
+        status_files = [
+            item for item in status["files"]
+            if item.get("path") in selected or item.get("original") in selected
+        ]
+        status["files"] = status_files
+        status["counts"] = dict(Counter(item["category"] for item in status_files))
+        status["total"] = status["shown"] = len(status_files)
+        status["truncated"] = False
     findings: list[dict[str, Any]] = []
 
     def add(rule: str, severity: str, message: str, path: str | None = None, line: int | None = None) -> None:
@@ -82,7 +114,7 @@ def audit_data(root: Path, *, staged: bool = False, base: str | None = None, max
     if source_paths and not test_paths and diff["total_added"] + diff["total_deleted"] >= 40:
         add("no-test-change", "low", "source changed substantially but no test file changed; existing tests may still be sufficient")
 
-    for path, line, text in _added_lines(diff.get("patch", "")):
+    for path, line, text in _added_lines(diff.get("patch", ""), diff.get("files")):
         if SECRET_SIGNAL_RE.search(text) and not re.search(r"(?i)(process\.env|os\.environ|getenv|schema|example|placeholder)", text):
             add("secret-like-addition", "high", "secret-like assignment added; value omitted from report", path, line)
         for rule, severity, pattern, message in RULES:

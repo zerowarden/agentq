@@ -1,0 +1,24 @@
+{
+  "schema": 2,
+  "baseline_version": "pre-phase-4-v1",
+  "minimum_call_reduction_percent": 25,
+  "minimum_visible_reduction_percent": 20,
+  "baseline": {
+    "exact_typescript_symbol": {"calls": 4, "visible_chars": 854},
+    "exact_python_symbol": {"calls": 3, "visible_chars": 527},
+    "configuration_literal": {"calls": 2, "visible_chars": 311},
+    "broad_search": {"calls": 3, "visible_chars": 5971},
+    "known_source_anchors": {"calls": 3, "visible_chars": 453},
+    "missing_path": {"calls": 2, "visible_chars": 307},
+    "task_patch_and_verification": {"calls": 4, "visible_chars": 2495}
+  },
+  "workflows": {
+    "exact_typescript_symbol": {"max_calls": 1, "visible_budget": 1800},
+    "exact_python_symbol": {"max_calls": 1, "visible_budget": 1800},
+    "configuration_literal": {"max_calls": 1, "visible_budget": 1200},
+    "broad_search": {"max_calls": 2, "visible_budget": 6000},
+    "known_source_anchors": {"max_calls": 1, "visible_budget": 2400},
+    "missing_path": {"max_calls": 1, "visible_budget": 700},
+    "task_patch_and_verification": {"max_calls": 2, "visible_budget": 6000}
+  }
+}
