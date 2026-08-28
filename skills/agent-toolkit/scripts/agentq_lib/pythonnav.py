@@ -8,6 +8,10 @@ from typing import Any
 
 from .budgeting import budget_text_records, rendered_text
 from .common import compact_line, ensure_within, is_sensitive_path, list_repo_files, relpath, scope_match
+from .evidence import (
+    PARTIAL, PARSE_ERROR, REFERENCE_LIMIT, SAMPLED, SYNTACTIC,
+    complete as complete_coverage, coverage as coverage_block,
+)
 
 
 def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -64,12 +68,13 @@ def _python_files(root: Path, paths: list[str]) -> list[str]:
     ]
 
 
-def _parse_python(path: Path) -> tuple[ast.AST, list[str]] | None:
+def _parse_python(path: Path) -> tuple[ast.AST | None, list[str], str | None]:
+    """Parse one file; on failure return (None, [], diagnostic)."""
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
-        return ast.parse(source), source.splitlines()
-    except (OSError, SyntaxError):
-        return None
+        return ast.parse(source), source.splitlines(), None
+    except (OSError, SyntaxError, ValueError) as exc:
+        return None, [], compact_line(f"{type(exc).__name__}: {exc}", 160)
 
 
 def _definitions_from_tree(relative: str, tree: ast.AST) -> list[dict[str, Any]]:
@@ -81,10 +86,9 @@ def _definitions_from_tree(relative: str, tree: ast.AST) -> list[dict[str, Any]]
 def python_definitions(root: Path, paths: list[str]) -> list[dict[str, Any]]:
     definitions: list[dict[str, Any]] = []
     for relative in _python_files(root, paths):
-        parsed = _parse_python(root / relative)
-        if not parsed:
+        tree, _, _ = _parse_python(root / relative)
+        if tree is None:
             continue
-        tree, _ = parsed
         definitions.extend(_definitions_from_tree(relative, tree))
     return definitions
 
@@ -102,27 +106,43 @@ def python_outline(
         if (not pattern or pattern.search(str(item["name"])))
         and (not public or not str(item["name"]).startswith("_"))
     ]
+    truncated = len(definitions) > limit
     return {
         "engine": "stdlib-python-ast",
         "shown": min(limit, len(definitions)),
-        "truncated": len(definitions) > limit,
+        "truncated": truncated,
+        "provenance": SYNTACTIC,
+        "coverage": coverage_block(SAMPLED, REFERENCE_LIMIT) if truncated else complete_coverage(),
         "symbols": definitions[:limit],
     }
 
 
-def python_symbol_overview(root: Path, symbol: str, paths: list[str], limit: int) -> dict[str, Any] | None:
+def python_symbol_overview(
+    root: Path,
+    symbol: str,
+    paths: list[str],
+    limit: int,
+    *,
+    include_references: bool = True,
+) -> dict[str, Any] | None:
     candidates: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
+    parse_errors: list[dict[str, str]] = []
+    parse_error_count = 0
     total = 0
     for relative in _python_files(root, paths):
-        parsed = _parse_python(root / relative)
-        if not parsed:
+        tree, lines, error = _parse_python(root / relative)
+        if tree is None:
+            parse_error_count += 1
+            if len(parse_errors) < 5:
+                parse_errors.append({"path": relative, "error": error or "unparseable"})
             continue
-        tree, lines = parsed
         candidates.extend(
             item for item in _definitions_from_tree(relative, tree)
             if item["name"] == symbol
         )
+        if not include_references:
+            continue
         for node in ast.walk(tree):
             kind = None
             if isinstance(node, ast.Name) and node.id == symbol:
@@ -145,27 +165,65 @@ def python_symbol_overview(root: Path, symbol: str, paths: list[str], limit: int
             })
     if not candidates:
         return None
-    return {
+    truncated = total > len(references)
+    if parse_error_count:
+        coverage = coverage_block(PARTIAL, PARSE_ERROR)
+    elif truncated:
+        coverage = coverage_block(SAMPLED, REFERENCE_LIMIT)
+    else:
+        coverage = complete_coverage()
+    result: dict[str, Any] = {
         "engine": "stdlib-python-ast",
+        "provenance": SYNTACTIC,
+        "coverage": coverage,
         "symbol": symbol,
         "candidates": candidates[:limit],
         "candidate_count": len(candidates),
         "ambiguous": len(candidates) > 1,
-        "references": {"results": references, "shown": len(references), "total": total, "truncated": total > len(references)},
+        "references": {
+            "results": references, "shown": len(references),
+            "total": total if include_references else 0,
+            "truncated": truncated,
+        },
+        "references_omitted": not include_references,
         "evidence": "definitions are syntax-aware; references are bounded lexical AST evidence, not semantic proof",
         "paths": list(paths),
         "limit": limit,
     }
+    if parse_error_count:
+        result["parse_errors"] = parse_errors
+        result["parse_error_count"] = parse_error_count
+    if len(result["candidates"]) < int(result["candidate_count"]) or truncated:
+        result["continuation"] = {"command": _python_continuation(result)}
+    return result
+
+
+def _python_continuation(data: dict[str, Any]) -> str:
+    paths = list(data.get("paths") or [])
+    argv = ["agentq", "inspect", str(data["symbol"])]
+    if paths:
+        argv.extend(("--path", *(str(path) for path in paths)))
+    argv.extend((
+        "--limit",
+        str(max(int(data.get("limit", 80)) * 2, int(data["candidate_count"]), int(data["references"]["total"]))),
+        "--repeat",
+    ))
+    return shlex.join(argv)
 
 
 def render_python_overview(data: dict[str, Any], *, budget: int = 0) -> str:
     references = data["references"]
     definitions_sampled = len(data["candidates"]) < int(data["candidate_count"])
-    sampled = definitions_sampled or bool(references["truncated"])
+    if data.get("references_omitted"):
+        reference_summary = "references not requested (--intent locate)"
+        sampled = definitions_sampled
+    else:
+        reference_summary = f"{references['shown']}/{references['total']} lexical references"
+        sampled = definitions_sampled or bool(references["truncated"])
     status = "sampled" if sampled else "complete"
     header = (
         f"python overview {data['symbol']}: {data['candidate_count']} definitions, "
-        f"{references['shown']}/{references['total']} lexical references [{status}]"
+        f"{reference_summary} [{status}]"
     )
     records: list[str] = []
     for index, item in enumerate(data["candidates"], 1):
@@ -173,16 +231,7 @@ def render_python_overview(data: dict[str, Any], *, budget: int = 0) -> str:
         records.append(f"D{index} {item['file']}:{item['line']} [{item['kind']}] {item['signature']}{scope}")
     for item in references["results"]:
         records.append(f"R {item['path']}:{item['line']}:{item['column']} [{item['kind']}] {item['preview']}")
-    paths = list(data.get("paths") or [])
-    argv = ["agentq", "inspect", str(data["symbol"])]
-    if paths:
-        argv.extend(("--path", *(str(path) for path in paths)))
-    argv.extend((
-        "--limit",
-        str(max(int(data.get("limit", 80)) * 2, int(data["candidate_count"]), int(references["total"]))),
-        "--repeat",
-    ))
-    continuation = shlex.join(argv)
+    continuation = (data.get("continuation") or {}).get("command") or _python_continuation(data)
     if sampled:
         records.append(f"continue: {continuation}")
     rendered, truncated = budget_text_records(

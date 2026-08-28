@@ -3,18 +3,25 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 AGENTQ = Path(__file__).resolve().parents[1] / "scripts" / "agentq"
 SCALE_BENCHMARK = Path(__file__).with_name("scale_benchmark.py")
+
+
+def render_noop(data: dict, *args, **kwargs) -> str:
+    return ""
 
 
 class AgentQIntegrationTest(unittest.TestCase):
@@ -243,7 +250,10 @@ class AgentQIntegrationTest(unittest.TestCase):
 
     def test_impact_and_guarded_codemod(self) -> None:
         impact = self.data("impact", "OldName", "--path", "packages")
-        self.assertGreaterEqual(impact["source_reference_files"], 1)
+        self.assertGreaterEqual(impact["observations"]["lexical_source_fanout"], 1)
+        self.assertFalse(impact["heuristic_summary"]["calibrated"])
+        self.assertEqual(impact["provenance"], "heuristic")
+        self.assertIn(impact["coverage"]["status"], {"complete", "sampled"})
         scan = self.data("codemod-scan", "OldName", "--path", "packages")
         self.assertGreaterEqual(scan["matches"], 4)
         dry = self.data("codemod-apply", "OldName", "NewName", "--path", "packages", "--expect-count", str(scan["matches"]))
@@ -252,6 +262,158 @@ class AgentQIntegrationTest(unittest.TestCase):
         applied = self.data("codemod-apply", "OldName", "NewName", "--path", "packages", "--expect-count", str(scan["matches"]), "--apply")
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["remaining_matches"], 0)
+
+    def test_impact_reports_observations_instead_of_score(self) -> None:
+        self.change_a("\nexport const fanout = true\n")
+        impact = self.data("impact", "makeOldName", "--path", "packages")
+        self.assertNotIn("score", impact)
+        self.assertNotIn("blast_radius", impact)
+        observations = impact["observations"]
+        self.assertFalse(observations["public_shared_surface"])
+        self.assertGreaterEqual(observations["lexical_source_fanout"], 1)
+        self.assertGreaterEqual(observations["direct_test_references"], 0)
+        summary = impact["heuristic_summary"]
+        self.assertFalse(summary["calibrated"])
+        self.assertIn(summary["level"], {"low", "medium", "high"})
+        self.assertIsInstance(summary["rules"], list)
+        rendered = subprocess.run(
+            [str(AGENTQ), "impact", "--repo", str(self.repo), "--format", "text", "--budget", "100000",
+             "makeOldName", "--path", "packages"],
+            text=True, capture_output=True, env=self.env, cwd=self.repo,
+        )
+        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+        self.assertIn("uncalibrated", rendered.stdout)
+        self.assertNotIn("blast radius:", rendered.stdout)
+
+    def test_inspect_reports_cross_language_ambiguity(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import inspectops as inspectops_module
+            from agentq_lib import navigation as navigation_module
+
+        ts_path = self.repo / "packages/a/src/index.ts"
+        ts_result = {
+            "action": "overview", "symbol": "Config",
+            "candidates": [{"path": str(ts_path), "line": 1, "column": 16, "kind": "interface", "preview": "interface Config { a: string }"}],
+            "candidate_count": 1, "ambiguous": True,
+            "definition": {"results": [{"path": str(ts_path), "line": 1, "column": 16}]},
+            "references": {"results": [], "shown": 0, "total": 0, "truncated": False},
+            "implementations": {"results": [], "shown": 0, "total": 0, "truncated": False},
+        }
+        (self.repo / "packages/a/src/dup.py").write_text("class Config:\n    pass\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
+            with mock.patch.object(navigation_module, "ts_nav_data", return_value=ts_result):
+                data = inspectops_module.inspect_data(self.repo, "Config", ["packages/a/src"])
+        self.assertEqual(data["kind"], "ambiguous")
+        self.assertEqual(data["provenance"], "semantic")
+        self.assertEqual(data["coverage"]["status"], "complete")
+        provider_names = [item["provider"] for item in data["providers"]]
+        self.assertEqual(provider_names, ["typescript", "python"])
+        rendered = inspectops_module.render_inspect(data, budget=100000)
+        self.assertIn("multiple languages", rendered)
+        self.assertIn("typescript", rendered)
+        self.assertIn("python", rendered)
+
+    def test_navigation_provider_layer_routes_and_reports(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import navigation as navigation_module
+
+        for provider in (*navigation_module.LANGUAGE_PROVIDERS, navigation_module.LEXICAL_FALLBACK):
+            self.assertIsInstance(provider, navigation_module.NavigationProvider)
+        request = navigation_module.NavigationRequest(
+            root=self.repo, symbol="X", paths=("packages",), limit=5, lang="python",
+        )
+        self.assertFalse(navigation_module.LANGUAGE_PROVIDERS[0].supports(request))
+        self.assertTrue(navigation_module.LANGUAGE_PROVIDERS[1].supports(request))
+        unrestricted = navigation_module.NavigationRequest(
+            root=self.repo, symbol="X", paths=("packages",), limit=5,
+        )
+        self.assertTrue(all(provider.supports(unrestricted) for provider in navigation_module.LANGUAGE_PROVIDERS))
+
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
+            with mock.patch.object(
+                navigation_module, "ts_nav_data", side_effect=AssertionError("typescript queried"),
+            ):
+                resolution = navigation_module.resolve_symbol(
+                    self.repo, "makeOldName", paths=["packages/a/src"], limit=5, lang="python",
+                )
+        self.assertEqual([outcome.name for outcome in resolution.outcomes], ["python"])
+        self.assertIsNotNone(resolution.fallback)
+        self.assertEqual(resolution.fallback.name, "lexical")
+        entry_names = [entry["provider"] for entry in resolution.entries()]
+        self.assertEqual(entry_names, ["python", "lexical"])
+        # The python provider ran cleanly and simply found no Python candidate.
+        self.assertEqual(resolution.entries()[0]["coverage"]["status"], "complete")
+
+    def test_inspect_locate_intent_skips_references(self) -> None:
+        (self.repo / "packages/a/src/located.py").write_text("class Located:\n    pass\n", encoding="utf-8")
+        data = self.data("inspect", "Located", "--path", "packages/a/src/located.py", "--intent", "locate", "--lang", "python")
+        self.assertEqual(data["kind"], "python")
+        python = data["python"]
+        self.assertEqual(python["references"]["results"], [])
+        self.assertEqual(python["references"]["total"], 0)
+        self.assertTrue(python["references_omitted"])
+
+    def test_inspect_edit_intent_bundles_declaration_tests_and_package(self) -> None:
+        (self.repo / "packages/a/src/edited.py").write_text(
+            "class Edited:\n    def method(self) -> int:\n        return 7\n", encoding="utf-8",
+        )
+        (self.repo / "packages/a/src/edited.test.ts").write_text(
+            "import { Edited } from './edited'\n", encoding="utf-8",
+        )
+        data = self.data("inspect", "Edited", "--path", "packages/a/src", "--intent", "edit", "--lang", "python")
+        self.assertEqual(data["kind"], "edit")
+        self.assertEqual(data["provenance"], "syntactic")
+        edit = data["edit"]
+        declaration = edit["declaration"]["items"][0]
+        self.assertEqual(declaration["path"], "packages/a/src/edited.py")
+        self.assertTrue(any("class Edited" in line["text"] for line in declaration["lines"]))
+        self.assertTrue(any("edited.test.ts" in hit["path"] for hit in edit["tests"]))
+        self.assertEqual(data["package"]["path"], "packages/a/package.json")
+        self.assertTrue(data["verification"])
+        rendered = subprocess.run(
+            [
+                str(AGENTQ), "inspect", "--repo", str(self.repo), "--format", "text", "--budget", "100000",
+                "Edited", "--path", "packages/a/src", "--intent", "edit", "--lang", "python",
+            ],
+            text=True, capture_output=True, env=self.env, cwd=self.repo,
+        )
+        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+        self.assertIn("edit bundle", rendered.stdout)
+        self.assertIn("declaration:", rendered.stdout)
+
+    def test_inspect_downgrades_coverage_on_parse_errors(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import inspectops as inspectops_module
+
+        (self.repo / "packages/a/src/broken_nav.py").write_text("def broken(:\n", encoding="utf-8")
+        (self.repo / "packages/a/src/nav_symbol.py").write_text(
+            "def makeOldName(value):\n    return value\n", encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
+            data = inspectops_module.inspect_data(self.repo, "makeOldName", ["packages/a/src"], lang="python")
+        self.assertEqual(data["kind"], "python")
+        self.assertEqual(data["coverage"]["status"], "partial")
+        self.assertIn("parse_error", data["coverage"]["reason"])
+        self.assertEqual(data["python"]["parse_error_count"], 1)
+        self.assertLessEqual(len(data["python"]["parse_errors"]), 5)
+
+    def test_disabled_telemetry_avoids_importing_telemetry_module(self) -> None:
+        script = (
+            "import sys;"
+            f"sys.path.insert(0, {str(AGENTQ.parent)!r});"
+            "import agentq;"
+            f"sys.argv = ['agentq', 'files', 'zzz-none', '--repo', {str(self.repo)!r}];"
+            "agentq.main();"
+            "assert 'agentq_lib.telemetry' not in sys.modules, 'telemetry module imported';"
+            "print('LAZY-OK')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env={**self.env, "AGENTQ_TELEMETRY": "0"},
+            capture_output=True, text=True, cwd=self.repo,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+        self.assertIn("LAZY-OK", result.stdout)
 
     def test_git_summary_and_patch_audit(self) -> None:
         path = self.repo / "packages/a/src/index.ts"
@@ -428,7 +590,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         link.symlink_to(AGENTQ)
         result = subprocess.run([str(link), "--version"], text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        self.assertIn("agentq 1.4.0", result.stdout)
+        self.assertIn("agentq 1.8.0", result.stdout)
 
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -443,6 +605,137 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(plan["dependent_packages"], ["@test/b"])
         self.assertEqual(plan["workspace_packages"], 3)
         self.assertEqual(plan["workspace_edges"], 1)
+
+    def _make_single_ecosystem(self) -> None:
+        for name in ("package.json", "pnpm-workspace.yaml", "pnpm-workspace.yml", "pnpm-lock.yaml", "tsconfig.json"):
+            path = self.repo / name
+            if path.exists():
+                path.unlink()
+        shutil.rmtree(self.repo / "packages", ignore_errors=True)
+
+    def test_python_verification_provider(self) -> None:
+        self._make_single_ecosystem()
+        (self.repo / "pyproject.toml").write_text(textwrap.dedent("""
+            [project]
+            name = "pyapp"
+            dependencies = ["requests>=2"]
+
+            [tool.pytest.ini_options]
+            testpaths = ["tests"]
+
+            [tool.ruff]
+            line-length = 100
+        """), encoding="utf-8")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        (self.repo / "pkg" / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_core.py").write_text(
+            "from pkg.core import add\n\ndef test_add():\n    assert add(1, 2) == 3\n", encoding="utf-8",
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "python fixture")
+        (self.repo / "pkg" / "core.py").write_text("def add(a, b):\n    return a + b + 1\n", encoding="utf-8")
+
+        plan = self.data("test-plan")
+        self.assertEqual(plan["package_manager"], "python")
+        self.assertIn("python", [provider["name"] for provider in plan["providers"]])
+        self.assertNotIn("node", [provider["name"] for provider in plan["providers"]])
+        self.assertEqual(plan["changed_packages"], ["pyapp"])
+        kinds = [step["kind"] for step in plan["steps"]]
+        self.assertIn("candidate-tests", kinds)
+        self.assertIn("lint", kinds)
+        self.assertNotIn("direct-tests", kinds)
+        self.assertTrue(any(step["argv"][:3] == ["python3", "-m", "pytest"] for step in plan["steps"]))
+        self.assertTrue(any(step["argv"][:2] == ["ruff", "check"] for step in plan["steps"]))
+
+        dry = self.data("verify", "--dry-run")
+        self.assertEqual(dry["status"], "planned")
+        self.assertEqual(dry["changed_packages"], ["pyapp"])
+
+        (self.repo / "tests" / "test_core.py").write_text(
+            "from pkg.core import add\n\ndef test_add_broken():\n    assert add(1, 2) == 4\n", encoding="utf-8",
+        )
+        plan = self.data("test-plan")
+        self.assertIn("direct-tests", [step["kind"] for step in plan["steps"]])
+
+    def test_cargo_verification_provider(self) -> None:
+        self._make_single_ecosystem()
+        (self.repo / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*"]\n', encoding="utf-8")
+        (self.repo / "crates/core/src").mkdir(parents=True)
+        (self.repo / "crates/core/Cargo.toml").write_text('[package]\nname = "core"\nversion = "0.1.0"\n', encoding="utf-8")
+        (self.repo / "crates/core/src/lib.rs").write_text("pub fn add(a: i32, b: i32) -> i32 { a + b }\n", encoding="utf-8")
+        (self.repo / "crates/app/src").mkdir(parents=True)
+        (self.repo / "crates/app/Cargo.toml").write_text(
+            '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\ncore = { path = "../core" }\n', encoding="utf-8",
+        )
+        (self.repo / "crates/app/src/main.rs").write_text("fn main() { println!(\"{}\", core::add(1, 2)); }\n", encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-qm", "cargo fixture")
+        (self.repo / "crates/core/src/lib.rs").write_text("pub fn add(a: i32, b: i32) -> i32 { a + b + 1 }\n", encoding="utf-8")
+
+        plan = self.data("test-plan")
+        self.assertEqual(plan["package_manager"], "cargo")
+        self.assertEqual(plan["changed_packages"], ["core"])
+        self.assertEqual(plan["dependent_packages"], ["app"])
+        kinds = [step["kind"] for step in plan["steps"]]
+        self.assertIn("package-tests", kinds)
+        self.assertIn("typecheck", kinds)
+        self.assertIn("dependent-typecheck", kinds)
+        self.assertTrue(any(step["argv"] == ["cargo", "test", "-p", "core"] for step in plan["steps"]))
+        self.assertTrue(any(step["argv"] == ["cargo", "check", "-p", "app"] for step in plan["steps"]))
+
+    def test_go_verification_provider(self) -> None:
+        self._make_single_ecosystem()
+        (self.repo / "go.mod").write_text("module example.com/app\n\ngo 1.22\n", encoding="utf-8")
+        (self.repo / "main.go").write_text("package main\n\nfunc main() {}\n", encoding="utf-8")
+        (self.repo / "util").mkdir()
+        (self.repo / "util" / "util.go").write_text("package util\n\nfunc Hi() string { return \"hi\" }\n", encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-qm", "go fixture")
+        (self.repo / "util" / "util.go").write_text("package util\n\nfunc Hi() string { return \"hello\" }\n", encoding="utf-8")
+
+        plan = self.data("test-plan")
+        self.assertEqual(plan["package_manager"], "go")
+        self.assertEqual(plan["changed_packages"], ["example.com/app"])
+        steps = [step for step in plan["steps"] if step["kind"] == "package-tests"]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["argv"], ["go", "test", "./util/..."])
+
+        (self.repo / "go.mod").write_text("module example.com/app\n\ngo 1.23\n", encoding="utf-8")
+        plan = self.data("test-plan")
+        self.assertIn("module-tests", [step["kind"] for step in plan["steps"]])
+
+    def test_agentq_toml_config_augments_verification(self) -> None:
+        (self.repo / ".agentq.toml").write_text(textwrap.dedent("""
+            [verify]
+            providers = ["node"]
+            commands = ["make check"]
+            ignore = ["generated/**"]
+            contract_patterns = ["public_api/**"]
+
+            [ownership]
+            "packages/a/src" = "@test/b"
+        """), encoding="utf-8")
+        (self.repo / "generated").mkdir()
+        (self.repo / "generated" / "thing.ts").write_text("export const generated = 1\n", encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-qm", "config fixture")
+        self.change_a("\nexport const configured = true\n")
+
+        plan = self.data("test-plan")
+        self.assertNotIn("generated/thing.ts", plan["changed_files"])
+        configured = [step for step in plan["steps"] if step["kind"] == "configured"]
+        self.assertEqual(len(configured), 1)
+        self.assertEqual(configured[0]["argv"], ["make", "check"])
+        # The ownership override attributes packages/a/src files to @test/b.
+        self.assertEqual(plan["changed_packages"], ["@test/b"])
+
+        (self.repo / ".agentq.toml").write_text(
+            '[verify]\nproviders = ["node", "nope"]\n', encoding="utf-8",
+        )
+        failed = self.aq("test-plan", expect=2)
+        self.assertIn("unknown verification providers", failed.stderr)
 
     def test_verify_changed_dry_run_and_alias(self) -> None:
         self.change_a()
@@ -460,7 +753,10 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertGreaterEqual(data["executed_steps"], 3)
         self.assertTrue(any(result["kind"] == "dependent-typecheck" for result in data["results"]))
         self.assertGreater(data["raw_output_chars"], 0)
-        self.assertTrue(all(Path(result["log"]).is_file() for result in data["results"]))
+        self.assertTrue(all(
+            result["log"] is None and result["log_retention"] == "deleted"
+            for result in data["results"]
+        ))
         events = [json.loads(line) for line in (self.telemetry / "events.jsonl").read_text().splitlines()]
         event = events[-1]
         self.assertEqual(event["command"], "verify-changed")
@@ -497,7 +793,10 @@ class AgentQIntegrationTest(unittest.TestCase):
         env["HOME"] = "/proc/agentq-no-home"
         env.pop("XDG_CACHE_HOME", None)
         env.pop("AGENTQ_CACHE_HOME", None)
-        argv = [str(AGENTQ), "run", "--repo", str(self.repo), "--format", "json", "--", "python3", "-c", "print('ok')"]
+        argv = [
+            str(AGENTQ), "run", "--repo", str(self.repo), "--format", "json",
+            "--isolated-cache", "--keep-log", "--", "python3", "-c", "print('ok')",
+        ]
         result = subprocess.run(argv, text=True, capture_output=True, env=env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         data = json.loads(result.stdout)
@@ -510,7 +809,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertLessEqual(len(result.stdout.rstrip("\n")), 180)
         self.assertIn("Render budget reached", result.stdout)
-        self.assertIn("continue: agentq read", result.stdout)
+        self.assertIn("continue: agentq continue", result.stdout)
         self.assertNotIn("omitted by render budget", result.stdout)
 
     def test_read_telemetry_distinguishes_source_and_render_budget_caps(self) -> None:
@@ -617,9 +916,10 @@ class AgentQIntegrationTest(unittest.TestCase):
             self.assertEqual(row["successes"], row["tool_ok"])
             self.assertEqual(row["failures"], row["tool_errors"])
 
-    def test_disabled_telemetry_advice_does_not_access_storage(self) -> None:
+    def test_disabled_context_cache_advice_does_not_access_storage(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq_lib import context_cache as cache_module
+            from agentq_lib import state as state_module
 
         read = {
             "items": [{
@@ -631,12 +931,11 @@ class AgentQIntegrationTest(unittest.TestCase):
             }],
         }
         diff = {"scope": "HEAD+working-tree", "total_files": 0, "files": []}
-        with mock.patch.dict(os.environ, {"AGENTQ_TELEMETRY": "0"}):
-            with mock.patch.object(cache_module, "_load", side_effect=AssertionError("storage accessed")):
-                with mock.patch.object(cache_module, "_write", side_effect=AssertionError("storage written")):
-                    self.assertIsNone(cache_module.read_repeat_advice(self.repo, read))
-                    key = cache_module.diff_cache_key(diff, {})
-                    self.assertIsNone(cache_module.diff_repeat_advice(self.repo, key))
+        with mock.patch.dict(os.environ, {"AGENTQ_CONTEXT_CACHE": "0"}):
+            with mock.patch.object(state_module, "connection", side_effect=AssertionError("state storage accessed")):
+                self.assertIsNone(cache_module.read_repeat_advice(self.repo, read))
+                key = cache_module.diff_cache_key(diff, {})
+                self.assertIsNone(cache_module.diff_repeat_advice(self.repo, key))
 
     def test_online_read_and_diff_advice_never_load_historical_telemetry(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
@@ -798,6 +1097,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         disabled_cache = Path(self.temp.name) / "disabled-context"
         disabled_env = {
             "AGENTQ_TELEMETRY": "0",
+            "AGENTQ_CONTEXT_CACHE": "0",
             "AGENTQ_TELEMETRY_HOT": str(disabled_hot),
             "AGENTQ_TELEMETRY_STATE": str(disabled_state),
             "AGENTQ_CONTEXT_CACHE_HOME": str(disabled_cache),
@@ -1577,7 +1877,8 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(data["total_matching_lines"], 12)
         self.assertEqual(data["matching_files"], 1)
         self.assertEqual(data["shown"], 3)
-        self.assertEqual(data["coverage"], "sampled")
+        self.assertEqual(data["coverage"]["status"], "sampled")
+        self.assertEqual(data["coverage"]["reason"], ["result_limit"])
         self.assertEqual(data["match_file_summary"][0]["matching_lines"], 12)
 
     def test_compact_search_json_is_canonical_and_substantially_smaller(self) -> None:
@@ -1598,7 +1899,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertTrue({"hits", "files", "context_lines", "match_file_summary"} <= set(legacy))
         self.assertEqual(set(compact), {"summary", "files", "continuation"})
         self.assertEqual(compact["summary"]["matches"], {"shown": 12, "total": 12})
-        self.assertEqual(compact["summary"]["coverage"], "complete")
+        self.assertEqual(compact["summary"]["coverage"]["status"], "complete")
         self.assertIsNone(compact["continuation"])
         self.assertNotIn("hits", compact["files"][0])
         self.assertNotIn("snippets", compact["files"][0])
@@ -1645,7 +1946,7 @@ class AgentQIntegrationTest(unittest.TestCase):
             "--samples-per-file", "3", "--format", "compact-json", "--repeat",
         )
         sampled = json.loads(sampled_result.stdout)
-        self.assertEqual(sampled["summary"]["coverage"], "sampled")
+        self.assertEqual(sampled["summary"]["coverage"]["status"], "sampled")
         self.assertEqual(sampled["continuation"]["omitted"]["matches"], 9)
         continuation_argv = shlex.split(sampled["continuation"]["command"])
         continuation_argv[0] = str(AGENTQ)
@@ -1653,7 +1954,7 @@ class AgentQIntegrationTest(unittest.TestCase):
             continuation_argv, cwd=self.repo, env=self.env, text=True, capture_output=True,
         )
         self.assertEqual(continued.returncode, 0, msg=continued.stderr)
-        self.assertEqual(json.loads(continued.stdout)["summary"]["coverage"], "complete")
+        self.assertEqual(json.loads(continued.stdout)["summary"]["coverage"]["status"], "complete")
 
         budgeted_result = subprocess.run(
             [
@@ -1706,8 +2007,9 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(broad["summary"]["intent"], "broad-summary")
         self.assertEqual(broad["summary"]["view"], "summary")
         self.assertEqual(len(broad["files"][0]["evidence"]), 2)
-        self.assertEqual(broad["summary"]["coverage"], "sampled")
-        self.assertIn("--view matches", broad["continuation"]["command"])
+        self.assertEqual(broad["summary"]["coverage"]["status"], "sampled")
+        self.assertTrue(broad["continuation"]["command"].startswith("agentq continue "))
+        self.assertTrue(broad["continuation"]["cursor"])
 
         rendered = subprocess.run(
             [str(AGENTQ), "search", "--repo", str(self.repo), "OldName", "--repeat"],
@@ -1800,8 +2102,9 @@ class AgentQIntegrationTest(unittest.TestCase):
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq_lib import context_cache as cache_module
             from agentq_lib import gitops as gitops_module
+            from agentq_lib import state as state_module
 
-        with mock.patch.dict(os.environ, self.env):
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_SESSION_ID": "cache-bounds"}):
             secret = "PRIVATE_CACHE_ARGUMENT_91fdb"
             operation_key = cache_module.operation_cache_key(self.repo, "search", {"query": secret})
             cache_module.remember_operation(self.repo, "search", operation_key)
@@ -1809,10 +2112,18 @@ class AgentQIntegrationTest(unittest.TestCase):
                 cache_module.remember_operation(
                     self.repo, "search", __import__("hashlib").sha256(f"key-{index}".encode()).hexdigest(),
                 )
-            cache_path = cache_module._cache_path(self.repo)
-            raw = cache_path.read_text(encoding="utf-8")
-            self.assertNotIn(secret, raw)
-            self.assertLessEqual(len(json.loads(raw)["entries"]), 128)
+            db_path = state_module.database_path()
+            self.assertTrue(db_path.is_file())
+            self.assertNotIn(secret.encode("utf-8"), db_path.read_bytes())
+            reader = sqlite3.connect(db_path)
+            try:
+                stored = reader.execute(
+                    "SELECT COUNT(*) FROM context_entries WHERE repo_id = ?",
+                    (cache_module.repo_id(self.repo),),
+                ).fetchone()[0]
+            finally:
+                reader.close()
+            self.assertLessEqual(stored, 128)
 
             binary = self.repo / "packages/a/src/asset.bin"
             binary.write_bytes(b"\x00old")
@@ -1835,6 +2146,314 @@ class AgentQIntegrationTest(unittest.TestCase):
             changed = gitops_module.diff_data(self.repo, patch=True, budget=100000)
             self.assertFalse(changed.get("repeat_suppressed", False))
             self.assertIn("editedDiff", changed["patch"])
+
+    def test_repeat_suppression_is_independent_of_telemetry(self) -> None:
+        env = {**self.env, "AGENTQ_TELEMETRY": "0"}
+        self.data("task", "begin", extra_env=env)
+        self.change_a("\nexport const decoupled = true\n")
+        first = self.data("git-diff", "--task", "--patch", extra_env=env)
+        self.assertNotIn("repeat_suppressed", first)
+        second = self.data("git-diff", "--task", "--patch", extra_env=env)
+        self.assertTrue(second["repeat_suppressed"])
+        self.assertEqual(second["repeat_scope"], "task")
+
+    def test_repeat_suppression_requires_explicit_session_identity(self) -> None:
+        no_identity = {"AGENTQ_SESSION_ID": "", "CODEX_THREAD_ID": ""}
+        plain = self.data("read", "packages/a/src/index.ts:1-3", extra_env=no_identity)
+        self.assertNotIn("read_overlap", plain)
+        plain_again = self.data("read", "packages/a/src/index.ts:1-3", extra_env=no_identity)
+        self.assertFalse(plain_again["items"][0].get("suppressed", False))
+
+        secret_session = "SESSION_SECRET_9f2c"
+        session_env = {**self.env, "AGENTQ_SESSION_ID": secret_session}
+        first = self.data("read", "packages/a/src/index.ts:1-3", extra_env=session_env)
+        self.assertNotIn("read_overlap", first)
+        second = self.data("read", "packages/a/src/index.ts:1-3", extra_env=session_env)
+        self.assertTrue(second["items"][0].get("suppressed", False))
+        self.assertEqual(second["read_overlap"]["scope"], "session")
+
+        other = self.data("read", "packages/a/src/index.ts:1-3", extra_env={**self.env, "AGENTQ_SESSION_ID": "other-session"})
+        self.assertFalse(other["items"][0].get("suppressed", False))
+
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import state as state_module
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            raw = state_module.database_path().read_bytes()
+        self.assertNotIn(secret_session.encode("utf-8"), raw)
+
+    def test_emit_cached_skips_workspace_identity_when_suppression_inactive(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            import agentq
+            from agentq_lib import context_cache as cache_module
+
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(budget=100000, format="json", repeat=False, command="search")
+        producer = mock.Mock(return_value={"command": "search"})
+
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0", "AGENTQ_SESSION_ID": "probe"}):
+            with mock.patch("builtins.print"):
+                with mock.patch.object(cache_module, "run_cmd", side_effect=AssertionError("git ran")) as run_mock:
+                    agentq.emit_cached(args, self.repo, "search", {"query": "x"}, producer, render_noop)
+                self.assertEqual(run_mock.call_count, 0)
+                self.assertEqual(producer.call_count, 1)
+
+        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_SESSION_ID": "probe"}):
+            with mock.patch("builtins.print"):
+                with mock.patch.object(
+                    cache_module, "run_cmd",
+                    return_value=SimpleNamespace(returncode=0, stdout="head\n"),
+                ) as run_mock:
+                    agentq.emit_cached(args, self.repo, "search", {"query": "x"}, producer, render_noop)
+                self.assertGreaterEqual(run_mock.call_count, 1)
+
+    def test_search_coverage_policies_control_counting_work(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import search as search_module
+
+        broad = self.repo / "packages/a/src/broad_cov.ts"
+        broad.write_text("".join(f"export const covItem{i} = {i}\n" for i in range(120)), encoding="utf-8")
+
+        with mock.patch.object(
+            search_module, "_matching_line_counts", side_effect=AssertionError("count pass ran"),
+        ) as count_mock:
+            fast = search_module.search_data(
+                self.repo, "covItem", ["packages/a/src"], limit=5, scan_cap=30, coverage_policy="fast",
+            )
+        self.assertEqual(count_mock.call_count, 0)
+        self.assertEqual(fast["coverage_policy"], "fast")
+        self.assertEqual(fast["count_quality"], "lower-bound")
+        self.assertEqual(fast["total_matching_lines"], 30)
+        self.assertFalse(fast["scan_complete"])
+        self.assertIn("scan_cap", fast["coverage"]["reason"])
+
+        with mock.patch.object(
+            search_module, "_matching_line_counts", wraps=search_module._matching_line_counts,
+        ) as count_mock:
+            exact = search_module.search_data(
+                self.repo, "covItem", ["packages/a/src"], limit=5, coverage_policy="exact",
+            )
+        self.assertEqual(count_mock.call_count, 1)
+        self.assertEqual(exact["count_quality"], "exact")
+        self.assertEqual(exact["total_matching_lines"], 120)
+
+        auto = self.data("search", "covItem", "--path", "packages/a/src")
+        self.assertEqual(auto["coverage_policy"], "auto")
+        self.assertEqual(auto["count_quality"], "exact")
+        self.assertEqual(auto["total_matching_lines"], 120)
+
+    def test_search_lower_bound_counts_are_labeled_in_text(self) -> None:
+        broad = self.repo / "packages/a/src/broad_lb.ts"
+        broad.write_text("".join(f"export const lbItem{i} = {i}\n" for i in range(120)), encoding="utf-8")
+        rendered = subprocess.run(
+            [
+                str(AGENTQ), "search", "--repo", str(self.repo), "--format", "text", "--budget", "100000",
+                "lbItem", "--path", "packages/a/src", "--coverage", "fast",
+                "--scan-cap", "30", "--max-results", "5",
+            ],
+            text=True, capture_output=True, env=self.env, cwd=self.repo,
+        )
+        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+        self.assertIn("(lower bound; scan cap reached)", rendered.stdout)
+        self.assertIn("continue: agentq continue", rendered.stdout)
+
+    def test_continuation_cursors_are_short_scoped_and_replayable(self) -> None:
+        session = {"AGENTQ_SESSION_ID": "cursor-test"}
+        rendered = subprocess.run(
+            [
+                str(AGENTQ), "search", "--repo", str(self.repo), "--format", "text", "--budget", "2000",
+                "OldName", "--path", "packages", "--max-results", "2", "--samples-per-file", "1",
+            ],
+            text=True, capture_output=True, env={**self.env, **session}, cwd=self.repo,
+        )
+        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+        match = re.search(r"agentq continue ([A-Za-z0-9_-]+)", rendered.stdout)
+        self.assertIsNotNone(match, msg=rendered.stdout)
+        cursor = match.group(1)
+
+        replay = self.aq("continue", cursor, extra_env=session)
+        self.assertIn("OldName", replay.stdout)
+
+        other = self.aq("continue", cursor, expect=2, extra_env={**session, "AGENTQ_SESSION_ID": "other"})
+        self.assertIn("unknown or expired continuation cursor", other.stderr)
+
+        self.change_a("\nexport const workspaceMoved = true\n")
+        moved = self.aq("continue", cursor, expect=2, extra_env=session)
+        self.assertIn("workspace changed", moved.stderr)
+
+        compact = self.data("search", "OldName", "--path", "packages", "--max-results", "2",
+                            "--samples-per-file", "1", "--budget", "2000", "--format", "compact-json",
+                            extra_env=session)
+        block = compact["continuation"]
+        self.assertTrue(block["cursor"])
+        self.assertEqual(block["command"], f"agentq continue {block['cursor']}")
+        self.assertIn("T", block["expires_at"])
+
+    def test_continuation_cursors_expire(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import context_cache as cache_module
+            from agentq_lib import state as state_module
+
+        env = {**self.env, "AGENTQ_SESSION_ID": "cursor-ttl", "AGENTQ_STATE_DB": str(Path(self.temp.name) / "ttl.db")}
+        with mock.patch.dict(os.environ, env, clear=False):
+            stored = cache_module.remember_continuation(self.repo, "agentq files zz-none")
+            self.assertIsNotNone(stored)
+            self.assertTrue(stored["expires_at"])
+            record = cache_module.continuation_record(self.repo, stored["cursor"])
+            self.assertIsNotNone(record)
+            self.assertEqual(record["command"], "agentq files zz-none")
+
+            reader = sqlite3.connect(state_module.database_path())
+            try:
+                reader.execute("UPDATE continuations SET expires_at = 1")
+                reader.commit()
+            finally:
+                reader.close()
+            self.assertIsNone(cache_module.continuation_record(self.repo, stored["cursor"]))
+
+    def test_inspect_python_and_tsnav_continuations_carry_cursors(self) -> None:
+        session = {"AGENTQ_SESSION_ID": "cursor-nav"}
+        (self.repo / "packages/a/src/cursor_nav.py").write_text(
+            "def cursorNav(value):\n"
+            "    return value\n"
+            "\n"
+            "one = cursorNav(1)\n"
+            "two = cursorNav(one)\n"
+            "three = cursorNav(two)\n",
+            encoding="utf-8",
+        )
+        inspected = self.data("inspect", "cursorNav", "--path", "packages/a/src", "--lang", "python",
+                              "--limit", "1", "--repeat", extra_env=session)
+        block = inspected["python"]["continuation"]
+        self.assertEqual(block["command"], f"agentq continue {block['cursor']}")
+        self.assertTrue(block["cursor"])
+
+    def test_legacy_json_state_migrates_into_sqlite_store(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import context_cache as cache_module
+            from agentq_lib import state as state_module
+            from agentq_lib import tasking as tasking_module
+
+        state_db = Path(self.temp.name) / "legacy-state" / "state.db"
+        state_db.parent.mkdir(parents=True, exist_ok=True)
+        legacy_repo_id = cache_module.repo_id(self.repo)
+        legacy_task = self.telemetry / "tasks" / f"{legacy_repo_id}.json"
+        legacy_task.parent.mkdir(parents=True, exist_ok=True)
+        legacy_task.write_text(json.dumps({
+            "task_id": "legacy123", "started_at": 1.0, "baseline": {},
+        }), encoding="utf-8")
+
+        env = {**self.env, "AGENTQ_STATE_DB": str(state_db)}
+        with mock.patch.dict(os.environ, env, clear=False):
+            from agentq_lib.runtime import context_cache_dir
+
+            legacy_context = context_cache_dir() / f"{legacy_repo_id}.json"
+            legacy_context.parent.mkdir(parents=True, exist_ok=True)
+            legacy_context.write_text(json.dumps({
+                "schema": 1,
+                "entries": [{
+                    "context": "task:legacy123", "command": "search",
+                    "key": "a" * 64, "time": time.time(),
+                }],
+            }), encoding="utf-8")
+            malformed = legacy_context.with_name(f"{'b' * 16}.json")
+            malformed.write_text("{broken legacy state", encoding="utf-8")
+            state_module._legacy_imported = False
+            restored = tasking_module._read_state(self.repo)
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored["task_id"], "legacy123")
+            hits, scope = cache_module._lookup(self.repo, "search", ["a" * 64])
+        self.assertEqual(hits, {"a" * 64})
+        self.assertEqual(scope, "task")
+        self.assertFalse(legacy_context.exists())
+        self.assertFalse(legacy_task.exists())
+        self.assertTrue(malformed.exists())
+
+    def test_concurrent_processes_preserve_context_state(self) -> None:
+        env = {**self.env, "AGENTQ_SESSION_ID": "concurrent"}
+        processes = [
+            subprocess.Popen(
+                [
+                    str(AGENTQ), "search", "OldName", "--repo", str(self.repo),
+                    "--format", "json", "--budget", str(4000 + index), "--path", "packages/a/src",
+                ],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=self.repo,
+            )
+            for index in range(8)
+        ]
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, msg=stderr or stdout)
+
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import context_cache as cache_module
+            from agentq_lib import state as state_module
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            reader = sqlite3.connect(state_module.database_path())
+            try:
+                stored = reader.execute(
+                    "SELECT COUNT(*) FROM context_entries WHERE repo_id = ? AND context_id = ? AND command = ?",
+                    (cache_module.repo_id(self.repo), f"session:{cache_module.session_id()}", "search"),
+                ).fetchone()[0]
+            finally:
+                reader.close()
+        self.assertEqual(stored, 8)
+
+    def test_run_profiles_control_environment_and_retention(self) -> None:
+        failing = "import os, sys; print('CI=%s' % os.environ.get('CI'), file=sys.stderr); raise SystemExit(3)"
+        transparent = self.data("run", "--profile", "transparent", "--", "python3", "-c", failing)
+        self.assertEqual(transparent["profile"], "transparent")
+        self.assertIn("CI=None", transparent["tail"][-1])
+        self.assertEqual(transparent["log_retention"], "retained")
+        self.assertTrue(Path(transparent["log"]).is_file())
+        self.assertEqual(Path(transparent["log"]).stat().st_mode & 0o777, 0o600)
+
+        passing = self.data("run", "--profile", "ci", "--", "python3", "-c", "print('CI=%s' % __import__('os').environ.get('CI'))")
+        self.assertEqual(passing["profile"], "ci")
+        self.assertIn("CI=1", passing["tail"][-1])
+        self.assertEqual(passing["log_retention"], "deleted")
+        self.assertIsNone(passing["log"])
+
+        kept = self.data("run", "--profile", "ci", "--keep-log", "--", "python3", "-c", "print('kept')")
+        self.assertEqual(kept["log_retention"], "retained")
+        self.assertTrue(Path(kept["log"]).is_file())
+
+        offline = self.data("run", "--offline", "--", "python3", "-c", "print('offline')")
+        self.assertEqual(offline["profile"], "offline")
+        self.assertIn("not a network sandbox", offline["network_isolation"])
+
+        conflict = self.aq("run", "--profile", "transparent", "--offline", "--", "python3", "-c", "print('x')", expect=2)
+        self.assertIn("--profile offline", conflict.stderr)
+
+    def test_run_log_cleanup_enforces_ttl_and_quota(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq_lib import runops as runops_module
+
+        log_dir = Path(self.temp.name) / "logs"
+        log_dir.mkdir()
+        now = time.time()
+        expired = log_dir / "expired.log"
+        expired.write_text("x" * 10, encoding="utf-8")
+        os.utime(expired, (now - 10 * 24 * 3600,) * 2)
+        oldest = log_dir / "oldest.log"
+        oldest.write_text("y" * 1000, encoding="utf-8")
+        os.utime(oldest, (now - 300,) * 2)
+        newer = log_dir / "newer.log"
+        newer.write_text("z" * 1000, encoding="utf-8")
+        os.utime(newer, (now - 290,) * 2)
+        fresh = log_dir / "fresh.log"
+        fresh.write_text("w" * 10, encoding="utf-8")
+        os.utime(fresh, (now - 280,) * 2)
+
+        with mock.patch.object(runops_module, "_LOG_QUOTA_BYTES", 1500):
+            runops_module._cleanup_logs(log_dir)
+
+        self.assertFalse(expired.exists())
+        self.assertFalse(oldest.exists())
+        self.assertTrue(newer.exists())
+        self.assertTrue(fresh.exists())
 
     def test_json_inspect_caches_only_source_lines_visible_inside_wrapper(self) -> None:
         path = self.repo / "packages/a/src/budgeted_inspect.py"
@@ -2115,7 +2734,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(sampled.returncode, 0, msg=sampled.stderr)
         self.assertIn("[sampled]", sampled.stdout)
-        self.assertEqual(sampled.stdout.count("continue: agentq inspect"), 1)
+        self.assertEqual(sampled.stdout.count("continue: agentq continue"), 1)
         continuation = shlex.split(sampled.stdout.split("continue: ", 1)[1].strip())
         continuation[0] = str(AGENTQ)
         completed = subprocess.run(continuation, cwd=self.repo, env=self.env, text=True, capture_output=True)
@@ -2192,7 +2811,7 @@ class AgentQIntegrationTest(unittest.TestCase):
             render_ts_nav(semantic_action("references", [caller, test_reference])),
             render_ts_nav(semantic_action("implementations", [implementation])),
         ]
-        with mock.patch("agentq_lib.inspectops.ts_nav_data", return_value=overview) as semantic_overview:
+        with mock.patch("agentq_lib.navigation.ts_nav_data", return_value=overview) as semantic_overview:
             current_ts_data = inspect_data(self.repo, "OldName", ["packages"], limit=80)
         semantic_overview.assert_called_once()
         self.assertEqual(semantic_overview.call_args.args[1], "overview")
@@ -2368,16 +2987,9 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertTrue(capped["truncated"])
         self.assertEqual(sum(len(item["lines"]) for item in capped["items"]), 7)
         self.assertGreaterEqual(capped["continuation"]["remaining_windows"], 1)
-        self.assertTrue(capped["continuation"]["command"].startswith("agentq read "))
-        self.assertIn("--max-lines 7", capped["continuation"]["command"])
-        self.assertIn("--max-chars 77", capped["continuation"]["command"])
-        self.assertIn("--format json", capped["continuation"]["command"])
-        self.assertIn("--budget 1000000", capped["continuation"]["command"])
-        self.assertIn("--include-sensitive", capped["continuation"]["command"])
-        self.assertIn("--allow-outside", capped["continuation"]["command"])
-        self.assertIn("--repeat", capped["continuation"]["command"])
-        self.assertIn("first_windows.py:85-87", capped["continuation"]["command"])
-        self.assertNotIn("first_windows.py:28-32", capped["continuation"]["command"])
+        self.assertTrue(capped["continuation"]["command"].startswith("agentq continue "))
+        self.assertTrue(capped["continuation"]["cursor"])
+        self.assertIn("T", capped["continuation"]["expires_at"])
         continuation = shlex.split(capped["continuation"]["command"])
         continuation[0] = str(AGENTQ)
         continued = subprocess.run(
@@ -2409,11 +3021,10 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(current["continuation"]["remaining_windows"], 11)
         self.assertEqual(current["continuation"]["shown_windows"], 11)
         while current.get("continuation"):
-            command = shlex.split(current["continuation"]["command"])
             continued = subprocess.run(
                 [
-                    str(AGENTQ), "read", "--repo", str(self.repo), "--format", "json",
-                    "--budget", "1000000", *command[2:],
+                    str(AGENTQ), "continue", current["continuation"]["cursor"],
+                    "--repo", str(self.repo), "--format", "json", "--budget", "1000000",
                 ],
                 cwd=self.repo, env=self.env, text=True, capture_output=True,
             )

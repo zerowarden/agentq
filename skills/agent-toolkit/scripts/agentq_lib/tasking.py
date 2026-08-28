@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
 import secrets
-import stat
 import time
 from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, run_cmd
-from .runtime import repo_id, secure_dir, telemetry_hot_dir
+from .runtime import repo_id
+from .state import delete_task, load_task, store_task
 from .workspace import changed_files
 
 _ACTION_ALIASES = {
@@ -22,39 +20,19 @@ _ACTION_ALIASES = {
 }
 
 
-def _task_state_path(root: Path) -> Path:
+def _read_state(root: Path) -> dict[str, Any] | None:
     # Deliberately repo/worktree-scoped rather than Codex-thread-scoped. One
     # thread may complete several sequential tasks; concurrent tasks belong in
     # separate worktrees.
-    return secure_dir(telemetry_hot_dir() / "tasks") / f"{repo_id(root)}.json"
-
-
-def _read_state(root: Path) -> dict[str, Any] | None:
-    path = _task_state_path(root)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, dict) or not isinstance(value.get("task_id"), str):
-        return None
-    return value
+    return load_task(repo_id(root))
 
 
 def _write_state(root: Path, state: dict[str, Any]) -> None:
-    path = _task_state_path(root)
-    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    try:
-        os.write(fd, payload.encode("utf-8"))
-    finally:
-        os.close(fd)
+    store_task(repo_id(root), state, now=round(time.time(), 3))
 
 
 def _clear_state(root: Path) -> None:
-    try:
-        _task_state_path(root).unlink(missing_ok=True)
-    except OSError as exc:
-        raise AgentQError(f"unable to clear task state: {exc}") from exc
+    delete_task(repo_id(root))
 
 
 def _content_fingerprint(root: Path, path_text: str) -> str:

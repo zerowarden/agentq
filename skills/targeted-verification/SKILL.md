@@ -4,7 +4,7 @@ description: Use for tests, typechecks, lint, builds, and changed-code verificat
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Project commands must already be installed. Node/pnpm workspaces and Vitest receive specialized local planning.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   mutation: "command-dependent"
 ---
 

@@ -7,6 +7,8 @@ from typing import Any
 
 from .budgeting import budget_text_records, rendered_text
 from .common import AgentQError, ensure_within, find_executable, run_cmd
+from .evidence import REFERENCE_LIMIT, SAMPLED, SEMANTIC, complete as complete_coverage, coverage as coverage_block
+from .paths import resolve_repo_path
 
 _TS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 _IDENTIFIER_RE = __import__("re").compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -50,11 +52,13 @@ def _symbol_ts_nav(
     node = find_executable("node")
     if not node:
         raise AgentQError("node is required for TypeScript semantic navigation")
+    # Confine every scope before it reaches the TypeScript language service.
+    confined = [str(resolve_repo_path(root, p).absolute) for p in (paths or [])]
     script = Path(__file__).with_name("ts_nav.mjs")
     result = run_cmd(
         [
             node, str(script), "symbol", action, str(root), symbol,
-            json.dumps(paths, ensure_ascii=False), str(limit), str(pick or ""),
+            json.dumps(confined, ensure_ascii=False), str(limit), str(pick or ""),
         ],
         cwd=root,
         timeout=180,
@@ -65,12 +69,47 @@ def _symbol_ts_nav(
         raise AgentQError("TypeScript navigation returned invalid JSON") from exc
     if not data.get("ok"):
         raise AgentQError(data.get("error") or "TypeScript navigation failed")
-    data["paths"] = list(paths)
+    data["paths"] = confined
     data["limit"] = limit
     return data
 
 
+def _ts_coverage(data: dict[str, Any]) -> dict[str, Any]:
+    if data.get("action") == "overview":
+        truncated = any(
+            isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
+            for key in ("definition", "references", "implementations")
+        )
+    else:
+        truncated = bool(data.get("truncated"))
+    return coverage_block(SAMPLED, REFERENCE_LIMIT) if truncated else complete_coverage()
+
+
 def ts_nav_data(
+    root: Path,
+    action: str,
+    file: str | None,
+    line: int | None,
+    column: int | None,
+    limit: int = 80,
+    *,
+    symbol: str | None = None,
+    paths: list[str] | None = None,
+    pick: int | None = None,
+) -> dict[str, Any]:
+    paths = paths or []
+    data = _ts_nav_data(root, action, file, line, column, limit, symbol=symbol, paths=paths, pick=pick)
+    data["provenance"] = SEMANTIC
+    data["coverage"] = _ts_coverage(data)
+    if action == "overview" and any(
+        isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
+        for key in ("definition", "references", "implementations")
+    ):
+        data["continuation"] = {"command": _overview_continuation(data)}
+    return data
+
+
+def _ts_nav_data(
     root: Path,
     action: str,
     file: str | None,
@@ -167,7 +206,7 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             bool((data.get(key) if isinstance(data.get(key), dict) else {}).get("truncated"))
             for key, _ in sections
         )
-        continuation = _overview_continuation(data)
+        continuation = (data.get("continuation") or {}).get("command") or _overview_continuation(data)
         lines = [
             f"ts overview {data.get('symbol', '?')} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)} "
             f"[{'complete' if complete else 'sampled'}]",

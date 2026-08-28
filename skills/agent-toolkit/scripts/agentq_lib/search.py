@@ -19,12 +19,15 @@ from .common import (
     redact_text, relpath, repo_root, run_cmd, safe_int, scope_match,
 )
 from .context_cache import read_repeat_advice, remember_read
+from .evidence import (
+    COMPLETE, LEXICAL, LINE_CAP, RESULT_LIMIT, SAMPLED, SCAN_CAP, SYNTACTIC,
+    complete as complete_coverage, coverage as coverage_block, status_of,
+)
 from .pythonnav import python_outline
+from .redaction import StreamingRedactor
 
 DEF_RE = re.compile(r"\b(?:export\s+)?(?:public\s+)?(?:async\s+)?(?:function|class|interface|type|enum|trait|struct|fn|def|const|let|var)\s+([A-Za-z_$][\w$]*)")
 IMPORT_RE = re.compile(r"^\s*(?:import|export\s+.*\s+from|from\s+\S+\s+import|use\s+|mod\s+|require\s*\()")
-PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
-PRIVATE_KEY_END_RE = re.compile(r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
 TS_JS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 TS_JS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 
@@ -69,12 +72,15 @@ def files_data(root: Path, query: str, scopes: list[str], limit: int, include_se
     candidates.sort(key=lambda p: _file_score(p, query) if query else (0, len(Path(p).parts), len(p), p))
     total = len(candidates)
     shown = candidates[:limit]
+    truncated = total > len(shown)
     return {
         "repo_root": str(root),
         "query": query,
         "total": total,
         "shown": len(shown),
-        "truncated": total > len(shown),
+        "truncated": truncated,
+        "provenance": LEXICAL,
+        "coverage": coverage_block(SAMPLED, RESULT_LIMIT) if truncated else complete_coverage(),
         "files": [{"path": p, "role": classify_path(p), "language": language_for(p)} for p in shown],
     }
 
@@ -293,6 +299,31 @@ def _build_context_snippets(
     return snippets, flat_context
 
 
+def _empty_search_data(
+    root: Path,
+    query: str,
+    mode: str,
+    word: bool,
+    scopes: list[str],
+    view: str,
+    context: int,
+    coverage_policy: str,
+) -> dict[str, Any]:
+    data = {
+        "repo_root": str(root), "query": query, "mode": mode, "word": word,
+        "paths": scopes, "shown": 0, "total": 0, "total_matching_lines": 0,
+        "matching_files": 0, "shown_files": 0, "truncated": False,
+        "coverage": complete_coverage(), "scan_complete": True, "view": view,
+        "effective_view": "matches", "counts_by_role": {}, "hits": [],
+        "files": [], "context": context, "context_lines": [],
+        "context_truncated": False, "semantic_candidate": False,
+        "symbol_candidates": [], "query_intent": "literal-matches",
+        "match_file_summary": [], "candidate_lines": 0, "candidate_chars": 0,
+        "coverage_policy": coverage_policy, "count_quality": "exact",
+    }
+    return data
+
+
 def search_data(
     root: Path,
     query: str,
@@ -311,6 +342,7 @@ def search_data(
     view: str = "auto",
     max_files: int = 40,
     scan_cap: int = 5000,
+    coverage_policy: str = "auto",
     compact: bool = False,
     render_budget: int = 0,
     continuation_options: dict[str, Any] | None = None,
@@ -322,41 +354,36 @@ def search_data(
         raise AgentQError("search query cannot be empty")
     if view not in {"auto", "summary", "snippets", "matches"}:
         raise AgentQError(f"unsupported search view: {view}")
+    if coverage_policy not in {"fast", "auto", "exact"}:
+        raise AgentQError(f"unsupported search coverage policy: {coverage_policy}")
 
     scopes = _validated_scopes(root, scopes)
     globs = globs or []
     types = types or []
-    counts_by_file = _matching_line_counts(
-        root,
-        rg,
-        query,
-        scopes,
-        mode=mode,
-        word=word,
-        case=case,
-        globs=globs,
-        types=types,
-        include_sensitive=include_sensitive,
-    )
+    counts_by_file: dict[str, int] = {}
+    if coverage_policy == "exact":
+        counts_by_file = _matching_line_counts(
+            root,
+            rg,
+            query,
+            scopes,
+            mode=mode,
+            word=word,
+            case=case,
+            globs=globs,
+            types=types,
+            include_sensitive=include_sensitive,
+        )
+        if not counts_by_file:
+            return _empty_search_data(root, query, mode, word, scopes, view, context, coverage_policy)
     total_matching_lines = sum(counts_by_file.values())
     matching_files = len(counts_by_file)
-    if not counts_by_file:
-        data = {
-            "repo_root": str(root), "query": query, "mode": mode, "word": word,
-            "paths": scopes, "shown": 0, "total": 0, "total_matching_lines": 0,
-            "matching_files": 0, "shown_files": 0, "truncated": False,
-            "coverage": "complete", "scan_complete": True, "view": view,
-            "effective_view": "matches", "counts_by_role": {}, "hits": [],
-            "files": [], "context": context, "context_lines": [],
-            "context_truncated": False, "semantic_candidate": False,
-            "symbol_candidates": [], "query_intent": "literal-matches",
-            "match_file_summary": [], "candidate_lines": 0, "candidate_chars": 0,
-        }
-        return _compact_search_data(data, budget=render_budget, options=continuation_options or {}) if compact else data
 
     # The match pass is not capped per-file: samples-per-file is a rendering
-    # control, not a discovery control. A separate count pass already gives us
-    # exact coverage totals; scan_cap is the only safety bound on collection.
+    # control, not a discovery control. scan_cap is the only safety bound on
+    # collection. Under fast/auto policies this is the only pass: per-file
+    # counts accumulate while streaming, so totals are exact when the stream
+    # exhausts naturally and lower bounds when the scan cap is reached.
     sample_args = [rg, "--json", "--no-messages", "--color=never", "--hidden"]
     _rg_search_flags(
         sample_args,
@@ -396,6 +423,8 @@ def search_data(
         line_number = safe_int(payload.get("line_number"))
         line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
         candidate_chars += len(line)
+        if coverage_policy != "exact":
+            counts_by_file[path] = counts_by_file.get(path, 0) + 1
         submatches = payload.get("submatches") or []
         first = submatches[0] if submatches else {}
         byte_start = safe_int(first.get("start"))
@@ -433,6 +462,14 @@ def search_data(
         _, stderr = proc.communicate()
     if proc.returncode not in (0, 1, -15) and not scan_limited:
         raise _rg_error(stderr or "", proc.returncode)
+    if coverage_policy == "exact":
+        count_quality = "exact"
+    else:
+        total_matching_lines = sum(counts_by_file.values())
+        matching_files = len(counts_by_file)
+        if not counts_by_file:
+            return _empty_search_data(root, query, mode, word, scopes, view, context, coverage_policy)
+        count_quality = "lower-bound" if scan_limited else "exact"
 
     priority = {"definition": 0, "import": 1, "reference": 2}
     role_priority = {"source": 0, "test": 1, "config": 2, "docs": 3, "generated": 4}
@@ -526,7 +563,12 @@ def search_data(
     counts_by_role = Counter(classify_path(path) for path in counts_by_file)
     shown = len(visible_hits)
     shown_files = len(files)
-    coverage = "complete" if shown == total_matching_lines and shown_files == matching_files and not scan_limited else "sampled"
+    causes: list[str] = []
+    if scan_limited:
+        causes.append(SCAN_CAP)
+    if shown < total_matching_lines or shown_files < matching_files:
+        causes.append(RESULT_LIMIT)
+    coverage = complete_coverage() if not causes else coverage_block(SAMPLED, *causes)
     data = {
         "repo_root": str(root),
         "query": query,
@@ -538,8 +580,11 @@ def search_data(
         "total_matching_lines": total_matching_lines,
         "matching_files": matching_files,
         "shown_files": shown_files,
-        "truncated": coverage != "complete",
+        "truncated": status_of(coverage) != COMPLETE,
         "coverage": coverage,
+        "provenance": LEXICAL,
+        "coverage_policy": coverage_policy,
+        "count_quality": count_quality,
         "scan_complete": not scan_limited,
         "render_sampled": shown < total_matching_lines or shown_files < matching_files,
         "counts_by_role": dict(counts_by_role),
@@ -625,6 +670,9 @@ def _search_command(
     ))
     if current_scan_cap != 5000:
         argv.extend(("--scan-cap", str(current_scan_cap)))
+    policy = str(options.get("coverage_policy", "auto") or "auto")
+    if policy != "auto":
+        argv.extend(("--coverage", policy))
     argv.extend(("--format", output_format))
     if budget is not None:
         argv.extend(("--budget", str(max(1, budget))))
@@ -646,7 +694,7 @@ def _continuation_target(data: dict[str, Any], shown_by_path: dict[str, int]) ->
 
 
 def _search_continuation(data: dict[str, Any], options: dict[str, Any]) -> dict[str, Any] | None:
-    if data.get("coverage") == "complete" and data.get("scan_complete", True):
+    if status_of(data.get("coverage")) == COMPLETE and data.get("scan_complete", True):
         return None
     shown_by_path = {
         str(item.get("path", "")): max(0, int(item.get("shown", 0) or 0))
@@ -654,7 +702,7 @@ def _search_continuation(data: dict[str, Any], options: dict[str, Any]) -> dict[
     }
     target_path, target_total = _continuation_target(data, shown_by_path)
     reasons = []
-    if data.get("coverage") != "complete":
+    if status_of(data.get("coverage")) != COMPLETE:
         reasons.append("sampled")
     if not data.get("scan_complete", True):
         reasons.append("scan-cap")
@@ -805,7 +853,10 @@ def _compact_payload(
         "view": data.get("effective_view", "matches"),
         "matches": {"shown": shown, "total": total},
         "files": {"shown": len(files), "total": matching_files},
-        "coverage": "complete" if complete else "sampled",
+        "coverage": complete_coverage() if complete else coverage_block(
+            SAMPLED, *([SCAN_CAP] if not data.get("scan_complete", True) else [RESULT_LIMIT]),
+        ),
+        "count_quality": "lower-bound" if data.get("count_quality") == "lower-bound" else "exact",
         "scan_complete": bool(data.get("scan_complete", True)),
     }
     if data.get("mode") != "fixed":
@@ -918,7 +969,7 @@ def render_search(data: dict[str, Any], *, budget: int = 0) -> str:
     matching_files = int(data.get("matching_files", 0))
     shown = int(data.get("shown", 0))
     shown_files = int(data.get("shown_files", 0))
-    status = str(data.get("coverage") or "sampled")
+    status = status_of(data.get("coverage")) or SAMPLED
     header = (
         f"search {data['query']!r}: {shown}/{total} matching lines in "
         f"{shown_files}/{matching_files} files [{data.get('effective_view', 'matches')}"
@@ -936,10 +987,11 @@ def render_search(data: dict[str, Any], *, budget: int = 0) -> str:
     samples = 2 if view == "summary" else int(data.get("samples_per_file", 8))
     files = data.get("files", [])
     footer: list[str] = []
-    if data.get("coverage") != "complete":
+    if status != COMPLETE:
         continuation = data.get("continuation") or {}
         command = continuation.get("command")
-        line = f"sampled: {shown}/{total} matching lines"
+        lower_bound = data.get("count_quality") == "lower-bound"
+        line = f"sampled: {shown}/{total} matching lines" + (" (lower bound; scan cap reached)" if lower_bound else "")
         if command:
             line += f"; continue: {command}"
         footer.append(line)
@@ -1042,38 +1094,21 @@ def _safe_source_lines(path: Path, *, strict_private_keys: bool = False) -> tupl
     version = hashlib.sha256(raw).hexdigest()[:16]
     if b"\0" in raw[:8192]:
         raise AgentQError(f"binary file cannot be read as source: {path.name}")
-    lines = raw.decode("utf-8", errors="replace").splitlines()
+    text = raw.decode("utf-8", errors="replace")
+    redactor = StreamingRedactor(strict=not strict_private_keys)
     safe_lines: list[str] = []
-    inside_key_block = False
-    private_key_blocks = 0
-    redacted_lines = 0
-    for raw_line in lines:
-        normalized = raw_line.strip()
-        begins = bool(
-            PRIVATE_KEY_BEGIN_RE.search(raw_line)
-            if strict_private_keys else PRIVATE_KEY_BEGIN_RE.fullmatch(normalized)
-        )
-        ends = bool(
-            PRIVATE_KEY_END_RE.search(raw_line)
-            if strict_private_keys else PRIVATE_KEY_END_RE.fullmatch(normalized)
-        )
-        if not inside_key_block and begins:
-            private_key_blocks += 1
-            redacted_lines += 1
-            safe_lines.append("[REDACTED_PRIVATE_KEY_BLOCK]")
-            inside_key_block = not ends
-        elif inside_key_block:
-            redacted_lines += 1
+    for raw_line in text.splitlines():
+        out = redactor.feed(raw_line + "\n")
+        if out == "":
+            # Interior line of a private-key block: keep a placeholder to preserve
+            # line numbering while hiding the secret material.
             safe_lines.append("[REDACTED_PRIVATE_KEY_MATERIAL]")
-            if ends:
-                inside_key_block = False
         else:
-            safe_lines.append(raw_line)
-    redaction = {
-        "private_key_blocks": private_key_blocks,
-        "redacted_lines": redacted_lines,
-        "unterminated_private_key_blocks": int(inside_key_block),
-    } if private_key_blocks else {}
+            safe_lines.append(out.rstrip("\n"))
+    tail = redactor.finish()
+    if tail:
+        safe_lines.append(tail.rstrip("\n"))
+    redaction = {**redactor.stats()} if redactor.private_key_blocks else {}
     return safe_lines, version, redaction
 
 
@@ -1346,6 +1381,8 @@ def read_data(
         )
         data: dict[str, Any] = {
             "repo_root": str(root), "items": items, "truncated": bool(continuation_windows),
+            "provenance": LEXICAL,
+            "coverage": coverage_block(SAMPLED, LINE_CAP) if continuation_windows else complete_coverage(),
             "source_cap_truncated": total_unseen_lines > max_lines,
             "render_budget_truncated": line_cap < source_line_cap,
             "max_lines": max_lines, "max_chars": max_chars,
@@ -1518,13 +1555,16 @@ def repo_map_data(root: Path, max_dirs: int = 40, max_manifests: int = 40) -> di
         elif name in {"pnpm-workspace.yaml", "pnpm-workspace.yml"}:
             manifests.append({"path": rel, "kind": "pnpm-workspace"})
     branch = run_cmd(["git", "branch", "--show-current"], cwd=root, timeout=5).stdout.strip()
+    manifests_truncated = len(manifests) > max_manifests
     return {
         "repo_root": str(root), "branch": branch or "(detached/non-git)", "files": len(files),
         "bytes": total_bytes,
         "languages": [{"language": k, "files": v} for k, v in lang_counts.most_common(15)],
         "extensions": [{"extension": k, "files": v} for k, v in ext_counts.most_common(15)],
         "directories": [{"path": k, "files": v} for k, v in dir_counts.most_common(max_dirs)],
-        "manifests": manifests[:max_manifests], "manifests_truncated": len(manifests) > max_manifests,
+        "manifests": manifests[:max_manifests], "manifests_truncated": manifests_truncated,
+        "provenance": LEXICAL,
+        "coverage": coverage_block(SAMPLED, RESULT_LIMIT) if manifests_truncated else complete_coverage(),
         "instructions": sorted(instructions),
     }
 
@@ -1647,7 +1687,14 @@ def outline_data(root: Path, paths: list[str], match: str | None, public: bool, 
     scoped = [path for path in list_repo_files(root) if scope_match(path, paths or ["."]) and not is_sensitive_path(path)]
     if (language and language.lower() in {"py", "python"}) or (scoped and all(path.endswith(".py") for path in scoped)):
         return python_outline(root, paths, match, public, limit)
-    return _outline_ast_grep(root, paths, match, public, language, limit) or _outline_ctags(root, paths, match, public, limit) or _outline_fallback(root, paths, match, public, limit)
+    result = (
+        _outline_ast_grep(root, paths, match, public, language, limit)
+        or _outline_ctags(root, paths, match, public, limit)
+        or _outline_fallback(root, paths, match, public, limit)
+    )
+    result["provenance"] = LEXICAL if result["engine"] == "stdlib-ast-regex-fallback" else SYNTACTIC
+    result["coverage"] = coverage_block(SAMPLED, RESULT_LIMIT) if result["truncated"] else complete_coverage()
+    return result
 
 
 def render_outline(data: dict[str, Any]) -> str:

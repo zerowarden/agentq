@@ -4,7 +4,7 @@ description: Use for repository structure, unknown symbols, literals/configurati
 license: MIT
 compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. TypeScript semantic inspection additionally requires Node.js and project TypeScript. ast-grep and Universal Ctags are optional.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   mutation: "none"
 ---
 

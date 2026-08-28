@@ -4,7 +4,7 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 license: MIT
 compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   network: "runtime-offline"
 ---
 
@@ -28,7 +28,8 @@ Use `search --format compact-json` for structured search results. Use legacy `--
 - Exclude sensitive paths and redact common secret-like values by default.
 - Keep full command output only in mode-`0600` redacted logs under the sandbox-safe runtime directory.
 - Store only allowlisted operational telemetry; query/command identity uses keyed local HMAC fingerprints, never raw queries, source text, command arguments, task names, or absolute repository paths.
-- When `AGENTQ_TELEMETRY=0`, normal commands must not read, write, or create telemetry storage or apply telemetry-backed output suppression.
+- When `AGENTQ_TELEMETRY=0`, normal commands must not read, write, or create telemetry storage; telemetry never influences query or suppression behavior.
+- Repeat suppression is controlled solely by `AGENTQ_CONTEXT_CACHE` and requires explicit session or task identity (`AGENTQ_SESSION_ID`, a host thread ID, or an active agentq task); without one, no suppression state is shared. Continuation cursors use the same session scoping.
 - Use only the bounded, hashed context cache for exact-repeat suppression; normal exploration commands must never scan telemetry history.
 - Never silently substitute lexical evidence for semantic proof.
 - Never mutate files unless a command has an explicit mutation flag.
@@ -55,6 +56,39 @@ Inspect flags with:
 ```bash
 agentq <command> --help
 ```
+
+## Evidence quality
+
+Every evidence-producing command reports `provenance` (semantic, syntactic, lexical, or heuristic) and `coverage` (`{"status": complete|sampled|partial|unknown, "reason": [...]}`). Treat sampled/partial evidence as incomplete; never claim a fact is proven when coverage is not complete.
+
+For symbol work, prefer one `inspect --intent` call over repeated exploration:
+
+- `--intent locate` — candidates only, minimal output.
+- `--intent understand` (default) — declaration, references, provider metadata.
+- `--intent edit` — adds the declaration body, related tests, owning package, and a verification scope. If the bundle has an unambiguous declaration, sufficient context, representative references, and verification scope, stop exploring and edit.
+
+If `inspect` reports candidates across languages (`kind: "ambiguous"`), narrow with `--lang typescript|python` or `--path`; no language silently wins because it was queried first. `impact` reports observations plus an explicitly uncalibrated heuristic summary — reconstruct breadth from the observations, not from a scalar.
+
+Search totals follow `--coverage fast|auto|exact`: `auto` (default) scans once and reports exact totals unless the scan cap is reached; `fast` never runs a counting pass; `exact` preserves exhaustive counting. When `count_quality` is `lower-bound`, treat totals as `>=` values instead of exact counts.
+
+Truncated results return a short continuation cursor (`continue: agentq continue q7H2a`). Run `agentq continue CURSOR` to resume the exact stored operation; cursors are scoped to the repository and session, expire after one hour, and are refused when the workspace has changed since creation.
+
+## Verification configuration
+
+`test-plan` and `verify` detect the Node, Python, Cargo, and Go ecosystems and plan one deduplicated verification ladder across every detected ecosystem. An optional `.agentq.toml` at the repository root augments provider inference:
+
+```toml
+[verify]
+providers = ["node", "python"]   # restrict planning to named providers
+commands = ["make check"]        # extra planned checks, run first
+ignore = ["generated/**"]        # exclude changed files from planning
+contract_patterns = ["api/**"]   # extra public-contract paths
+
+[ownership]
+"libs/core" = "core-pkg"         # attribute a path prefix to a package name
+```
+
+Configuration augments provider inference; detection never requires it. Unknown provider names or malformed tables are rejected with a deterministic error.
 
 ## Task boundaries
 

@@ -4,7 +4,7 @@ description: Estimate the likely blast radius before changing or renaming a shar
 license: MIT
 compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. An LSP-capable agent harness improves semantic confirmation.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   mutation: "none"
 ---
 

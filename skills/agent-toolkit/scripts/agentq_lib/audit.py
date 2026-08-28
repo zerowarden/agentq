@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import classify_path, compact_line, is_sensitive_path
+from .evidence import HEURISTIC, RESULT_LIMIT, SAMPLED, complete as complete_coverage, coverage as coverage_block
 from .gitops import _parse_diff_header_paths, diff_data, status_data
 
 RULES: list[tuple[str, str, re.Pattern[str], str]] = [
@@ -124,9 +125,12 @@ def audit_data(
     severity_order = {"high": 0, "medium": 1, "low": 2}
     findings.sort(key=lambda item: (severity_order[item["severity"]], item.get("path") or "", item.get("line") or 0, item["rule"]))
     counts = Counter(f["severity"] for f in findings)
+    truncated = len(findings) >= max_findings
     return {
         "repo_root": str(root), "scope": diff["scope"], "patch": {"files": diff["total_files"], "added": diff["total_added"], "deleted": diff["total_deleted"]},
-        "counts": dict(counts), "findings": findings, "truncated": len(findings) >= max_findings,
+        "counts": dict(counts), "findings": findings, "truncated": truncated,
+        "provenance": HEURISTIC,
+        "coverage": coverage_block(SAMPLED, RESULT_LIMIT) if truncated else complete_coverage(),
         "note": "Heuristic patch audit only; not a semantic, security, authorization, or concurrency proof.",
     }
 

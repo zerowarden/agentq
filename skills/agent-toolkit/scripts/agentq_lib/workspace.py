@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from .common import AgentQError, list_repo_files, relpath, run_cmd
+from .common import AgentQError, list_repo_files, run_cmd
 
 DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
@@ -143,7 +143,7 @@ def _brace_expand(pattern: str) -> list[str]:
     return out
 
 
-def _matches_pattern(path: str, pattern: str) -> bool:
+def matches_pattern(path: str, pattern: str) -> bool:
     path = path.strip("/") or "."
     pattern = pattern.strip().strip("/") or "."
     if pattern == ".":
@@ -166,8 +166,8 @@ def _allowed_by_patterns(path: str, patterns: list[str]) -> bool:
         value = original[1:] if negative else original
         for expanded in _brace_expand(value):
             (negatives if negative else positives).append(expanded)
-    included = any(_matches_pattern(path, pattern) for pattern in positives) if positives else True
-    excluded = any(_matches_pattern(path, pattern) for pattern in negatives)
+    included = any(matches_pattern(path, pattern) for pattern in positives) if positives else True
+    excluded = any(matches_pattern(path, pattern) for pattern in negatives)
     return included and not excluded
 
 

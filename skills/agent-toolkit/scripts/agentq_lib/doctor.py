@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import VERSION, find_executable, tool_version
-from .telemetry import archive_file, hot_file, telemetry_enabled
+from .runtime import telemetry_enabled
 
 TOOLS = [
     ("git", True, "version control and diff source"),
@@ -62,6 +62,8 @@ def _skill_installation_state() -> dict[str, Any]:
 
 
 def doctor_data(root: Path) -> dict[str, Any]:
+    from .telemetry import archive_file, hot_file
+
     items = []
     missing_required = []
     for name, required, purpose in TOOLS:

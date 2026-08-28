@@ -14,7 +14,16 @@ from .common import (
     AgentQError, classify_path, compact_line, find_executable, is_sensitive_path,
     redact_text, relpath, run_cmd,
 )
+from .evidence import (
+    LEXICAL, RESULT_LIMIT, SAMPLED,
+    complete as complete_coverage, coverage as coverage_block, merge_coverage,
+)
+from .paths import resolve_repo_path
 from .context_cache import diff_cache_key, diff_repeat_advice, remember_diff
+
+
+def _truncated_coverage(*truncated: bool) -> dict[str, Any]:
+    return coverage_block(SAMPLED, RESULT_LIMIT) if any(truncated) else complete_coverage()
 
 
 _DIFF_PREFIX_ARGS = ["--src-prefix=a/", "--dst-prefix=b/"]
@@ -125,6 +134,8 @@ def status_data(root: Path, limit: int = 80) -> dict[str, Any]:
         "upstream": branch.get("branch.upstream"), "ahead": ahead, "behind": behind,
         "counts": dict(counts), "total": len(files), "shown": len(shown),
         "truncated": len(files) > len(shown), "files": shown,
+        "provenance": LEXICAL,
+        "coverage": _truncated_coverage(len(files) > len(shown)),
     }
 
 
@@ -459,6 +470,7 @@ def diff_data(
         "total_files": len(files), "total_added": total_added, "total_deleted": total_deleted,
         "files": files[:max_files], "files_truncated": len(files) > max_files,
         "diff_check_ok": check.returncode == 0, "diff_check": [compact_line(x, 300) for x in check.stdout.splitlines()[:30]],
+        "provenance": LEXICAL, "coverage": _truncated_coverage(len(files) > max_files),
     }
     cache_key = diff_cache_key(data, {
         "budget": budget,
@@ -488,6 +500,10 @@ def diff_data(
         data.update({"hunks": index, "hunk_stats": hunk_stats, "hunks_truncated": truncated})
     remember_diff(root, cache_key)
     data["repeat"] = repeat
+    data["coverage"] = merge_coverage(
+        data.get("coverage"),
+        _truncated_coverage(bool(data.get("patch_truncated")), bool(data.get("hunks_truncated"))),
+    )
     return data
 
 
@@ -573,7 +589,7 @@ def history_data(root: Path, limit: int = 20, paths: list[str] | None = None) ->
         parts = line.split("\t", 3)
         if len(parts) == 4:
             commits.append({"commit": parts[0], "date": parts[1], "author": parts[2], "subject": compact_line(parts[3], 220)})
-    return {"repo_root": str(root), "commits": commits, "shown": len(commits)}
+    return {"repo_root": str(root), "commits": commits, "shown": len(commits), "provenance": LEXICAL, "coverage": complete_coverage()}
 
 
 def render_history(data: dict[str, Any]) -> str:
@@ -586,8 +602,9 @@ def structural_diff_data(root: Path, path: str, context: int = 3, max_lines: int
     exe = find_executable("difft")
     if not exe:
         raise AgentQError("difftastic (difft) is not installed")
-    rel = Path(path).as_posix()
-    current = root / rel
+    repo_path = resolve_repo_path(root, path, must_exist=True)
+    rel = repo_path.relative
+    current = repo_path.absolute
     if not current.exists():
         raise AgentQError(f"file not found: {rel}")
     old = _git(root, ["show", f"HEAD:{rel}"], check=False)
@@ -601,7 +618,12 @@ def structural_diff_data(root: Path, path: str, context: int = 3, max_lines: int
     finally:
         old_path.unlink(missing_ok=True)
     lines = [compact_line(x, 320) for x in result.stdout.splitlines()]
-    return {"engine": "difftastic", "path": rel, "shown": min(len(lines), max_lines), "truncated": len(lines) > max_lines, "lines": lines[:max_lines]}
+    return {
+        "engine": "difftastic", "path": rel,
+        "shown": min(len(lines), max_lines), "truncated": len(lines) > max_lines,
+        "lines": lines[:max_lines], "provenance": LEXICAL,
+        "coverage": _truncated_coverage(len(lines) > max_lines),
+    }
 
 
 def render_structural(data: dict[str, Any]) -> str:

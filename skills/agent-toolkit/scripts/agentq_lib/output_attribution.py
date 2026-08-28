@@ -30,7 +30,7 @@ _ADVICE_PREFIXES = (
 _SAFE_VIEWS = {
     "default", "directory", "file", "hunks", "lexical", "matches", "patch",
     "python", "repeat-suppressed", "semantic", "snippets", "source-windows",
-    "summary", "windowed",
+    "summary", "windowed", "ambiguous", "edit",
 }
 
 

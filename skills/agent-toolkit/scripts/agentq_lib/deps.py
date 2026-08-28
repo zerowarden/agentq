@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, compact_line, find_executable, run_cmd
+from .evidence import (
+    RESULT_LIMIT, SAMPLED, SYNTACTIC, complete as complete_coverage, coverage as coverage_block,
+)
 from .workspace import discover_workspace
 
 DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
@@ -186,9 +189,18 @@ def dependencies_data(root: Path, *, target: str | None = None, depth: int = 2, 
             })
         data["target"] = target
         data["matches"] = targets
+        data["coverage"] = (
+            coverage_block(SAMPLED, RESULT_LIMIT)
+            if any(item["dependencies_truncated"] or item["dependents_truncated"] for item in targets)
+            else complete_coverage()
+        )
     else:
         data["packages"] = nodes[:limit]
         data["packages_truncated"] = len(nodes) > limit
+        data["coverage"] = (
+            coverage_block(SAMPLED, RESULT_LIMIT) if data["packages_truncated"] else complete_coverage()
+        )
+    data["provenance"] = SYNTACTIC
     return data
 
 

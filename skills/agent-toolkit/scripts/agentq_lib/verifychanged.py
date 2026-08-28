@@ -4,6 +4,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .evidence import (
+    HEURISTIC, STEP_LIMIT, SAMPLED, complete as complete_coverage, coverage as coverage_block,
+)
 from .runops import run_compact
 from .testplan import test_plan_data
 
@@ -31,6 +34,7 @@ def _compact_result(step: dict[str, Any], result: dict[str, Any], index: int) ->
         "diagnostics_truncated": result["diagnostics_truncated"],
         "tail": result["tail"][-12:] if result["exit_code"] != 0 else [],
         "log": result["log"],
+        "log_retention": result["log_retention"],
     }
 
 
@@ -83,6 +87,8 @@ def verify_changed_data(
         "selected_steps": len(selected),
         "steps_limited": steps_limited,
         "notes": list(plan.get("notes", [])),
+        "provenance": HEURISTIC,
+        "coverage": coverage_block(SAMPLED, STEP_LIMIT) if steps_limited else complete_coverage(),
     }
 
     if not plan.get("changed_files"):
@@ -147,7 +153,7 @@ def verify_changed_data(
             label=_safe_label(step["kind"], step["package"]),
             max_diagnostics=max_diagnostics,
             tail_lines=20,
-            offline=offline,
+            profile="offline" if offline else "compact",
         )
         compact = _compact_result(step, result, index)
         results.append(compact)

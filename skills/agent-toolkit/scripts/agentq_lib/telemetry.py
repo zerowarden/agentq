@@ -22,8 +22,11 @@ from typing import Any, Iterable
 
 from .common import AgentQError, bound_output, human_bytes
 from .context_cache import context_cache_enabled, diff_payload, read_ranges
+from .evidence import status_of as coverage_status
 from .output_attribution import OUTPUT_ATTRIBUTION_KEYS, attribution_total, empty_attribution
-from .runtime import env_enabled, repo_id, secure_dir, stable_id, telemetry_hot_dir, thread_id
+from .runtime import (
+    env_enabled, repo_id, secure_dir, stable_id, telemetry_enabled, telemetry_hot_dir, thread_id,
+)
 from .tasking import current_task_id, current_task_state
 
 try:
@@ -54,9 +57,6 @@ EXPANSION_OPTIONS = {
     "--per-file": "samples_per_file",
     "--samples-per-file": "samples_per_file",
 }
-
-def telemetry_enabled() -> bool:
-    return env_enabled("AGENTQ_TELEMETRY")
 
 
 def hot_dir() -> Path:
@@ -720,8 +720,11 @@ def event_metrics(root: Path, command: str, data: dict[str, Any] | None) -> dict
             metrics["query_shape"] = _query_shape(query)
             metrics["query_fingerprint"] = _fingerprint(query)
         for source, target in (("coverage", "search_coverage"), ("query_intent", "query_intent"), ("view", "search_view")):
-            if isinstance(data.get(source), str):
-                metrics[target] = data[source]
+            value = data.get(source)
+            if isinstance(value, str):
+                metrics[target] = value
+            elif source == "coverage" and value is not None:
+                metrics[target] = coverage_status(value)
         if bool(data.get("semantic_candidate")):
             metrics["semantic_candidate"] = True
         candidates = data.get("symbol_candidates")

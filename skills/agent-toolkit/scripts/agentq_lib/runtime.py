@@ -35,6 +35,19 @@ def thread_id() -> str | None:
     return stable_id(raw) if raw else None
 
 
+def session_id() -> str | None:
+    """Host session identity for repeat suppression, hashed before storage.
+
+    Precedence: explicit AGENTQ_SESSION_ID, then a recognized host thread ID.
+    """
+    raw = os.environ.get("AGENTQ_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+    return stable_id(raw) if raw else None
+
+
+def telemetry_enabled() -> bool:
+    return env_enabled("AGENTQ_TELEMETRY")
+
+
 def default_runtime_root() -> Path:
     uid = os.getuid() if hasattr(os, "getuid") else "user"
     return Path(tempfile.gettempdir()) / f"agentq-{uid}"

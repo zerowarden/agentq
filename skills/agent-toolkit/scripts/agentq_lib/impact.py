@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .common import classify_path, compact_line, list_repo_files, relpath, run_cmd
+from .common import relpath
+from .evidence import (
+    HEURISTIC, SAMPLED, SCAN_CAP,
+    complete as complete_coverage, coverage as coverage_block,
+)
+from .paths import resolve_repo_path
 from .search import files_data, search_data
 
 SHARED_RISK_RE = re.compile(r"(^|/)(shared|common|foundation|platform|core|public|api|contracts?|types?|config|schema|migrations?|packages?)(/|$)", re.I)
@@ -25,13 +29,12 @@ def _variants(target: str) -> list[str]:
     return ordered
 
 
-def _nearest_manifest(root: Path, target: Path) -> dict[str, Any] | None:
+def nearest_manifest(root: Path, target: Path) -> dict[str, Any] | None:
+    """Walk up from target to the repository root looking for a package manifest."""
     current = target if target.is_dir() else target.parent
-    for directory in [current, *current.parents]:
-        if directory == root.parent:
-            break
+    while True:
         for name, kind in (("package.json", "npm"), ("Cargo.toml", "cargo"), ("pyproject.toml", "python")):
-            path = directory / name
+            path = current / name
             if path.exists():
                 item: dict[str, Any] = {"path": relpath(root, path), "kind": kind}
                 if name == "package.json":
@@ -42,19 +45,21 @@ def _nearest_manifest(root: Path, target: Path) -> dict[str, Any] | None:
                     except Exception:
                         pass
                 return item
-        if directory == root:
+        if current == root:
             break
+        current = current.parent
     return None
 
 
 def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) -> dict[str, Any]:
-    target_path = root / target
+    target_repo = resolve_repo_path(root, target)
+    target_path = target_repo.absolute
     exists = target_path.exists()
     variants = _variants(target)
     primary = Path(target).stem or Path(target).name if exists else target
     refs = search_data(root, primary, scopes, mode="fixed", word=not exists, limit=limit, per_file=10)
     file_hits = files_data(root, Path(target).stem if exists else target, scopes, limit=40, include_sensitive=False)
-    import_hits = []
+    import_hits: list[dict[str, Any]] = []
     import_pattern = rf"(?:import|export|from|require|use|mod).*{re.escape(Path(target).stem if exists else target)}"
     try:
         imports = search_data(root, import_pattern, scopes, mode="regex", limit=50, per_file=5)
@@ -65,32 +70,53 @@ def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) ->
     docs_config = [h for h in refs["hits"] if h["role"] in {"docs", "config"}]
     source_refs = [h for h in refs["hits"] if h["role"] == "source"]
     all_ref_files = refs.get("match_file_summary") or []
-    package = _nearest_manifest(root, target_path if exists else root)
+    package = nearest_manifest(root, target_path if exists else root)
     unique_source_files = {str(h["path"]) for h in all_ref_files if h.get("role") == "source"}
     unique_import_files = {str(h["path"]) for h in (imports.get("match_file_summary") if 'imports' in locals() else []) or []}
+    scan_capped = not refs.get("scan_complete", True)
+    shared_surface = bool(SHARED_RISK_RE.search(target.replace("\\", "/")) or PUBLIC_NAME_RE.search(target.replace("\\", "/")))
 
+    observations = {
+        "public_shared_surface": shared_surface,
+        "lexical_source_fanout": len(unique_source_files),
+        "import_pattern_fanout": len(unique_import_files),
+        "direct_test_references": len(tests),
+        "config_schema_references": len(docs_config),
+        "owning_package": (package.get("name") or package.get("path")) if package else None,
+        "scan_reached_cap": scan_capped,
+    }
+
+    # Manually weighted rules, not an empirically calibrated risk model.
+    # The score stays internal; output reports observations and rules only.
     score = 0
-    reasons: list[str] = []
+    rules: list[str] = []
     if len(unique_source_files) >= 20:
-        score += 4; reasons.append("referenced by at least 20 source files")
+        score += 4
+        rules.append("referenced by at least 20 source files")
     elif len(unique_source_files) >= 6:
-        score += 2; reasons.append("referenced by multiple source files")
+        score += 2
+        rules.append("referenced by multiple source files")
     elif unique_source_files:
         score += 1
     if len(unique_import_files) >= 10:
-        score += 3; reasons.append("high import/export fan-out")
+        score += 3
+        rules.append("high import/export fan-out")
     elif unique_import_files:
         score += 1
-    target_norm = target.replace("\\", "/")
-    if SHARED_RISK_RE.search(target_norm) or PUBLIC_NAME_RE.search(target_norm):
-        score += 3; reasons.append("target appears to be shared/public/config/schema surface")
+    if shared_surface:
+        score += 3
+        rules.append("target appears to be shared/public/config/schema surface")
     if docs_config:
-        score += 1; reasons.append("document/config references exist")
+        score += 1
+        rules.append("document/config references exist")
     if not tests and (source_refs or import_hits):
-        score += 1; reasons.append("no direct lexical test reference found")
-    if not refs.get("scan_complete", True):
-        score += 2; reasons.append("reference discovery reached scan safety cap")
+        score += 1
+        rules.append("no direct lexical test reference found")
+    if scan_capped:
+        score += 2
+        rules.append("reference discovery reached scan safety cap")
     level = "high" if score >= 6 else "medium" if score >= 3 else "low"
+
     validation = []
     if tests:
         validation.append("run directly referenced tests")
@@ -100,31 +126,36 @@ def impact_data(root: Path, target: str, scopes: list[str], limit: int = 120) ->
         validation.append("review docs/config/schema references")
     if level == "high":
         validation.append("run broader dependent-package or workspace verification")
+
     return {
         "repo_root": str(root), "target": target, "target_exists": exists, "variants": variants,
-        "blast_radius": level, "score": score, "reasons": reasons,
-        "package": package, "source_reference_files": len(unique_source_files),
-        "import_reference_files": len(unique_import_files), "tests": tests[:25],
+        "observations": observations,
+        "heuristic_summary": {"level": level, "calibrated": False, "rules": rules},
+        "package": package, "tests": tests[:25],
         "docs_config": docs_config[:25], "top_references": refs["hits"][:50],
-        "filename_candidates": file_hits["files"][:20], "truncated": not refs.get("scan_complete", True),
+        "filename_candidates": file_hits["files"][:20], "truncated": scan_capped,
         "validation": validation,
-        "evidence_quality": "exact lexical matching-file counts plus bounded previews; use semantic overview for TypeScript/JavaScript symbol confirmation",
+        "provenance": HEURISTIC,
+        "coverage": coverage_block(SAMPLED, SCAN_CAP) if scan_capped else complete_coverage(),
     }
 
 
 def render_impact(data: dict[str, Any]) -> str:
+    o = data["observations"]
+    summary = data["heuristic_summary"]
     lines = [
-        f"blast radius: {data['blast_radius'].upper()} (score {data['score']})",
-        f"target: {data['target']}",
-        f"evidence: {data['evidence_quality']}",
-        f"source reference files: {data['source_reference_files']}; import-pattern files: {data['import_reference_files']}",
+        f"target: {data['target']}" + ("" if data["target_exists"] else " (name only; no such path)"),
+        f"public/shared surface: {'yes' if o['public_shared_surface'] else 'no'}",
+        f"lexical source fanout: {o['lexical_source_fanout']} files",
+        f"import-pattern fanout: {o['import_pattern_fanout']} files (lexical pattern evidence, not semantic imports)",
+        f"direct test references: {o['direct_test_references']}",
+        f"config/schema references: {o['config_schema_references']}",
+        f"owning package: {o['owning_package'] or 'unknown'}",
+        f"scan: {'capped; treat counts as lower bounds' if o['scan_reached_cap'] else 'complete within scope'}",
+        f"evidence: {data['provenance']} · coverage {data['coverage']['status']}",
+        f"\nheuristic summary: {summary['level'].upper()} — uncalibrated rule-based estimate, not a statistical measure",
     ]
-    if data.get("package"):
-        p = data["package"]
-        lines.append(f"owning manifest: {p['path']} [{p['kind']}{'; ' + p.get('name') if p.get('name') else ''}]")
-    if data["reasons"]:
-        lines.append("\nreasons:")
-        lines.extend(f"  - {r}" for r in data["reasons"])
+    lines.extend(f"  - {rule}" for rule in summary["rules"])
     if data["top_references"]:
         lines.append("\ntop references:")
         for h in data["top_references"][:25]:
@@ -140,6 +171,4 @@ def render_impact(data: dict[str, Any]) -> str:
     if data["validation"]:
         lines.append("\nvalidation scope:")
         lines.extend(f"  - {x}" for x in data["validation"])
-    if data["truncated"]:
-        lines.append("\nReference cap reached: treat the blast radius as a lower bound and narrow by package for a second pass.")
     return "\n".join(lines)

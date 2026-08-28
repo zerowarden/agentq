@@ -2,74 +2,58 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import stat
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .common import AgentQError, run_cmd
-from .runtime import context_cache_dir, env_enabled, repo_id, secure_dir, stable_id, thread_id
+from .runtime import env_enabled, repo_id, session_id, stable_id
+from .state import (
+    context_hits,
+    context_payloads,
+    load_continuation as _load_continuation_state,
+    remember_context,
+    store_continuation as _store_continuation_state,
+)
 from .tasking import current_task_id
 from .workspace import changed_files
 
-_CACHE_SCHEMA = 1
-_CACHE_LIMIT = 128
-_CACHE_TTL_SECONDS = 6 * 60 * 60
-
 
 def context_cache_enabled() -> bool:
-    return env_enabled("AGENTQ_TELEMETRY") and env_enabled("AGENTQ_CONTEXT_CACHE")
+    """Repeat suppression is governed only by AGENTQ_CONTEXT_CACHE.
+
+    Telemetry must never control query semantics; it may only observe them.
+    """
+    return env_enabled("AGENTQ_CONTEXT_CACHE")
 
 
-def _cache_path(root: Path) -> Path:
-    return context_cache_dir() / f"{repo_id(root)}.json"
+def _context(root: Path) -> tuple[str, str] | None:
+    """Resolve the repeat-suppression identity, or None when there is none.
 
-
-def _context(root: Path) -> tuple[str, str]:
+    Precedence: active agentq task, then explicit/host session identity.
+    Without an identity there is no safe context to suppress repeats in, so
+    suppression stays disabled rather than falling back to a repository-global
+    pseudo-session.
+    """
     task = current_task_id(root)
     if task:
         return f"task:{task}", "task"
-    thread = thread_id()
-    if thread:
-        return f"thread:{thread}", "thread"
-    return "recent-session", "recent-session"
+    session = session_id()
+    if session:
+        return f"session:{session}", "session"
+    return None
 
 
-def _load(root: Path, now: float) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(_cache_path(root).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict) or payload.get("schema") != _CACHE_SCHEMA:
-        return []
-    entries = payload.get("entries")
-    if not isinstance(entries, list):
-        return []
-    cutoff = now - _CACHE_TTL_SECONDS
-    return [
-        item for item in entries
-        if isinstance(item, dict)
-        and isinstance(item.get("key"), str)
-        and isinstance(item.get("time"), (int, float))
-        and float(item["time"]) >= cutoff
-    ][-_CACHE_LIMIT:]
+def suppression_active(root: Path) -> bool:
+    """True only when repeat suppression can actually apply for this invocation."""
+    return _identity(root) is not None
 
 
-def _write(root: Path, entries: list[dict[str, Any]]) -> None:
-    path = secure_dir(context_cache_dir()) / f"{repo_id(root)}.json"
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    payload = json.dumps(
-        {"schema": _CACHE_SCHEMA, "entries": entries[-_CACHE_LIMIT:]},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    try:
-        os.write(fd, (payload + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    temporary.replace(path)
+def _identity(root: Path) -> tuple[str, str] | None:
+    if not context_cache_enabled():
+        return None
+    return _context(root)
 
 
 def _digest(value: Any) -> str:
@@ -78,37 +62,24 @@ def _digest(value: Any) -> str:
 
 
 def _lookup(root: Path, command: str, keys: list[str]) -> tuple[set[str], str]:
-    if not context_cache_enabled() or not keys:
+    identity = _identity(root)
+    if identity is None or not keys:
         return set(), "disabled"
-    now = time.time()
-    context, scope = _context(root)
-    wanted = set(keys)
-    hits = {
-        str(item["key"]) for item in _load(root, now)
-        if item.get("context") == context and item.get("command") == command and item.get("key") in wanted
-    }
+    context, scope = identity
+    hits = context_hits(repo_id(root), context, command, keys, now=time.time())
     return hits, scope
 
 
 def _remember(root: Path, command: str, keys: list[str]) -> None:
-    if not context_cache_enabled() or not keys:
+    identity = _identity(root)
+    if identity is None or not keys:
         return
-    now = time.time()
-    context, _ = _context(root)
-    key_set = set(keys)
-    entries = [
-        item for item in _load(root, now)
-        if not (
-            item.get("context") == context
-            and item.get("command") == command
-            and item.get("key") in key_set
-        )
-    ]
-    entries.extend({"context": context, "command": command, "key": key, "time": now} for key in keys)
-    try:
-        _write(root, entries)
-    except OSError:
-        pass
+    context, _ = identity
+    remember_context(
+        repo_id(root), context, command,
+        [{"evidence_key": key} for key in keys],
+        now=time.time(),
+    )
 
 
 def _read_path_id(root: Path, path_text: str) -> str:
@@ -190,6 +161,21 @@ def _read_options_key(data: dict[str, Any]) -> str:
     return _digest({"max_chars": data.get("max_chars")})
 
 
+def _prior_ranges(payloads: list[dict[str, Any]], options_key: str) -> dict[tuple[str, str], list[tuple[int, int]]]:
+    prior: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for payload in payloads:
+        if payload.get("options") != options_key:
+            continue
+        range_value = payload.get("range") if isinstance(payload.get("range"), dict) else {}
+        file_id, version, start, end = (
+            range_value.get("file"), range_value.get("version"),
+            range_value.get("start"), range_value.get("end"),
+        )
+        if isinstance(file_id, str) and isinstance(version, str) and isinstance(start, int) and isinstance(end, int):
+            prior.setdefault((file_id, version), []).append((start, end))
+    return prior
+
+
 def read_repeat_advice(
     root: Path,
     data: dict[str, Any],
@@ -197,20 +183,15 @@ def read_repeat_advice(
     command: str = "read",
 ) -> dict[str, Any] | None:
     ranges = read_ranges(root, data)
-    if not context_cache_enabled() or not ranges:
+    identity = _identity(root)
+    if identity is None or not ranges:
         return None
-    now = time.time()
-    context, scope = _context(root)
+    context, scope = identity
     options_key = _read_options_key(data)
-    entries = _load(root, now)
-    prior: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    for entry in entries:
-        value = entry.get("range") if isinstance(entry.get("range"), dict) else {}
-        if entry.get("context") != context or entry.get("command") != command or entry.get("options") != options_key:
-            continue
-        file_id, version, start, end = value.get("file"), value.get("version"), value.get("start"), value.get("end")
-        if isinstance(file_id, str) and isinstance(version, str) and isinstance(start, int) and isinstance(end, int):
-            prior.setdefault((file_id, version), []).append((start, end))
+    prior = _prior_ranges(
+        context_payloads(repo_id(root), context, command, now=time.time()),
+        options_key,
+    )
 
     overlap_lines = 0
     overlapping_indices: list[int] = []
@@ -244,24 +225,25 @@ def read_repeat_advice(
 
 def remember_read(root: Path, data: dict[str, Any], *, command: str = "read") -> None:
     ranges = read_ranges(root, data)
-    if not context_cache_enabled() or not ranges:
+    identity = _identity(root)
+    if identity is None or not ranges:
         return
-    now = time.time()
-    context, _ = _context(root)
+    context, _ = identity
     options_key = _read_options_key(data)
-    entries = _load(root, now)
-    entries.extend({
-        "context": context,
-        "command": command,
-        "key": _digest({"options": options_key, "range": {key: value for key, value in item.items() if key != "item_index"}}),
-        "options": options_key,
-        "range": {key: value for key, value in item.items() if key not in {"item_index", "lines"}},
-        "time": now,
-    } for item in ranges)
-    try:
-        _write(root, entries)
-    except OSError:
-        pass
+    remember_context(
+        repo_id(root), context, command,
+        [
+            {
+                "evidence_key": _digest({"options": options_key, "range": {key: value for key, value in item.items() if key != "item_index"}}),
+                "payload": {
+                    "options": options_key,
+                    "range": {key: value for key, value in item.items() if key not in {"item_index", "lines"}},
+                },
+            }
+            for item in ranges
+        ],
+        now=time.time(),
+    )
 
 
 def diff_payload(data: dict[str, Any]) -> str:
@@ -285,7 +267,13 @@ def remember_diff(root: Path, key: str) -> None:
     _remember(root, "git-diff", [key])
 
 
+_workspace_memo: dict[str, str] = {}
+
+
 def workspace_identity(root: Path) -> str:
+    cached = _workspace_memo.get(str(root))
+    if cached is not None:
+        return cached
     head = run_cmd(["git", "rev-parse", "HEAD"], cwd=root, timeout=10)
     files: list[tuple[str, int | None, int | None]] = []
     try:
@@ -298,7 +286,9 @@ def workspace_identity(root: Path) -> str:
             files.append((relative, metadata.st_size, metadata.st_mtime_ns))
         except OSError:
             files.append((relative, None, None))
-    return _digest({"head": head.stdout.strip() if head.returncode == 0 else None, "files": files})
+    identity = _digest({"head": head.stdout.strip() if head.returncode == 0 else None, "files": files})
+    _workspace_memo[str(root)] = identity
+    return identity
 
 
 def operation_cache_key(root: Path, command: str, options: dict[str, Any]) -> str:
@@ -312,3 +302,47 @@ def operation_repeat_advice(root: Path, command: str, key: str) -> dict[str, Any
 
 def remember_operation(root: Path, command: str, key: str) -> None:
     _remember(root, command, [key])
+
+
+def _continuation_context_id(root: Path) -> str:
+    identity = _context(root)
+    return identity[0] if identity else ""
+
+
+def remember_continuation(root: Path, command: str) -> dict[str, Any] | None:
+    """Store a reproducible continuation command under the current session scope.
+
+    Returns {"cursor", "expires_at"} (ISO 8601 UTC expiry), or None when the
+    local state store is unavailable; callers then keep the full command.
+    """
+    stored = _store_continuation_state(
+        repo_id(root),
+        _continuation_context_id(root),
+        command,
+        workspace=workspace_identity(root),
+        now=time.time(),
+    )
+    if stored is None:
+        return None
+    return {
+        "cursor": stored["cursor"],
+        "expires_at": datetime.fromtimestamp(stored["expires_at"], tz=timezone.utc).isoformat(),
+    }
+
+
+def continuation_record(root: Path, cursor: str) -> dict[str, Any] | None:
+    """Load a continuation cursor scoped to this repository and session.
+
+    Raises AgentQError when the workspace changed since the cursor was created;
+    the recorded result can no longer be resumed reliably.
+    """
+    record = _load_continuation_state(
+        repo_id(root), _continuation_context_id(root), cursor, now=time.time(),
+    )
+    if record is None:
+        return None
+    if record["workspace"] and record["workspace"] != workspace_identity(root):
+        raise AgentQError(
+            "workspace changed since this continuation was created; rerun the original command"
+        )
+    return record

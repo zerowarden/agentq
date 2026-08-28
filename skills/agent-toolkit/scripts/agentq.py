@@ -6,65 +6,13 @@ import difflib
 import inspect
 import json
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from agentq_lib.audit import audit_data, render_audit
-from agentq_lib.benchmark import benchmark_data, render_benchmark
-from agentq_lib.budgeting import RenderedText, project_json
-from agentq_lib.codemod import apply_data, render_apply, render_scan, scan_data
-from agentq_lib.common import AgentQError, VERSION, bound_output, compact_line, ensure_within, relpath, repo_root
-from agentq_lib.context_cache import operation_cache_key, operation_repeat_advice, remember_operation
-from agentq_lib.doctor import doctor_data, render_doctor
-from agentq_lib.deps import dependencies_data, render_dependencies
-from agentq_lib.gitops import (
-    diff_data,
-    history_data,
-    render_diff,
-    render_history,
-    render_status,
-    render_structural,
-    status_data,
-    structural_diff_data,
-)
-from agentq_lib.impact import impact_data, render_impact
-from agentq_lib.inspectops import inspect_data, render_inspect
-from agentq_lib.output_attribution import attribute_output, output_view
-from agentq_lib.runops import render_run, run_compact
-from agentq_lib.search import (
-    files_data,
-    outline_data,
-    read_data,
-    render_files,
-    render_outline,
-    render_read,
-    render_repo_map,
-    render_search,
-    repo_map_data,
-    search_data,
-)
-from agentq_lib.tasking import current_task_state, render_task, task_changes, task_data
-from agentq_lib.telemetry import (
-    archive_hot_events,
-    install_persistence,
-    print_stats,
-    record_event,
-    remove_persistence,
-    render_archive,
-    render_persistence,
-    render_reset,
-    render_stats,
-    render_storage,
-    reset_telemetry,
-    stats_data,
-    storage_data,
-    watch_stats,
-)
-from agentq_lib.testplan import render_test_plan, test_plan_data
-from agentq_lib.tsnav import render_ts_nav, ts_nav_data
-from agentq_lib.verifychanged import render_verify_changed, verify_changed_data
+from agentq_lib.common import AgentQError, VERSION, bound_output, compact_line, repo_root
 
 Formatter = Callable[..., str]
 
@@ -186,6 +134,9 @@ def expansion_controls(args: argparse.Namespace) -> dict[str, int]:
 
 
 def emit(args: argparse.Namespace, data: dict[str, Any], formatter: Formatter) -> None:
+    from agentq_lib.budgeting import RenderedText, project_json
+    from agentq_lib.output_attribution import attribute_output, output_view
+
     internal = data.pop("_agentq_internal", {}) if isinstance(data.get("_agentq_internal"), dict) else {}
     telemetry_data = internal.get("telemetry_data") if isinstance(internal.get("telemetry_data"), dict) else data
     if args.format in {"json", "compact-json"}:
@@ -235,6 +186,37 @@ def render_context_repeat(data: dict[str, Any]) -> str:
     )
 
 
+def _attach_continuation_cursors(root: Path, data: dict[str, Any]) -> None:
+    """Replace verbose continuation commands with short local cursor tokens.
+
+    `agentq continue CURSOR` replays the stored command after session and
+    workspace validation, so reproducibility survives without spending render
+    budget on verbose command text. The walk is bounded at two levels, which
+    covers every continuation block: top level, evidence wrappers (source),
+    and provider results (semantic, python, edit bundles).
+    """
+    from agentq_lib.context_cache import remember_continuation
+
+    scopes = [data]
+    for value in data.values():
+        if isinstance(value, dict):
+            scopes.append(value)
+            for inner in value.values():
+                if isinstance(inner, dict):
+                    scopes.append(inner)
+    for scope in scopes:
+        for key in ("continuation", "budget_continuation"):
+            block = scope.get(key)
+            if not (isinstance(block, dict) and isinstance(block.get("command"), str)):
+                continue
+            stored = remember_continuation(root, str(block["command"]))
+            if not stored:
+                continue
+            block["command"] = f"agentq continue {stored['cursor']}"
+            block["cursor"] = stored["cursor"]
+            block["expires_at"] = stored["expires_at"]
+
+
 def emit_cached(
     args: argparse.Namespace,
     root: Path,
@@ -243,17 +225,25 @@ def emit_cached(
     producer: Callable[[], dict[str, Any]],
     formatter: Formatter,
 ) -> None:
-    key = operation_cache_key(root, command, {**options, "budget": args.budget, "format": args.format})
-    advice = operation_repeat_advice(root, command, key)
-    if advice and not args.repeat:
-        emit(args, {
-            "command": command,
-            "repeat_suppressed": True,
-            "repeat_scope": advice["scope"],
-        }, render_context_repeat)
-        return
+    from agentq_lib.context_cache import operation_cache_key, operation_repeat_advice, remember_operation, suppression_active
+
+    # Workspace identity runs Git and stats the worktree; skip it entirely when
+    # repeat suppression cannot apply (feature disabled or no session identity).
+    key: str | None = None
+    if suppression_active(root):
+        key = operation_cache_key(root, command, {**options, "budget": args.budget, "format": args.format})
+        advice = operation_repeat_advice(root, command, key)
+        if advice and not args.repeat:
+            emit(args, {
+                "command": command,
+                "repeat_suppressed": True,
+                "repeat_scope": advice["scope"],
+            }, render_context_repeat)
+            return
     data = producer()
-    remember_operation(root, command, key)
+    if key is not None:
+        remember_operation(root, command, key)
+    _attach_continuation_cursors(root, data)
     emit(args, data, formatter)
 
 
@@ -330,6 +320,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-file", "--samples-per-file", dest="per_file", type=positive_int, default=8)
     p.add_argument("--max-files", type=positive_int, default=40)
     p.add_argument("--view", choices=("auto", "summary", "snippets", "matches"), default="auto")
+    p.add_argument(
+        "--coverage", dest="coverage_policy", choices=("fast", "auto", "exact"), default="auto",
+        help=(
+            "fast: single collection pass, lower-bound totals when the scan cap is reached; "
+            "auto: single pass, exact totals unless the cap is reached (default); "
+            "exact: additional counting pass for exact totals"
+        ),
+    )
     p.add_argument("--scan-cap", type=positive_int, default=5000, help=argparse.SUPPRESS)
     p.add_argument("--context", type=nonnegative_int, default=0)
     p.add_argument("--max-chars", type=positive_int, default=240)
@@ -414,16 +412,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lang")
     p.add_argument("--samples", type=positive_int, default=12)
     p.add_argument("--max-files", type=positive_int, default=100)
+    p.add_argument("--plan-out", help="write an immutable codemod plan (JSON) for later reviewed application")
 
     p = sub.add_parser("codemod-apply", help="guarded codemod; dry-run unless --apply is explicit")
     add_common(p); add_scope(p)
-    p.add_argument("pattern")
-    p.add_argument("rewrite")
+    p.add_argument("pattern", nargs="?", help="codemod pattern (omit when using --plan)")
+    p.add_argument("rewrite", nargs="?", help="codemod replacement (omit when using --plan)")
     p.add_argument("--mode", choices=("fixed", "regex", "ast"), default="fixed")
     p.add_argument("--lang")
     p.add_argument("--expect-count", type=nonnegative_int)
     p.add_argument("--max-files", type=positive_int, default=100)
+    p.add_argument("--plan", help="apply a previously written codemod plan (JSON) instead of PATTERN/REWRITE")
     p.add_argument("--apply", action="store_true")
+
+    p = sub.add_parser(
+        "continue",
+        help="resume a truncated result from a local continuation cursor",
+        description=(
+            "Replay a stored continuation command after validating that the cursor belongs to "
+            "this repository and session and that the workspace has not changed since creation."
+        ),
+    )
+    add_common(p)
+    p.add_argument("cursor", help="cursor token from a previous 'continue: agentq continue …' hint")
 
     p = sub.add_parser("run", help="run argv without a shell; return diagnostics and a local redacted log")
     add_common(p)
@@ -432,7 +443,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", default="command")
     p.add_argument("--max-diagnostics", type=positive_int, default=60)
     p.add_argument("--tail-lines", type=positive_int, default=40)
-    p.add_argument("--offline", action="store_true")
+    p.add_argument(
+        "--profile", choices=("transparent", "compact", "ci", "offline"),
+        help=(
+            "execution profile: transparent preserves the environment; compact disables decorative "
+            "color/pagers and update noise; ci adds CI=1; offline adds package-manager offline flags "
+            "(environment flags only, not a network sandbox)"
+        ),
+    )
+    p.add_argument("--offline", action="store_true", help="alias for --profile offline")
+    p.add_argument("--isolated-cache", action="store_true", help="redirect XDG_CACHE_HOME to a private agentq-managed directory")
+    p.add_argument("--keep-log", action="store_true", help="retain the redacted log even when the command succeeds")
     p.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
 
     p = sub.add_parser("test-plan", help="infer a workspace-aware verification ladder from changed files")
@@ -473,6 +494,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("inspect", help="single-entry repository inspection for symbols, literals, files, or source anchors")
     add_common(p); add_scope(p)
     p.add_argument("target")
+    p.add_argument("--intent", choices=("locate", "understand", "edit"), default="understand",
+                   help="locate: candidates only; understand: declaration and references; edit: adds declaration body, tests, owning package, and verification scope")
+    p.add_argument("--lang", choices=("typescript", "python"), help="restrict symbol resolution to one language provider")
     p.add_argument("--line", dest="line_anchors", type=positive_int, nargs="+", action="extend", default=[], help="one or more source anchors when TARGET is a file; repeatable")
     p.add_argument("--lines", dest="line_ranges", type=line_range, action="append", default=[], help="explicit START:END source range when TARGET is a file; repeatable")
     p.add_argument("--limit", "--max-results", dest="limit", type=positive_int, default=80)
@@ -498,255 +522,452 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def execute(args: argparse.Namespace, root: Path) -> int:
-    command = args.command
-    if command == "doctor":
-        emit(args, doctor_data(root), render_doctor)
-    elif command == "task":
-        emit(args, task_data(root, args.action), render_task)
-    elif command == "stats":
-        administrative = any((args.archive_only, args.storage, args.reset, args.install_persistence, args.remove_persistence))
-        if args.archive and administrative:
-            raise AgentQError("--archive cannot be combined with stats administrative actions")
-        if args.hot_only and not args.reset:
-            raise AgentQError("--hot-only requires --reset")
-        if args.force and not args.reset:
-            raise AgentQError("--force requires --reset")
-        if args.watch and administrative:
-            raise AgentQError("--watch cannot be combined with stats administrative actions")
-        if args.archive_only:
-            emit(args, archive_hot_events(), render_archive)
-            return 0
-        if args.storage:
-            emit(args, storage_data(root), render_storage)
-            return 0
-        if args.install_persistence:
-            emit(args, install_persistence(interval=args.persistence_interval), render_persistence)
-            return 0
-        if args.remove_persistence:
-            emit(args, remove_persistence(), render_persistence)
-            return 0
-        if args.reset:
-            emit(args, reset_telemetry(root, all_repos=args.all_repos, hot_only=args.hot_only, force=args.force), render_reset)
-            return 0
-        detailed = bool(args.detailed or args.recent is not None)
-        recent = args.recent if args.recent is not None else 0
-        if args.watch:
-            if args.format != "text":
-                raise AgentQError("--watch requires --format text")
-            if args.archive:
-                raise AgentQError("archive once before --watch; do not combine --archive and --watch")
-            watch_stats(root, interval=args.watch, since=args.since, recent=recent, detailed=detailed,
-                        operations=args.operation, all_repos=args.all_repos, color=args.color,
-                        plain=args.plain, utc=args.utc, budget=args.budget)
-            return 0
-        data = stats_data(root, since=args.since, recent=recent, detailed=detailed, operations=args.operation,
-                          all_repos=args.all_repos, archive=args.archive)
-        if args.format == "json":
-            emit(args, data, render_stats)
-        else:
-            print_stats(data, color=args.color, plain=args.plain, utc=args.utc, budget=args.budget)
-            args._agentq_data = data
-            args._agentq_render_meta = {"prebudget_chars": 0, "visible_chars": 0, "truncated": False}
-    elif command == "files":
-        emit(args, files_data(root, args.query, args.paths, args.limit, args.include_sensitive), render_files)
-    elif command == "search":
-        trailing_paths: list[str] = []
-        for value in args.trailing_paths:
-            try:
-                candidate = ensure_within(root, Path(value))
-            except AgentQError:
-                raise AgentQError("search accepts one QUERY; use: agentq search QUERY --path PATH") from None
-            if not candidate.exists():
-                raise AgentQError("search accepts one QUERY; use: agentq search QUERY --path PATH")
-            trailing_paths.append(relpath(root, candidate))
-        search_paths = [*args.paths, *trailing_paths]
-        continuation_options = {
-            "mode": args.mode, "word": args.word, "case": args.case,
-            "globs": args.glob, "types": args.types, "limit": args.limit,
-            "per_file": args.per_file, "context": args.context, "max_chars": args.max_chars,
-            "max_files": args.max_files, "scan_cap": args.scan_cap,
-            "budget": args.budget, "output_format": args.format,
-            "include_sensitive": args.include_sensitive,
-        }
-        emit_cached(
-            args, root, command,
-            {
-                "query": args.query, "paths": search_paths, "mode": args.mode, "word": args.word,
-                "case": args.case, "globs": args.glob, "types": args.types, "limit": args.limit,
-                "per_file": args.per_file, "context": args.context, "max_chars": args.max_chars,
-                "include_sensitive": args.include_sensitive, "view": args.view,
-                "max_files": args.max_files, "scan_cap": args.scan_cap,
-            },
-            lambda: search_data(
-                root, args.query, search_paths, mode=args.mode, word=args.word, case=args.case,
-                globs=args.glob, types=args.types, limit=args.limit, per_file=args.per_file,
-                context=args.context, max_chars=args.max_chars, include_sensitive=args.include_sensitive,
-                view=args.view, max_files=args.max_files, scan_cap=args.scan_cap,
-                compact=args.format == "compact-json", render_budget=args.budget,
-                continuation_options=continuation_options if args.format != "json" else None,
-            ),
-            render_search,
-        )
-    elif command == "read":
-        if (args.line_anchors or args.line_ranges) and (args.start is not None or args.end is not None or args.around is not None):
-            raise AgentQError("--line/--lines cannot be combined with --start, --end, or --around")
-        data = read_data(
-            root, args.files, start=args.start, end=args.end, around=args.around,
-            line_anchors=args.line_anchors, line_ranges=args.line_ranges, context=args.context,
-            max_lines=args.max_lines, max_chars=args.max_chars, include_sensitive=args.include_sensitive,
-            allow_outside=args.allow_outside, repeat=args.repeat, budget=args.budget,
-            output_format=args.format,
-        )
-        emit(args, data, render_read)
-    elif command == "repo-map":
-        emit(args, repo_map_data(root, args.max_dirs, args.max_manifests), render_repo_map)
-    elif command == "outline":
-        emit_cached(
-            args, root, command,
-            {"paths": args.paths, "match": args.match, "public": args.public, "lang": args.lang, "limit": args.limit},
-            lambda: outline_data(root, args.paths, args.match, args.public, args.lang, args.limit),
-            render_outline,
-        )
-    elif command == "git-status":
-        emit(args, status_data(root, args.limit), render_status)
-    elif command == "git-diff":
-        diff_paths = list(args.paths)
-        scoped = None
-        if args.task_scope:
-            scoped = task_changes(root)
-            diff_paths = sorted(set(diff_paths) & set(scoped["files"])) if diff_paths else list(scoped["files"])
-        if args.task_scope and not diff_paths:
-            data = {
-                "repo_root": str(root), "scope": "active-task", "total_files": 0,
-                "total_added": 0, "total_deleted": 0, "files": [], "files_truncated": False,
-                "diff_check_ok": True, "diff_check": [],
-            }
-            if args.patch:
-                data.update({"patch": "", "patch_stats": {}, "patch_truncated": False})
-            elif args.hunks:
-                data.update({"hunks": [], "hunk_stats": {}, "hunks_truncated": False})
-        else:
-            data = diff_data(root, staged=args.staged, unstaged=args.unstaged, base=args.base,
-                             range_value=args.range_value, paths=diff_paths, patch=args.patch, hunks=args.hunks,
-                             context=args.context, max_files=args.max_files, max_hunks=args.max_hunks,
-                             max_lines=args.max_lines, repeat=args.repeat, budget=args.budget)
-        if args.task_scope:
-            data["task_scope"] = True
-            data["task_ambiguous_preexisting"] = list((scoped or {}).get("ambiguous_preexisting", []))
-            data["preexisting_unchanged_excluded"] = len((scoped or {}).get("excluded_preexisting_unchanged", []))
-        emit(args, data, render_diff)
-    elif command == "git-history":
-        emit(args, history_data(root, args.limit, args.paths), render_history)
-    elif command == "git-structural":
-        emit(args, structural_diff_data(root, args.path, args.context, args.max_lines), render_structural)
-    elif command == "dependencies":
-        emit(args, dependencies_data(root, target=args.target, depth=args.depth, limit=args.limit), render_dependencies)
-    elif command == "impact":
-        emit(args, impact_data(root, args.target, args.paths, args.limit), render_impact)
-    elif command == "codemod-scan":
-        data = scan_data(root, args.pattern, scopes=args.paths, mode=args.mode, rewrite=args.rewrite,
-                         language=args.lang, samples=args.samples, max_files=args.max_files,
-                         include_sensitive=args.include_sensitive)
-        emit(args, data, render_scan)
-    elif command == "codemod-apply":
-        data = apply_data(root, args.pattern, args.rewrite, scopes=args.paths, mode=args.mode,
-                          language=args.lang, apply=args.apply, expect_count=args.expect_count,
-                          max_files=args.max_files)
-        emit(args, data, render_apply)
-    elif command == "run":
-        argv = list(args.argv)
-        if argv and argv[0] == "--":
-            argv = argv[1:]
-        data = run_compact(root, argv, cwd=args.cwd, timeout=args.timeout, label=args.label,
-                           max_diagnostics=args.max_diagnostics, tail_lines=args.tail_lines,
-                           offline=args.offline)
-        emit(args, data, render_run)
-    elif command == "test-plan":
-        scoped = task_changes(root) if args.task_scope else None
-        data = test_plan_data(root, base=args.base, limit=args.limit, mode=args.mode,
-                              dependents=args.dependents, include_build=args.include_build,
-                              changed_override=list(scoped["files"]) if scoped else None)
-        if scoped:
-            data["task_scope"] = True
-            data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
-        emit(args, data, render_test_plan)
-    elif command in {"verify", "verify-changed", "verified-changed", "verify-task"}:
-        task_scoped = command == "verify-task" or args.task_scope or (command == "verify" and current_task_state(root) is not None)
-        scoped = task_changes(root) if task_scoped else None
-        data = verify_changed_data(
-            root, base=args.base, mode=args.mode, dependents=args.dependents,
-            include_build=args.include_build, dry_run=args.dry_run,
-            continue_on_failure=args.continue_on_failure, timeout=args.timeout,
-            max_steps=args.max_steps, max_diagnostics=args.max_diagnostics,
-            offline=args.offline, skip_lint=args.skip_lint,
-            changed_files_override=list(scoped["files"]) if scoped else None,
-        )
-        if scoped:
-            data["task_scope"] = True
-            data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
-            data["preexisting_unchanged_excluded"] = len(scoped.get("excluded_preexisting_unchanged", []))
-        data["verification_scope"] = "task" if task_scoped else "base" if args.base else "worktree"
-        emit(args, data, render_verify_changed)
-        return int(data.get("exit_code", 0))
-    elif command == "ts-nav":
-        action = {"refs": "references", "def": "definition", "impls": "implementations"}.get(args.action, args.action)
-        if args.symbol_arg and args.symbol_option:
-            raise AgentQError("provide SYMBOL either positionally or with --symbol, not both")
-        symbol = args.symbol_option or args.symbol_arg
-        # Compatibility with the common `path.ts:line:column` form.
-        if symbol and not args.symbol_option:
-            position = re.fullmatch(r"(.+):(\d+):(\d+)", symbol)
-            if position and (root / position.group(1)).exists():
-                args.file, args.line, args.column = position.group(1), int(position.group(2)), int(position.group(3))
-                symbol = None
-        exact_values = (args.file, args.line, args.column)
-        if symbol and any(value is not None for value in exact_values):
-            raise AgentQError("symbol-first navigation cannot be combined with --file, --line, or --column")
-        if not symbol and action in {"locate", "overview"}:
-            raise AgentQError(f"ts-nav {action} requires a symbol")
-        if not symbol and not all(value is not None for value in exact_values):
-            raise AgentQError("provide SYMBOL/--symbol or all of --file, --line, and --column")
-        emit(
-            args,
-            ts_nav_data(
-                root, action, args.file, args.line, args.column, args.limit,
-                symbol=symbol, paths=args.paths, pick=args.pick,
-            ),
-            render_ts_nav,
-        )
-    elif command == "inspect":
-        emit_cached(
-            args, root, command,
-            {
-                "target": args.target, "paths": args.paths, "limit": args.limit, "context": args.context,
-                "line_anchors": args.line_anchors, "line_ranges": args.line_ranges, "max_lines": args.max_lines,
-            },
-            lambda: inspect_data(
-                root, args.target, args.paths, limit=args.limit, context=args.context,
-                line_anchors=args.line_anchors, line_ranges=args.line_ranges,
-                max_lines=args.max_lines, repeat=args.repeat, budget=args.budget,
-                output_format=args.format,
-            ),
-            render_inspect,
-        )
-    elif command == "audit":
-        scoped = task_changes(root) if args.task_scope else None
-        data = audit_data(
-            root, staged=args.staged, base=args.base,
-            paths=list(scoped["files"]) if scoped else None,
-            task_scope=args.task_scope, max_findings=args.max_findings,
-        )
-        if scoped:
-            data["task_scope"] = True
-            data["task_ambiguous_preexisting"] = list(scoped.get("ambiguous_preexisting", []))
-            data["preexisting_unchanged_excluded"] = len(scoped.get("excluded_preexisting_unchanged", []))
-        emit(args, data, render_audit)
-    elif command == "benchmark":
-        emit(args, benchmark_data(root, args.commands, args.warmup, args.runs, args.prepare), render_benchmark)
-    else:
-        raise AgentQError(f"unknown command: {command}")
+def _run_doctor(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.doctor import doctor_data, render_doctor
+
+    emit(args, doctor_data(root), render_doctor)
     return 0
+
+
+def _run_task(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.tasking import render_task, task_data
+
+    emit(args, task_data(root, args.action), render_task)
+    return 0
+
+
+def _run_stats(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.telemetry import (
+        archive_hot_events, install_persistence, print_stats, remove_persistence,
+        render_archive, render_persistence, render_reset, render_stats, render_storage,
+        reset_telemetry, stats_data, storage_data, watch_stats,
+    )
+
+    administrative = any((args.archive_only, args.storage, args.reset, args.install_persistence, args.remove_persistence))
+    if args.archive and administrative:
+        raise AgentQError("--archive cannot be combined with stats administrative actions")
+    if args.hot_only and not args.reset:
+        raise AgentQError("--hot-only requires --reset")
+    if args.force and not args.reset:
+        raise AgentQError("--force requires --reset")
+    if args.watch and administrative:
+        raise AgentQError("--watch cannot be combined with stats administrative actions")
+    if args.archive_only:
+        emit(args, archive_hot_events(), render_archive)
+        return 0
+    if args.storage:
+        emit(args, storage_data(root), render_storage)
+        return 0
+    if args.install_persistence:
+        emit(args, install_persistence(interval=args.persistence_interval), render_persistence)
+        return 0
+    if args.remove_persistence:
+        emit(args, remove_persistence(), render_persistence)
+        return 0
+    if args.reset:
+        emit(args, reset_telemetry(root, all_repos=args.all_repos, hot_only=args.hot_only, force=args.force), render_reset)
+        return 0
+    detailed = bool(args.detailed or args.recent is not None)
+    recent = args.recent if args.recent is not None else 0
+    if args.watch:
+        if args.format != "text":
+            raise AgentQError("--watch requires --format text")
+        if args.archive:
+            raise AgentQError("archive once before --watch; do not combine --archive and --watch")
+        watch_stats(root, interval=args.watch, since=args.since, recent=recent, detailed=detailed,
+                    operations=args.operation, all_repos=args.all_repos, color=args.color,
+                    plain=args.plain, utc=args.utc, budget=args.budget)
+        return 0
+    data = stats_data(root, since=args.since, recent=recent, detailed=detailed, operations=args.operation,
+                      all_repos=args.all_repos, archive=args.archive)
+    if args.format == "json":
+        emit(args, data, render_stats)
+    else:
+        print_stats(data, color=args.color, plain=args.plain, utc=args.utc, budget=args.budget)
+        args._agentq_data = data
+        args._agentq_render_meta = {"prebudget_chars": 0, "visible_chars": 0, "truncated": False}
+    return 0
+
+
+def _run_files(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.search import files_data, render_files
+
+    emit(args, files_data(root, args.query, args.paths, args.limit, args.include_sensitive), render_files)
+    return 0
+
+
+def _run_search(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.common import ensure_within, relpath
+    from agentq_lib.search import render_search, search_data
+
+    trailing_paths: list[str] = []
+    for value in args.trailing_paths:
+        try:
+            candidate = ensure_within(root, Path(value))
+        except AgentQError:
+            raise AgentQError("search accepts one QUERY; use: agentq search QUERY --path PATH") from None
+        if not candidate.exists():
+            raise AgentQError("search accepts one QUERY; use: agentq search QUERY --path PATH")
+        trailing_paths.append(relpath(root, candidate))
+    search_paths = [*args.paths, *trailing_paths]
+    continuation_options = {
+        "mode": args.mode, "word": args.word, "case": args.case,
+        "globs": args.glob, "types": args.types, "limit": args.limit,
+        "per_file": args.per_file, "context": args.context, "max_chars": args.max_chars,
+        "max_files": args.max_files, "scan_cap": args.scan_cap,
+        "budget": args.budget, "output_format": args.format,
+        "include_sensitive": args.include_sensitive,
+        "coverage_policy": args.coverage_policy,
+    }
+    emit_cached(
+        args, root, "search",
+        {
+            "query": args.query, "paths": search_paths, "mode": args.mode, "word": args.word,
+            "case": args.case, "globs": args.glob, "types": args.types, "limit": args.limit,
+            "per_file": args.per_file, "context": args.context, "max_chars": args.max_chars,
+            "include_sensitive": args.include_sensitive, "view": args.view,
+            "max_files": args.max_files, "scan_cap": args.scan_cap,
+            "coverage_policy": args.coverage_policy,
+        },
+        lambda: search_data(
+            root, args.query, search_paths, mode=args.mode, word=args.word, case=args.case,
+            globs=args.glob, types=args.types, limit=args.limit, per_file=args.per_file,
+            context=args.context, max_chars=args.max_chars, include_sensitive=args.include_sensitive,
+            view=args.view, max_files=args.max_files, scan_cap=args.scan_cap,
+            coverage_policy=args.coverage_policy,
+            compact=args.format == "compact-json", render_budget=args.budget,
+            continuation_options=continuation_options if args.format != "json" else None,
+        ),
+        render_search,
+    )
+    return 0
+
+
+def _run_read(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.search import read_data, render_read
+
+    if (args.line_anchors or args.line_ranges) and (args.start is not None or args.end is not None or args.around is not None):
+        raise AgentQError("--line/--lines cannot be combined with --start, --end, or --around")
+    data = read_data(
+        root, args.files, start=args.start, end=args.end, around=args.around,
+        line_anchors=args.line_anchors, line_ranges=args.line_ranges, context=args.context,
+        max_lines=args.max_lines, max_chars=args.max_chars, include_sensitive=args.include_sensitive,
+        allow_outside=args.allow_outside, repeat=args.repeat, budget=args.budget,
+        output_format=args.format,
+    )
+    _attach_continuation_cursors(root, data)
+    emit(args, data, render_read)
+    return 0
+
+
+def _run_repo_map(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.search import render_repo_map, repo_map_data
+
+    emit(args, repo_map_data(root, args.max_dirs, args.max_manifests), render_repo_map)
+    return 0
+
+
+def _run_outline(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.search import outline_data, render_outline
+
+    emit_cached(
+        args, root, "outline",
+        {"paths": args.paths, "match": args.match, "public": args.public, "lang": args.lang, "limit": args.limit},
+        lambda: outline_data(root, args.paths, args.match, args.public, args.lang, args.limit),
+        render_outline,
+    )
+    return 0
+
+
+def _run_git_status(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.gitops import render_status, status_data
+
+    emit(args, status_data(root, args.limit), render_status)
+    return 0
+
+
+def _run_git_diff(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.gitops import diff_data, render_diff
+    from agentq_lib.tasking import task_changes
+
+    diff_paths = list(args.paths)
+    scoped = None
+    if args.task_scope:
+        scoped = task_changes(root)
+        diff_paths = sorted(set(diff_paths) & set(scoped["files"])) if diff_paths else list(scoped["files"])
+    if args.task_scope and not diff_paths:
+        data = {
+            "repo_root": str(root), "scope": "active-task", "total_files": 0,
+            "total_added": 0, "total_deleted": 0, "files": [], "files_truncated": False,
+            "diff_check_ok": True, "diff_check": [],
+        }
+        if args.patch:
+            data.update({"patch": "", "patch_stats": {}, "patch_truncated": False})
+        elif args.hunks:
+            data.update({"hunks": [], "hunk_stats": {}, "hunks_truncated": False})
+    else:
+        data = diff_data(root, staged=args.staged, unstaged=args.unstaged, base=args.base,
+                         range_value=args.range_value, paths=diff_paths, patch=args.patch, hunks=args.hunks,
+                         context=args.context, max_files=args.max_files, max_hunks=args.max_hunks,
+                         max_lines=args.max_lines, repeat=args.repeat, budget=args.budget)
+    if args.task_scope:
+        data["task_scope"] = True
+        data["task_ambiguous_preexisting"] = list((scoped or {}).get("ambiguous_preexisting", []))
+        data["preexisting_unchanged_excluded"] = len((scoped or {}).get("excluded_preexisting_unchanged", []))
+    emit(args, data, render_diff)
+    return 0
+
+
+def _run_git_history(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.gitops import history_data, render_history
+
+    emit(args, history_data(root, args.limit, args.paths), render_history)
+    return 0
+
+
+def _run_git_structural(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.gitops import render_structural, structural_diff_data
+
+    emit(args, structural_diff_data(root, args.path, args.context, args.max_lines), render_structural)
+    return 0
+
+
+def _run_dependencies(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.deps import dependencies_data, render_dependencies
+
+    emit(args, dependencies_data(root, target=args.target, depth=args.depth, limit=args.limit), render_dependencies)
+    return 0
+
+
+def _run_impact(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.impact import impact_data, render_impact
+
+    emit(args, impact_data(root, args.target, args.paths, args.limit), render_impact)
+    return 0
+
+
+def _run_codemod_scan(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.codemod import render_scan, scan_data
+
+    data = scan_data(root, args.pattern, scopes=args.paths, mode=args.mode, rewrite=args.rewrite,
+                     language=args.lang, samples=args.samples, max_files=args.max_files,
+                     include_sensitive=args.include_sensitive, plan_out=args.plan_out)
+    emit(args, data, render_scan)
+    return 0
+
+
+def _run_codemod_apply(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.codemod import apply_data, render_apply
+
+    if args.plan is None and (not args.pattern or not args.rewrite):
+        raise AgentQError("codemod-apply requires PATTERN REWRITE, or use --plan PLAN")
+    data = apply_data(root, args.pattern, args.rewrite, scopes=args.paths, mode=args.mode,
+                      language=args.lang, apply=args.apply, expect_count=args.expect_count,
+                      max_files=args.max_files, plan=args.plan)
+    emit(args, data, render_apply)
+    return 0
+
+
+def _run_run(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.runops import render_run, run_compact
+
+    argv = list(args.argv)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if args.offline and args.profile and args.profile != "offline":
+        raise AgentQError("--offline is an alias for --profile offline; pass only one")
+    profile = args.profile or ("offline" if args.offline else "compact")
+    data = run_compact(root, argv, cwd=args.cwd, timeout=args.timeout, label=args.label,
+                       max_diagnostics=args.max_diagnostics, tail_lines=args.tail_lines,
+                       profile=profile, isolated_cache=args.isolated_cache, keep_log=args.keep_log)
+    emit(args, data, render_run)
+    return 0
+
+
+def _run_test_plan(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.tasking import task_changes
+    from agentq_lib.testplan import render_test_plan, test_plan_data
+
+    scoped = task_changes(root) if args.task_scope else None
+    data = test_plan_data(root, base=args.base, limit=args.limit, mode=args.mode,
+                          dependents=args.dependents, include_build=args.include_build,
+                          changed_override=list(scoped["files"]) if scoped else None)
+    if scoped:
+        data["task_scope"] = True
+        data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
+    emit(args, data, render_test_plan)
+    return 0
+
+
+def _run_verify(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.tasking import current_task_state, task_changes
+    from agentq_lib.verifychanged import render_verify_changed, verify_changed_data
+
+    command = args.command
+    task_scoped = command == "verify-task" or args.task_scope or (command == "verify" and current_task_state(root) is not None)
+    scoped = task_changes(root) if task_scoped else None
+    data = verify_changed_data(
+        root, base=args.base, mode=args.mode, dependents=args.dependents,
+        include_build=args.include_build, dry_run=args.dry_run,
+        continue_on_failure=args.continue_on_failure, timeout=args.timeout,
+        max_steps=args.max_steps, max_diagnostics=args.max_diagnostics,
+        offline=args.offline, skip_lint=args.skip_lint,
+        changed_files_override=list(scoped["files"]) if scoped else None,
+    )
+    if scoped:
+        data["task_scope"] = True
+        data["task_ambiguous_preexisting"] = scoped.get("ambiguous_preexisting", [])
+        data["preexisting_unchanged_excluded"] = len(scoped.get("excluded_preexisting_unchanged", []))
+    data["verification_scope"] = "task" if task_scoped else "base" if args.base else "worktree"
+    emit(args, data, render_verify_changed)
+    return int(data.get("exit_code", 0))
+
+
+def _run_ts_nav(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.tsnav import render_ts_nav, ts_nav_data
+
+    action = {"refs": "references", "def": "definition", "impls": "implementations"}.get(args.action, args.action)
+    if args.symbol_arg and args.symbol_option:
+        raise AgentQError("provide SYMBOL either positionally or with --symbol, not both")
+    symbol = args.symbol_option or args.symbol_arg
+    # Compatibility with the common `path.ts:line:column` form.
+    if symbol and not args.symbol_option:
+        position = re.fullmatch(r"(.+):(\d+):(\d+)", symbol)
+        if position and (root / position.group(1)).exists():
+            args.file, args.line, args.column = position.group(1), int(position.group(2)), int(position.group(3))
+            symbol = None
+    exact_values = (args.file, args.line, args.column)
+    if symbol and any(value is not None for value in exact_values):
+        raise AgentQError("symbol-first navigation cannot be combined with --file, --line, or --column")
+    if not symbol and action in {"locate", "overview"}:
+        raise AgentQError(f"ts-nav {action} requires a symbol")
+    if not symbol and not all(value is not None for value in exact_values):
+        raise AgentQError("provide SYMBOL/--symbol or all of --file, --line, and --column")
+    data = ts_nav_data(
+        root, action, args.file, args.line, args.column, args.limit,
+        symbol=symbol, paths=args.paths, pick=args.pick,
+    )
+    _attach_continuation_cursors(root, data)
+    emit(args, data, render_ts_nav)
+    return 0
+
+
+def _run_continue(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.context_cache import continuation_record
+
+    record = continuation_record(root, args.cursor)
+    if record is None:
+        raise AgentQError(f"unknown or expired continuation cursor: {args.cursor}")
+    try:
+        argv = shlex.split(str(record["command"]))[1:]
+        nested = build_parser().parse_args(argv)
+    except (ValueError, AgentQError) as exc:
+        raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc
+    nested.repo = str(root)
+    code = execute(nested, root)
+    for attr in ("_agentq_data", "_agentq_render_meta"):
+        if hasattr(nested, attr):
+            setattr(args, attr, getattr(nested, attr))
+    return code
+
+
+def _run_inspect(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.inspectops import inspect_data, render_inspect
+
+    emit_cached(
+        args, root, "inspect",
+        {
+            "target": args.target, "paths": args.paths, "limit": args.limit, "context": args.context,
+            "line_anchors": args.line_anchors, "line_ranges": args.line_ranges, "max_lines": args.max_lines,
+            "intent": args.intent, "lang": args.lang,
+        },
+        lambda: inspect_data(
+            root, args.target, args.paths, intent=args.intent, lang=args.lang, limit=args.limit,
+            context=args.context, line_anchors=args.line_anchors, line_ranges=args.line_ranges,
+            max_lines=args.max_lines, repeat=args.repeat, budget=args.budget,
+            output_format=args.format,
+        ),
+        render_inspect,
+    )
+    return 0
+
+
+def _run_audit(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.audit import audit_data, render_audit
+    from agentq_lib.tasking import task_changes
+
+    scoped = task_changes(root) if args.task_scope else None
+    data = audit_data(
+        root, staged=args.staged, base=args.base,
+        paths=list(scoped["files"]) if scoped else None,
+        task_scope=args.task_scope, max_findings=args.max_findings,
+    )
+    if scoped:
+        data["task_scope"] = True
+        data["task_ambiguous_preexisting"] = list(scoped.get("ambiguous_preexisting", []))
+        data["preexisting_unchanged_excluded"] = len(scoped.get("excluded_preexisting_unchanged", []))
+    emit(args, data, render_audit)
+    return 0
+
+
+def _run_benchmark(args: argparse.Namespace, root: Path) -> int:
+    from agentq_lib.benchmark import benchmark_data, render_benchmark
+
+    emit(args, benchmark_data(root, args.commands, args.warmup, args.runs, args.prepare), render_benchmark)
+    return 0
+
+
+_HANDLERS: dict[str, Callable[[argparse.Namespace, Path], int]] = {
+    "doctor": _run_doctor,
+    "task": _run_task,
+    "stats": _run_stats,
+    "files": _run_files,
+    "search": _run_search,
+    "read": _run_read,
+    "repo-map": _run_repo_map,
+    "outline": _run_outline,
+    "git-status": _run_git_status,
+    "git-diff": _run_git_diff,
+    "git-history": _run_git_history,
+    "git-structural": _run_git_structural,
+    "dependencies": _run_dependencies,
+    "impact": _run_impact,
+    "codemod-scan": _run_codemod_scan,
+    "codemod-apply": _run_codemod_apply,
+    "run": _run_run,
+    "test-plan": _run_test_plan,
+    "verify": _run_verify,
+    "verify-changed": _run_verify,
+    "verified-changed": _run_verify,
+    "verify-task": _run_verify,
+    "ts-nav": _run_ts_nav,
+    "continue": _run_continue,
+    "inspect": _run_inspect,
+    "audit": _run_audit,
+    "benchmark": _run_benchmark,
+}
+
+
+def execute(args: argparse.Namespace, root: Path) -> int:
+    handler = _HANDLERS.get(args.command)
+    if handler is None:
+        raise AgentQError(f"unknown command: {args.command}")
+    return handler(args, root)
+
+
+def _record_event() -> Callable[..., None] | None:
+    """Return the telemetry recorder, or None when telemetry is disabled.
+
+    Checking the flag here keeps telemetry imports off the disabled fast path;
+    the flag itself has one definition (agentq_lib.runtime.telemetry_enabled).
+    """
+    from agentq_lib.runtime import telemetry_enabled
+
+    if not telemetry_enabled():
+        return None
+    from agentq_lib.telemetry import record_event
+
+    return record_event
 
 
 def main() -> int:
@@ -770,25 +991,27 @@ def main() -> int:
         exit_code = execute(args, root)
         data = getattr(args, "_agentq_data", None)
         meta = getattr(args, "_agentq_render_meta", {})
-        record_event(
-            root,
-            command=args.command,
-            duration_ms=round((time.perf_counter() - start) * 1000),
-            tool_status="ok",
-            agentq_exit_code=exit_code,
-            visible_chars=int(meta.get("visible_chars", 0)),
-            prebudget_chars=int(meta.get("prebudget_chars", 0)),
-            truncated=bool(meta.get("truncated", False)),
-            render_budget_truncated=bool(meta.get("render_budget_truncated", False)),
-            source_cap_truncated=bool(meta.get("source_cap_truncated", False)),
-            data=data,
-            invocation=sys.argv[1:],
-            expansion_controls=expansion_controls(args),
-            output_format=str(args.format),
-            output_view=str(meta.get("output_view", "default")),
-            output_attribution=meta.get("output_attribution"),
-            repeat_requested=bool(getattr(args, "repeat", False)),
-        )
+        record = _record_event()
+        if record is not None:
+            record(
+                root,
+                command=args.command,
+                duration_ms=round((time.perf_counter() - start) * 1000),
+                tool_status="ok",
+                agentq_exit_code=exit_code,
+                visible_chars=int(meta.get("visible_chars", 0)),
+                prebudget_chars=int(meta.get("prebudget_chars", 0)),
+                truncated=bool(meta.get("truncated", False)),
+                render_budget_truncated=bool(meta.get("render_budget_truncated", False)),
+                source_cap_truncated=bool(meta.get("source_cap_truncated", False)),
+                data=data,
+                invocation=sys.argv[1:],
+                expansion_controls=expansion_controls(args),
+                output_format=str(args.format),
+                output_view=str(meta.get("output_view", "default")),
+                output_attribution=meta.get("output_attribution"),
+                repeat_requested=bool(getattr(args, "repeat", False)),
+            )
         return exit_code
     except AgentQError as exc:
         if root is None:
@@ -813,8 +1036,11 @@ def main() -> int:
             else f"agentq: {exc}"
         )
         error_command = getattr(args, "command", "unknown") if args else (sys.argv[1] if len(sys.argv) > 1 else "unknown")
-        if root is not None:
-            record_event(
+        record = _record_event() if root is not None else None
+        if record is not None:
+            from agentq_lib.output_attribution import attribute_output
+
+            record(
                 root,
                 command=error_command,
                 duration_ms=round((time.perf_counter() - start) * 1000),

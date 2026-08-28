@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-VERSION = "1.4.0"
+from .redaction import SECRET_PATTERNS, redact_text
+
+VERSION = "1.8.0"
 
 DEFAULT_SKIP_PARTS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
@@ -45,15 +47,6 @@ SENSITIVE_RG_EXCLUDES = [
 SENSITIVE_RG_REINCLUDES: list[str] = []
 
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.S), "[REDACTED_PRIVATE_KEY]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{24,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "[REDACTED_JWT]"),
-    (re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|service[_-]?role[_-]?key|private[_-]?key)\b(\s*[:=]\s*)([^\s,;\]}]{6,})"), r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)(https?://[^:/\s]+:)([^@/\s]+)(@)"), r"\1[REDACTED]\3"),
-]
 
 ROLE_PATTERNS = {
     "test": re.compile(r"(^|/)(tests?|__tests__|spec)(/|$)|(?:^|[._-])(test|spec)\.[^.]+$", re.I),
@@ -101,16 +94,21 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text)
 
 
-def redact_text(text: str) -> str:
-    result = text
-    for pattern, replacement in SECRET_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
-
-
 def compact_line(text: str, max_chars: int = 240) -> str:
     text = strip_ansi(text).replace("\r", "").rstrip("\n")
     text = redact_text(text)
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 15)] + " …[truncated]"
+
+
+def truncate_line(text: str, max_chars: int = 240) -> str:
+    """Truncate a line that is already redacted (no re-redaction).
+
+    Used by streamed output where :func:`redact_text` has already been applied,
+    so calling it again would mangle already-redacted tokens.
+    """
+    text = strip_ansi(text).replace("\r", "").rstrip("\n")
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 15)] + " …[truncated]"
@@ -224,13 +222,9 @@ def repo_root(start: str | Path = ".") -> Path:
 
 
 def ensure_within(root: Path, path: Path, *, allow_outside: bool = False) -> Path:
-    resolved = path.expanduser()
-    if not resolved.is_absolute():
-        resolved = root / resolved
-    resolved = resolved.resolve()
-    if not allow_outside and resolved != root and root not in resolved.parents:
-        raise AgentQError(f"path is outside repository root: {resolved}")
-    return resolved
+    from .paths import _resolve_absolute
+
+    return _resolve_absolute(root, path, allow_outside=allow_outside)
 
 
 def relpath(root: Path, path: Path) -> str:

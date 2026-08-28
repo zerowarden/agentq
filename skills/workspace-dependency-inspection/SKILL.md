@@ -4,7 +4,7 @@ description: Inspect local monorepo package dependencies and dependents from pac
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Python 3.10+. Cargo metadata is used locally and offline when Cargo is available.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   mutation: "none"
 ---
 

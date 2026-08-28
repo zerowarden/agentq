@@ -4,7 +4,7 @@ description: Use for Git status, diff, history, patch review, and high-signal pa
 license: MIT
 compatibility: Requires the bundled agent-toolkit and Git. Difftastic is optional for one-file syntax-aware diffs.
 metadata:
-  version: "1.4.0"
+  version: "1.8.0"
   mutation: "none"
 ---
 
