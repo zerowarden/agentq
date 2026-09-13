@@ -134,6 +134,7 @@ Typical ordering when applicable:
 
 Each step must contain:
 
+- **Scenario** the business or application scenarios that this step addresses;
 - **Targets:** exact repository-relative paths and owning symbols;
 - **Change:** concrete current-to-target behavior/data/control-flow delta;
 - **Preserve:** only relevant invariants, compatibility rules, and boundaries;
@@ -200,6 +201,7 @@ Return only the Markdown plan unless the user separately asks for explanation. D
 
 ### 1. <Outcome-oriented step> - R1, R2
 
+- **Scenario**: <Scenario Descriptions>
 - **Targets:** `path::symbol`, `NEW path` modelled on `path::analogue`
 - **Change:** <Exact current-to-target delta and interfaces/data flow.>
 - **Preserve:** <Only relevant invariants/compatibility. Omit when none.>
@@ -207,6 +209,7 @@ Return only the Markdown plan unless the user separately asks for explanation. D
 
 ### 2. <Next dependency-ordered step> - R2
 
+- **Scenario**: ... 
 - **Targets:** ...
 - **Change:** ...
 - **Preserve:** ...
