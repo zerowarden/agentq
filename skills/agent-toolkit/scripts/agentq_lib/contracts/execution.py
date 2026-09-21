@@ -145,6 +145,8 @@ class ExecutionOutcome:
     cli_exit_code: int
     child_returncode: int | None = None
     child_signal: int | None = None
+    cancel_signal: int | None = None
+    error_detail: str | None = None
     duration_ms: int = 0
     capture_status: CaptureStatus = CaptureStatus.COMPLETE
     cleanup_status: CleanupStatus = CleanupStatus.NOT_NEEDED
@@ -174,6 +176,10 @@ class ExecutionOutcome:
             maximum=255,
         )
         optional_int(self.child_signal, "outcome child signal", minimum=1, maximum=255)
+        optional_int(
+            self.cancel_signal, "outcome cancel signal", minimum=1, maximum=255
+        )
+        optional_str(self.error_detail, "outcome error detail")
         optional_int(self.stdout_bytes, "outcome stdout bytes", minimum=0)
         optional_int(self.stderr_bytes, "outcome stderr bytes", minimum=0)
         optional_int(self.captured_records, "outcome captured records", minimum=0)
@@ -199,6 +205,8 @@ class ExecutionOutcome:
             "cli_exit_code": self.cli_exit_code,
             "child_returncode": self.child_returncode,
             "child_signal": self.child_signal,
+            "cancel_signal": self.cancel_signal,
+            "error_detail": self.error_detail,
             "duration_ms": self.duration_ms,
             "capture_status": self.capture_status.value,
             "cleanup_status": self.cleanup_status.value,
@@ -249,6 +257,15 @@ class ExecutionOutcome:
                 f"{what}.child_signal",
                 minimum=1,
                 maximum=255,
+            ),
+            cancel_signal=optional_int(
+                payload.get("cancel_signal"),
+                f"{what}.cancel_signal",
+                minimum=1,
+                maximum=255,
+            ),
+            error_detail=optional_str(
+                payload.get("error_detail"), f"{what}.error_detail"
             ),
             duration_ms=require_int(
                 payload.get("duration_ms", 0), f"{what}.duration_ms", minimum=0

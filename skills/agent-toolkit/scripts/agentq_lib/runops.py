@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import os
 import re
-import signal
 import stat
-import subprocess
 import tempfile
-import threading
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .common import AgentQError, cache_dir, compact_line, redact_text, truncate_line
+from .common import AgentQError, cache_dir, redact_text, truncate_line
 from .redaction import StreamingRedactor
 
 DIAGNOSTIC_RE = re.compile(
@@ -116,6 +114,14 @@ def run_compact(
     keep_log: bool = False,
 ) -> dict[str, Any]:
     """Run argv without a shell and stream only redacted text to a private local log."""
+    from .contracts.execution import ExecutionSpec, StdinPolicy, StopReason, StreamMode
+    from .process import (
+        STREAM_RECORD_LIMIT_BYTES,
+        cli_exit_code,
+        is_spawn_failure,
+        supervise,
+    )
+
     if profile not in _PROFILE_ENV:
         raise AgentQError(f"unknown run profile: {profile}")
     if not command:
@@ -126,7 +132,7 @@ def run_compact(
     if not working.is_dir():
         raise AgentQError(f"working directory does not exist: {working}")
 
-    env = os.environ.copy()
+    env_overrides = dict(_PROFILE_ENV[profile])
     if isolated_cache:
         runtime_cache = cache_dir(root) / "xdg"
         runtime_cache.mkdir(parents=True, exist_ok=True)
@@ -134,8 +140,7 @@ def run_compact(
             runtime_cache.chmod(0o700)
         except OSError:
             pass
-        env["XDG_CACHE_HOME"] = str(runtime_cache)
-    env.update(_PROFILE_ENV[profile])
+        env_overrides["XDG_CACHE_HOME"] = str(runtime_cache)
 
     final_log = _private_temp_log(root, label)
     diagnostics: list[str] = []
@@ -144,99 +149,84 @@ def run_compact(
     output_lines = 0
     output_chars = 0
     diagnostics_keys: set[str] = set()
-    reader_error: list[BaseException] = []
     redactor = StreamingRedactor()
-    start = time.perf_counter()
-    timed_out = False
-
+    log_handle = final_log.open("w", encoding="utf-8", errors="replace")
     try:
-        proc = subprocess.Popen(
-            command,
-            cwd=working,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        final_log.unlink(missing_ok=True)
-        raise AgentQError(f"command not found: {command[0]}") from exc
+        os.chmod(final_log, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
 
-    assert proc.stdout is not None
-
-    def drain_output() -> None:
+    def consume(event) -> bool:
         nonlocal output_lines, output_chars, diagnostics_seen
-        try:
-            with final_log.open("w", encoding="utf-8", errors="replace") as destination:
-                try:
-                    os.chmod(final_log, stat.S_IRUSR | stat.S_IWUSR)
-                except OSError:
-                    pass
-                for line in proc.stdout:
-                    output_lines += 1
-                    redacted = redactor.feed(line)
-                    if not redacted:
-                        continue
-                    destination.write(redacted)
-                    output_chars += len(redacted)
-                    clean = truncate_line(redacted, 360)
-                    tail.append(clean)
-                    if DIAGNOSTIC_RE.search(clean) or LOCATION_RE.search(clean):
-                        diagnostics_seen += 1
-                        key = clean.strip()
-                        if (
-                            key
-                            and key not in diagnostics_keys
-                            and len(diagnostics) < max_diagnostics
-                        ):
-                            diagnostics_keys.add(key)
-                            diagnostics.append(clean)
-                tail_rest = redactor.finish()
-                if tail_rest:
-                    destination.write(tail_rest)
-                    output_chars += len(tail_rest)
-        except BaseException as exc:  # propagate reader failures after process cleanup
-            reader_error.append(exc)
+        output_lines += 1
+        redacted = redactor.feed(event.text)
+        if not redacted:
+            return True
+        log_handle.write(redacted)
+        output_chars += len(redacted)
+        clean = truncate_line(redacted, 360)
+        tail.append(clean)
+        if DIAGNOSTIC_RE.search(clean) or LOCATION_RE.search(clean):
+            diagnostics_seen += 1
+            key = clean.strip()
+            if (
+                key
+                and key not in diagnostics_keys
+                and len(diagnostics) < max_diagnostics
+            ):
+                diagnostics_keys.add(key)
+                diagnostics.append(clean)
+        return True
 
-    reader = threading.Thread(
-        target=drain_output, name="agentq-output-redactor", daemon=True
+    spec = ExecutionSpec(
+        argv=tuple(command),
+        cwd=str(working),
+        stream_mode=StreamMode.MERGED,
+        stdin_policy=StdinPolicy.CLOSED,
+        deadline_seconds=timeout,
+        record_limit_bytes=STREAM_RECORD_LIMIT_BYTES,
+        env=tuple(env_overrides.items()),
     )
-    reader.start()
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        outcome = supervise(spec, consume)
+        tail_rest = redactor.finish()
+        if tail_rest:
+            log_handle.write(tail_rest)
+            output_chars += len(tail_rest)
+    except BaseException:
+        log_handle.close()
+        final_log.unlink(missing_ok=True)
+        raise
     finally:
-        reader.join(timeout=10)
-        if reader.is_alive():
-            try:
-                proc.stdout.close()
-            except OSError:
-                pass
-            reader.join(timeout=2)
+        try:
+            log_handle.close()
+        except OSError:
+            pass
 
-    duration = time.perf_counter() - start
-    if reader_error:
+    exit_code = cli_exit_code(outcome)
+    timed_out = outcome.stop_reason is StopReason.TIMEOUT
+    spawn_failure = is_spawn_failure(outcome.stop_reason)
+    capture_failure = outcome.stop_reason in {
+        StopReason.CONSUMER_ERROR,
+        StopReason.CAPTURE_ERROR,
+    }
+    if spawn_failure or capture_failure:
         final_log.unlink(missing_ok=True)
-        raise AgentQError(f"failed while capturing command output: {reader_error[0]}")
-    if reader.is_alive():
-        final_log.unlink(missing_ok=True)
-        raise AgentQError("command output reader did not terminate cleanly")
-
-    exit_code = 124 if timed_out else proc.returncode
+    if capture_failure:
+        diagnostics = [outcome.error_detail or "command output capture failed"]
+    elif spawn_failure:
+        diagnostics = [
+            (
+                f"command not found: {command[0]}"
+                if outcome.stop_reason is StopReason.SPAWN_ERROR
+                else f"command cannot be executed: {command[0]}"
+            )
+        ]
     # Diagnostics and the tail are already extracted above; a successful run
     # does not need its full output retained unless --keep-log is explicit.
-    retained = keep_log or exit_code != 0
+    retained = not (spawn_failure or capture_failure) and (
+        keep_log or exit_code != 0
+    )
     if not retained:
         final_log.unlink(missing_ok=True)
     try:
@@ -244,6 +234,7 @@ def run_compact(
     except (OSError, AgentQError):
         pass
 
+    outcome = replace(outcome, retained_log=str(final_log) if retained else None)
     data: dict[str, Any] = {
         "repo_root": str(root),
         "command": [redact_text(item) for item in command],
@@ -251,7 +242,7 @@ def run_compact(
         "profile": profile,
         "exit_code": exit_code,
         "timed_out": timed_out,
-        "duration_seconds": round(duration, 3),
+        "duration_seconds": round(outcome.duration_ms / 1000, 3),
         "output_lines": output_lines,
         "output_chars": output_chars,
         "diagnostics": diagnostics,
@@ -260,6 +251,7 @@ def run_compact(
         "log": str(final_log) if retained else None,
         "log_retention": "retained" if retained else "deleted",
         "redaction": redactor.stats(),
+        "execution": outcome.to_wire(),
     }
     if retained:
         data["log_mode"] = "0600 local redacted file"

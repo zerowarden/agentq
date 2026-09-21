@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from typing import Any, Hashable
+from collections.abc import Hashable
+from typing import Any
 
 OUTPUT_ATTRIBUTION_KEYS = (
     "unique_evidence_chars",
@@ -69,22 +70,31 @@ def output_view(command: str, data: dict[str, Any] | None) -> str:
         return "default"
     if data.get("repeat_suppressed"):
         return "repeat-suppressed"
+    declared = _declared_view(command, data)
+    if declared is not None:
+        return declared
+    if command == "read" and data.get("windowed"):
+        return "windowed"
+    if command == "git-diff":
+        return _diff_view(data)
+    return "default"
+
+
+def _declared_view(command: str, data: dict[str, Any]) -> str | None:
     value = data.get("effective_view")
     if not isinstance(value, str) and isinstance(data.get("summary"), dict):
         value = data["summary"].get("view")
     if not isinstance(value, str) and command == "inspect":
         value = data.get("kind")
-    if isinstance(value, str) and value in _SAFE_VIEWS:
-        return value
-    if command == "read" and data.get("windowed"):
-        return "windowed"
-    if command == "git-diff":
-        if isinstance(data.get("patch"), str):
-            return "patch"
-        if data.get("hunks"):
-            return "hunks"
-        return "summary"
-    return "default"
+    return value if isinstance(value, str) and value in _SAFE_VIEWS else None
+
+
+def _diff_view(data: dict[str, Any]) -> str:
+    if isinstance(data.get("patch"), str):
+        return "patch"
+    if data.get("hunks"):
+        return "hunks"
+    return "summary"
 
 
 def _evidence_identity(
@@ -181,12 +191,15 @@ def _json_attribution(command: str, value: Any) -> dict[str, int]:
     return result
 
 
-def _evidence_fragments(
-    command: str, data: dict[str, Any]
-) -> dict[str, list[Hashable]]:
-    fragments: dict[str, list[Hashable]] = defaultdict(list)
+class _EvidenceCollector:
+    """Collect reusable evidence fragments and the identities they belong to."""
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.fragments: dict[str, list[Hashable]] = defaultdict(list)
 
     def walk(
+        self,
         current: Any,
         ancestors: tuple[str, ...] = (),
         path_hint: str = "",
@@ -194,25 +207,43 @@ def _evidence_fragments(
         key: str | None = None,
     ) -> None:
         if isinstance(current, dict):
-            local_path = current.get("path") or current.get("file") or path_hint
-            local_path = str(local_path) if isinstance(local_path, str) else path_hint
-            for child_key, child in current.items():
-                walk(
-                    child,
-                    (*ancestors, str(child_key)),
-                    local_path,
-                    current,
-                    str(child_key),
-                )
+            self._walk_dict(current, ancestors, path_hint)
             return
         if isinstance(current, list):
             for child in current:
-                walk(child, ancestors, path_hint, parent, None)
+                self.walk(child, ancestors, path_hint, parent, None)
             return
+        self._record(current, ancestors, path_hint, parent, key)
+
+    def _walk_dict(
+        self,
+        current: dict[str, Any],
+        ancestors: tuple[str, ...],
+        path_hint: str,
+    ) -> None:
+        local_path = current.get("path") or current.get("file") or path_hint
+        local_path = str(local_path) if isinstance(local_path, str) else path_hint
+        for child_key, child in current.items():
+            self.walk(
+                child,
+                (*ancestors, str(child_key)),
+                local_path,
+                current,
+                str(child_key),
+            )
+
+    def _record(
+        self,
+        current: Any,
+        ancestors: tuple[str, ...],
+        path_hint: str,
+        parent: dict[str, Any] | None,
+        key: str | None,
+    ) -> None:
         if not isinstance(current, str) or len(current) < 2:
             return
         identity = _evidence_identity(
-            command, key, current, parent, ancestors, path_hint
+            self.command, key, current, parent, ancestors, path_hint
         )
         if identity is None:
             return
@@ -220,11 +251,16 @@ def _evidence_fragments(
         for index, fragment in enumerate(values):
             if len(fragment) >= 2:
                 candidate = (*identity, index) if len(values) > 1 else identity
-                if candidate not in fragments[fragment]:
-                    fragments[fragment].append(candidate)
+                if candidate not in self.fragments[fragment]:
+                    self.fragments[fragment].append(candidate)
 
-    walk(data)
-    return fragments
+
+def _evidence_fragments(
+    command: str, data: dict[str, Any]
+) -> dict[str, list[Hashable]]:
+    collector = _EvidenceCollector(command)
+    collector.walk(data)
+    return collector.fragments
 
 
 def _text_attribution(

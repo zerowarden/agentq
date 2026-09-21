@@ -10,7 +10,11 @@ from .evidence import (
     HEURISTIC,
     SAMPLED,
     SCAN_CAP,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .paths import resolve_repo_path

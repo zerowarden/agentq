@@ -7,8 +7,9 @@ semantic options, normalized scopes, collection limits, presentation policy.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .contracts._base import ContractError, canonical_json
 from .contracts.request import (

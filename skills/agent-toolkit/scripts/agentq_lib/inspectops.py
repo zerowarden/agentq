@@ -8,6 +8,7 @@ from typing import Any
 from .budgeting import RenderedText, budget_text_records, rendered_text
 from .common import AgentQError, classify_path, ensure_within, language_for, relpath
 from .evidence import LEXICAL, best_provenance, merge_coverage
+from .evidence import complete as complete_coverage
 from .impact import nearest_manifest
 from .navigation import resolve_symbol
 from .pythonnav import render_python_overview

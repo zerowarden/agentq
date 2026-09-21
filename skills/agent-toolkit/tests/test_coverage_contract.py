@@ -46,17 +46,23 @@ class CoverageWireTests(unittest.TestCase):
         self.assertEqual(wire["matched"], 3)
         self.assertEqual(wire["count_quality"], "exact")
 
-    def test_counts_reject_booleans_and_negatives(self) -> None:
-        with self.assertRaises(ContractError):
-            evidence.typed_coverage(evidence.COMPLETE, matched=True)
-        with self.assertRaises(ContractError):
-            evidence.typed_coverage(evidence.COMPLETE, scanned=-1)
-
-    def test_invalid_status_rejected_at_boundary(self) -> None:
-        with self.assertRaises(ContractError):
-            evidence.Coverage(status="finished")
-        with self.assertRaises(ContractError):
-            evidence.Coverage(status=evidence.COMPLETE, count_quality="sort-of")
+    def test_invalid_coverage_inputs_are_rejected(self) -> None:
+        cases = {
+            "boolean count": lambda: evidence.typed_coverage(
+                evidence.COMPLETE, matched=True
+            ),
+            "negative count": lambda: evidence.typed_coverage(
+                evidence.COMPLETE, scanned=-1
+            ),
+            "unknown status": lambda: evidence.Coverage(status="finished"),
+            "unknown count quality": lambda: evidence.Coverage(
+                status=evidence.COMPLETE, count_quality="sort-of"
+            ),
+        }
+        for label, call in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(ContractError):
+                    call()
 
 
 class CoverageMergeLawTests(unittest.TestCase):

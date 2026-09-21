@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
 import re
 import shlex
-import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .budgeting import budget_text_records
 from .common import (
@@ -17,19 +16,22 @@ from .common import (
     find_executable,
     is_sensitive_path,
     redact_text,
-    relpath,
     run_cmd,
 )
+from .context_cache import diff_cache_key, diff_repeat_advice, remember_diff
 from .evidence import (
     LEXICAL,
     RESULT_LIMIT,
     SAMPLED,
-    complete as complete_coverage,
-    coverage as coverage_block,
     merge_coverage,
 )
+from .evidence import (
+    complete as complete_coverage,
+)
+from .evidence import (
+    coverage as coverage_block,
+)
 from .paths import resolve_repo_path
-from .context_cache import diff_cache_key, diff_repeat_advice, remember_diff
 
 
 def _truncated_coverage(*truncated: bool) -> dict[str, Any]:
@@ -289,7 +291,7 @@ def _parse_numstat(raw: str) -> dict[str, tuple[int | None, int | None]]:
             if path:
                 out[path] = (added, deleted)
             elif i + 1 < len(parts):
-                old, new = parts[i], parts[i + 1]
+                new = parts[i + 1]
                 i += 2
                 out[new] = (added, deleted)
     return out
@@ -300,33 +302,59 @@ def _stream_diff(
     git_args: list[str],
     consume: Callable[[str], bool],
 ) -> bool:
-    env = os.environ.copy()
-    env.update({"NO_COLOR": "1", "TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat"})
-    proc = subprocess.Popen(
-        ["git", *git_args],
-        cwd=root,
-        text=True,
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
+    from .contracts.execution import ExecutionSpec, StopReason, StreamMode
+    from .process import (
+        STREAM_RECORD_LIMIT_BYTES,
+        is_spawn_failure,
+        raise_if_cancelled,
+        route_stdout,
+        supervise,
     )
+
+    stderr_chunks: list[str] = []
     stopped = False
-    assert proc.stdout is not None
-    for raw in proc.stdout:
-        line = raw.rstrip("\r\n")
-        if not consume(line):
+
+    def handle(event) -> bool:
+        nonlocal stopped
+        if not consume(event.text.rstrip("\r\n")):
             stopped = True
-            proc.terminate()
-            break
-    try:
-        _, stderr = proc.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        _, stderr = proc.communicate()
-    if proc.returncode not in (0, 1, -15) and not stopped:
+            return False
+        return True
+
+    outcome = supervise(
+        ExecutionSpec(
+            argv=("git", *git_args),
+            cwd=str(root),
+            stream_mode=StreamMode.SEPARATE,
+            deadline_seconds=300,
+            record_limit_bytes=STREAM_RECORD_LIMIT_BYTES,
+            env=(
+                ("NO_COLOR", "1"),
+                ("TERM", "dumb"),
+                ("PAGER", "cat"),
+                ("GIT_PAGER", "cat"),
+            ),
+        ),
+        route_stdout(handle, stderr_chunks),
+    )
+    raise_if_cancelled(outcome)
+    if is_spawn_failure(outcome.stop_reason):
+        raise AgentQError("git is required for diff inspection")
+    if outcome.stop_reason is StopReason.TIMEOUT:
+        raise AgentQError("git diff timed out")
+    if outcome.stop_reason is StopReason.CAPTURE_ERROR:
         raise AgentQError(
-            compact_line(stderr or f"git diff exited with {proc.returncode}", 600)
+            compact_line(
+                outcome.error_detail
+                or "git diff output exceeded the bounded record capture limit",
+                600,
+            )
+        )
+    returncode = outcome.child_returncode
+    if returncode not in (0, 1) and not stopped:
+        stderr = "".join(stderr_chunks)
+        raise AgentQError(
+            compact_line(stderr or f"git diff exited with {returncode}", 600)
         )
     return stopped
 

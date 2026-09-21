@@ -82,40 +82,8 @@ class PlannedFile:
                 self.postimage_sha256, f"planned file postimage hash for {self.path}"
             )
         require_int(self.matches, "planned file match count", minimum=0)
-        previous_end = -1
-        for span in self.match_spans:
-            if (
-                not isinstance(span, tuple)
-                or len(span) != 2
-                or isinstance(span[0], bool)
-                or isinstance(span[1], bool)
-                or not isinstance(span[0], int)
-                or not isinstance(span[1], int)
-            ):
-                raise ContractError(
-                    f"planned file {self.path} has a malformed match span"
-                )
-            start, end = span
-            if start < 0 or end < start:
-                raise ContractError(
-                    f"planned file {self.path} has an invalid match span"
-                )
-            if start < previous_end:
-                raise ContractError(
-                    f"planned file {self.path} has overlapping or unordered match spans"
-                )
-            previous_end = end
-        previous_end = -1
-        for edit in self.edits:
-            if not isinstance(edit, ByteEdit):
-                raise ContractError(
-                    f"planned file {self.path} edits must be ByteEdit values"
-                )
-            if edit.start < previous_end:
-                raise ContractError(
-                    f"planned file {self.path} has overlapping or unordered edits"
-                )
-            previous_end = edit.end
+        _validate_match_spans(self.path, self.match_spans)
+        _validate_edits(self.path, self.edits)
         if self.edits and not self.postimage_sha256:
             raise ContractError(
                 f"planned file {self.path} with exact edits requires a postimage hash"
@@ -134,6 +102,44 @@ class PlannedFile:
         if self.postimage_sha256 is not None:
             wire["postimage_sha256"] = self.postimage_sha256
         return wire
+
+
+def _is_match_span(span: object) -> bool:
+    return (
+        isinstance(span, tuple)
+        and len(span) == 2
+        and not isinstance(span[0], bool)
+        and not isinstance(span[1], bool)
+        and isinstance(span[0], int)
+        and isinstance(span[1], int)
+    )
+
+
+def _validate_match_spans(path: str, spans: tuple[tuple[int, int], ...]) -> None:
+    previous_end = -1
+    for span in spans:
+        if not _is_match_span(span):
+            raise ContractError(f"planned file {path} has a malformed match span")
+        start, end = span
+        if start < 0 or end < start:
+            raise ContractError(f"planned file {path} has an invalid match span")
+        if start < previous_end:
+            raise ContractError(
+                f"planned file {path} has overlapping or unordered match spans"
+            )
+        previous_end = end
+
+
+def _validate_edits(path: str, edits: tuple[ByteEdit, ...]) -> None:
+    previous_end = -1
+    for edit in edits:
+        if not isinstance(edit, ByteEdit):
+            raise ContractError(f"planned file {path} edits must be ByteEdit values")
+        if edit.start < previous_end:
+            raise ContractError(
+                f"planned file {path} has overlapping or unordered edits"
+            )
+        previous_end = edit.end
 
 
 @dataclass(frozen=True)

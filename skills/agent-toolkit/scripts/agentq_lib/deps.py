@@ -5,12 +5,16 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
-from .common import AgentQError, compact_line, find_executable, run_cmd
+from .common import AgentQError, find_executable, run_cmd
 from .evidence import (
     RESULT_LIMIT,
     SAMPLED,
     SYNTACTIC,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .workspace import discover_workspace
@@ -102,45 +106,59 @@ def _cargo_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
     return nodes, edges
 
 
+class _CycleFinder:
+    """Tarjan strongly-connected components over a package adjacency map."""
+
+    def __init__(self, adjacency: dict[str, list[str]]) -> None:
+        self.adjacency = adjacency
+        self.index = 0
+        self.indices: dict[str, int] = {}
+        self.low: dict[str, int] = {}
+        self.stack: list[str] = []
+        self.on_stack: set[str] = set()
+        self.found: list[list[str]] = []
+
+    def visit(self, node: str) -> None:
+        self.indices[node] = self.low[node] = self.index
+        self.index += 1
+        self.stack.append(node)
+        self.on_stack.add(node)
+        for nxt in self.adjacency.get(node, []):
+            self._visit_neighbour(node, nxt)
+        if self.low[node] == self.indices[node]:
+            component = self._pop_component(node)
+            if len(component) > 1 or self._is_self_loop(component):
+                self.found.append(sorted(component))
+
+    def _visit_neighbour(self, node: str, nxt: str) -> None:
+        if nxt not in self.indices:
+            self.visit(nxt)
+            self.low[node] = min(self.low[node], self.low[nxt])
+        elif nxt in self.on_stack:
+            self.low[node] = min(self.low[node], self.indices[nxt])
+
+    def _pop_component(self, node: str) -> list[str]:
+        component: list[str] = []
+        while self.stack:
+            item = self.stack.pop()
+            self.on_stack.remove(item)
+            component.append(item)
+            if item == node:
+                break
+        return component
+
+    def _is_self_loop(self, component: list[str]) -> bool:
+        return bool(component) and component[0] in self.adjacency.get(component[0], [])
+
+
 def _cycles(
     node_ids: list[str], adjacency: dict[str, list[str]], limit: int = 20
 ) -> list[list[str]]:
-    index = 0
-    indices: dict[str, int] = {}
-    low: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    found: list[list[str]] = []
-
-    def visit(node: str) -> None:
-        nonlocal index
-        indices[node] = low[node] = index
-        index += 1
-        stack.append(node)
-        on_stack.add(node)
-        for nxt in adjacency.get(node, []):
-            if nxt not in indices:
-                visit(nxt)
-                low[node] = min(low[node], low[nxt])
-            elif nxt in on_stack:
-                low[node] = min(low[node], indices[nxt])
-        if low[node] == indices[node]:
-            component = []
-            while stack:
-                item = stack.pop()
-                on_stack.remove(item)
-                component.append(item)
-                if item == node:
-                    break
-            if len(component) > 1 or (
-                component and component[0] in adjacency.get(component[0], [])
-            ):
-                found.append(sorted(component))
-
+    finder = _CycleFinder(adjacency)
     for node in node_ids:
-        if node not in indices and len(found) < limit:
-            visit(node)
-    return found[:limit]
+        if node not in finder.indices and len(finder.found) < limit:
+            finder.visit(node)
+    return finder.found[:limit]
 
 
 def _walk(

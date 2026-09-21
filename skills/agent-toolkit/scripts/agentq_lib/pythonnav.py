@@ -16,12 +16,16 @@ from .common import (
     scope_match,
 )
 from .evidence import (
-    PARTIAL,
     PARSE_ERROR,
+    PARTIAL,
     REFERENCE_LIMIT,
     SAMPLED,
     SYNTACTIC,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 

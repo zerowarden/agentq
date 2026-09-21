@@ -5,12 +5,16 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .common import classify_path, compact_line, is_sensitive_path
+from .common import classify_path, is_sensitive_path
 from .evidence import (
     HEURISTIC,
     RESULT_LIMIT,
     SAMPLED,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .gitops import _parse_diff_header_paths, diff_data, status_data

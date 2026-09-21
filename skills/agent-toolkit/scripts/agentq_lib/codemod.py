@@ -32,7 +32,11 @@ from .evidence import (
     RESULT_LIMIT,
     SAMPLED,
     SYNTACTIC,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .paths import RepoPath, resolve_repo_path, resolve_repo_scopes

@@ -841,7 +841,14 @@ class AgentQIntegrationTest(unittest.TestCase):
     def test_compact_run_redacts_output_and_retains_local_log(self) -> None:
         code = "import sys; print('token=supersecretvalue'); print('-----BEGIN PRIVATE KEY-----'); print('BASE64KEYMATERIAL'); print('-----END PRIVATE KEY-----'); print('ERROR sample', file=sys.stderr); raise SystemExit(3)"
         data = self.data(
-            "run", "--label", "redaction-test", "--", "python3", "-c", code
+            "run",
+            "--label",
+            "redaction-test",
+            "--",
+            "python3",
+            "-c",
+            code,
+            expect=3,
         )
         self.assertEqual(data["exit_code"], 3)
         visible = json.dumps(data)
@@ -1771,7 +1778,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertFalse(service.exists())
 
     def test_stats_distinguishes_tool_health_from_child_command_failure(self) -> None:
-        self.data("run", "--", "python3", "-c", "raise SystemExit(7)")
+        self.data("run", "--", "python3", "-c", "raise SystemExit(7)", expect=7)
         stats = self.data("stats", "--since", "all")
         self.assertEqual(stats["tool_errors"], 0)
         self.assertEqual(stats["project_commands"]["failed"], 1)
@@ -2007,7 +2014,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.data("search", "OldName", "--budget", "2048")
         self.data("read", "packages/a/src/index.ts:1-3")
         self.data("read", "packages/a/src/index.ts:2-4")
-        self.data("run", "--", "python3", "-c", "raise SystemExit(3)")
+        self.data("run", "--", "python3", "-c", "raise SystemExit(3)", expect=3)
         self.data("search", "Wrapped")
         self.data("run", "--", "python3", "-c", "print('ok')")
         self.data("task", "accept")
@@ -2201,7 +2208,7 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertEqual(stats["threads"], 2)
 
     def test_stats_plain_render_uses_semantic_markers_and_local_window(self) -> None:
-        self.data("run", "--", "python3", "-c", "raise SystemExit(3)")
+        self.data("run", "--", "python3", "-c", "raise SystemExit(3)", expect=3)
         argv = [
             str(AGENTQ),
             "stats",
@@ -2318,7 +2325,7 @@ class AgentQIntegrationTest(unittest.TestCase):
             )
 
         self.data("search", "OldName")
-        self.data("run", "--", "python3", "-c", "raise SystemExit(3)")
+        self.data("run", "--", "python3", "-c", "raise SystemExit(3)", expect=3)
         self.aq("inspect", "packages", "--bogus", expect=2)
         stats = self.data("stats", "--since", "all")
         model = stats_presentation_model(stats)
@@ -3418,7 +3425,14 @@ class AgentQIntegrationTest(unittest.TestCase):
     def test_run_profiles_control_environment_and_retention(self) -> None:
         failing = "import os, sys; print('CI=%s' % os.environ.get('CI'), file=sys.stderr); raise SystemExit(3)"
         transparent = self.data(
-            "run", "--profile", "transparent", "--", "python3", "-c", failing
+            "run",
+            "--profile",
+            "transparent",
+            "--",
+            "python3",
+            "-c",
+            failing,
+            expect=3,
         )
         self.assertEqual(transparent["profile"], "transparent")
         self.assertIn("CI=None", transparent["tail"][-1])

@@ -11,17 +11,22 @@ import sys
 import tempfile
 import time
 import tracemalloc
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from agentq_lib.gitops import render_diff
-from agentq_lib.runtime import repo_id
-from agentq_lib.search import render_read, render_search
-from agentq_lib.telemetry import SCHEMA, _append_jsonl_many_unlocked, stats_data
+from agentq_lib.gitops import render_diff  # noqa: E402
+from agentq_lib.runtime import repo_id  # noqa: E402
+from agentq_lib.search import render_read, render_search  # noqa: E402
+from agentq_lib.telemetry import (  # noqa: E402
+    SCHEMA,
+    _append_jsonl_many_unlocked,
+    stats_data,
+)
 
 EVENT_SIZES = (10_000, 100_000, 1_000_000)
 RESULT_RECORD_SIZES = (10_000, 100_000)
@@ -361,18 +366,20 @@ def run_benchmarks(
                 fixture = _measure(
                     "telemetry-fixture",
                     count,
-                    lambda: _fixture_case(archive, count, repository_id, root.name),
+                    lambda archive=archive, count=count: _fixture_case(
+                        archive, count, repository_id, root.name
+                    ),
                 )
                 measurements.append(fixture)
                 default = _measure(
                     "stats-default",
                     count,
-                    lambda: _stats_case(root, count, detailed=False),
+                    lambda count=count: _stats_case(root, count, detailed=False),
                 )
                 detailed = _measure(
                     "stats-detailed",
                     count,
-                    lambda: _stats_case(root, count, detailed=True),
+                    lambda count=count: _stats_case(root, count, detailed=True),
                 )
                 measurements.extend((default, detailed))
                 detail_wall = float(detailed["wall_seconds"])
@@ -403,21 +410,27 @@ def run_benchmarks(
                 _measure(
                     "diff-render",
                     result_records,
-                    lambda: _diff_case(result_records, budget),
+                    lambda result_records=result_records: _diff_case(
+                        result_records, budget
+                    ),
                 )
             )
             measurements.append(
                 _measure(
                     "search-render",
                     result_records,
-                    lambda: _search_case(result_records, budget),
+                    lambda result_records=result_records: _search_case(
+                        result_records, budget
+                    ),
                 )
             )
             measurements.append(
                 _measure(
                     "read-render",
                     result_records,
-                    lambda: _read_case(result_records, budget),
+                    lambda result_records=result_records: _read_case(
+                        result_records, budget
+                    ),
                 )
             )
     return {

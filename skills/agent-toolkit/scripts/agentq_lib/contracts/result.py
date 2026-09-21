@@ -93,11 +93,10 @@ class ProviderResult(Generic[PayloadT]):
             ProviderStatus.NOT_APPLICABLE,
             ProviderStatus.UNAVAILABLE,
             ProviderStatus.FAILED,
-        }:
-            if self.payload is not None:
-                raise ContractError(
-                    f"{self.status.value} provider result must not carry a payload"
-                )
+        } and self.payload is not None:
+            raise ContractError(
+                f"{self.status.value} provider result must not carry a payload"
+            )
         if (
             self.status in {ProviderStatus.UNAVAILABLE, ProviderStatus.FAILED}
             and self.coverage.is_complete()

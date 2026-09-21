@@ -171,6 +171,8 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="skill-pycache-") as cache:
             env = os.environ.copy()
             env["PYTHONPYCACHEPREFIX"] = cache
+            # Out-of-scope subprocess use: repository validation probes, not
+            # agent command lifecycles.
             result = subprocess.run(
                 [sys.executable, "-m", "py_compile", *map(str, python_files)],
                 text=True,

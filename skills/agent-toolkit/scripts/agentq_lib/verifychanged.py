@@ -6,9 +6,13 @@ from typing import Any
 
 from .evidence import (
     HEURISTIC,
-    STEP_LIMIT,
     SAMPLED,
+    STEP_LIMIT,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .runops import run_compact

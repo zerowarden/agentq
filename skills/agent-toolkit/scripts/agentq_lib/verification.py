@@ -13,10 +13,12 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
-import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
+
+import tomllib
 
 from .common import AgentQError, relpath
 from .evidence import (
@@ -24,20 +26,24 @@ from .evidence import (
     RESULT_LIMIT,
     SAMPLED,
     STEP_LIMIT,
+)
+from .evidence import (
     complete as complete_coverage,
+)
+from .evidence import (
     coverage as coverage_block,
 )
 from .workspace import (
     CONFIG_RE,
     SOURCE_SUFFIXES,
     TEST_RE,
-    matches_pattern,
     dependency_order,
     discover_workspace,
     find_script,
     has_vitest,
     is_docs_only,
     is_global_change,
+    matches_pattern,
     owner_for_file,
     package_exec_argv,
     package_manager,
@@ -649,7 +655,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def _dependency_name(spec: str) -> str:
-    return re.split(r"[<>=!;@\[ \]]", spec.strip(), 1)[0].strip().lower()
+    return re.split(r"[<>=!;@\[ \]]", spec.strip(), maxsplit=1)[0].strip().lower()
 
 
 class PythonVerificationProvider:
@@ -994,7 +1000,6 @@ class CargoVerificationProvider:
             )
             for key, obj in manifests.items()
         }
-        by_name = {unit.name: key for key, unit in units.items()}
         resolved: dict[str, PackageUnit] = {}
         for key, obj in manifests.items():
             unit = units[key]

@@ -13,12 +13,13 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable
+from typing import Any
 
 from .common import AgentQError, bound_output, human_bytes
 from .context_cache import context_cache_enabled, diff_payload, read_ranges
@@ -29,7 +30,6 @@ from .output_attribution import (
     empty_attribution,
 )
 from .runtime import (
-    env_enabled,
     repo_id,
     secure_dir,
     stable_id,
@@ -211,6 +211,8 @@ def install_persistence(*, interval: str = DEFAULT_ARCHIVE_INTERVAL) -> dict[str
         timer.write_text(timer_text, encoding="utf-8")
         service.chmod(0o600)
         timer.chmod(0o600)
+        # Out-of-scope subprocess use: operational systemd persistence commands,
+        # not agent command lifecycles.
         subprocess.run([systemctl, "--user", "daemon-reload"], check=True, timeout=5)
         subprocess.run(
             [systemctl, "--user", "enable", "--now", ARCHIVE_TIMER],
@@ -2327,7 +2329,7 @@ def _transition_counts(
     counts: Counter[tuple[str, str]] = Counter()
     origins: Counter[str] = Counter()
     for items in contexts.values():
-        for left, right in zip(items, items[1:]):
+        for left, right in zip(items, items[1:], strict=False):
             if float(right.get("time", 0)) - float(left.get("time", 0)) > 30 * 60:
                 continue
             source, target = label(left), label(right)
@@ -2383,7 +2385,7 @@ def read_chain_behavior(
     ]
     consecutive = same_file = adjacent = 0
     for items in contexts.values():
-        for left, right in zip(items, items[1:]):
+        for left, right in zip(items, items[1:], strict=False):
             if left.get("command") != "read" or right.get("command") != "read":
                 continue
             if float(right.get("time", 0)) - float(left.get("time", 0)) > 30 * 60:
@@ -3908,8 +3910,13 @@ def _render_segments(row: dict[str, Any], *, ansi: bool) -> str:
 
 def _render_stats_text(data: dict[str, Any], *, utc: bool, ansi: bool) -> str:
     model = stats_presentation_model(data, utc=utc)
-    heading = lambda value: _ansi(str(value), _ANSI_ORANGE, ansi)
-    section_heading = lambda value: _ansi(str(value), _ANSI_SECTION, ansi)
+
+    def heading(value: Any) -> str:
+        return _ansi(str(value), _ANSI_ORANGE, ansi)
+
+    def section_heading(value: Any) -> str:
+        return _ansi(str(value), _ANSI_SECTION, ansi)
+
     lines = [heading(model["title"]), model["window"]]
     if model["empty"]:
         lines.extend(["", "No telemetry in this scope."])

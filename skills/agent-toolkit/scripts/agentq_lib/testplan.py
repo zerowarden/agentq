@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from .common import list_repo_files
-from .evidence import HEURISTIC, SAMPLED, STEP_LIMIT, coverage as coverage_block
+from .evidence import HEURISTIC, SAMPLED, STEP_LIMIT
+from .evidence import coverage as coverage_block
 from .verification import VERIFICATION_PROVIDERS, load_verify_config
 from .workspace import (
     changed_files,

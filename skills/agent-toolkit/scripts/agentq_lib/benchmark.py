@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import statistics
 import subprocess
 import tempfile
@@ -19,53 +18,69 @@ def benchmark_data(
         raise AgentQError("at least one --command is required")
     hyperfine = find_executable("hyperfine")
     if hyperfine:
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
-            output = Path(handle.name)
-        try:
-            args = [
-                hyperfine,
-                "--warmup",
-                str(warmup),
-                "--runs",
-                str(runs),
-                "--export-json",
-                str(output),
-                "--style",
-                "basic",
-            ]
-            if prepare:
-                args += ["--prepare", prepare]
-            args += commands
-            result = run_cmd(args, cwd=root, timeout=max(120, runs * 120))
-            if result.returncode != 0:
-                raise AgentQError(
-                    compact_line(
-                        result.stderr or result.stdout or "hyperfine failed", 600
-                    )
-                )
-            obj = json.loads(output.read_text(encoding="utf-8"))
-            results = []
-            for item in obj.get("results", []):
-                results.append(
-                    {
-                        "command": item.get("command"),
-                        "mean": item.get("mean"),
-                        "stddev": item.get("stddev"),
-                        "median": item.get("median"),
-                        "min": item.get("min"),
-                        "max": item.get("max"),
-                        "times": item.get("times", []),
-                    }
-                )
-            return {
-                "engine": "hyperfine",
-                "warmup": warmup,
-                "runs": runs,
-                "results": results,
-            }
-        finally:
-            output.unlink(missing_ok=True)
+        return _hyperfine_benchmark(hyperfine, root, commands, warmup, runs, prepare)
+    return _fallback_benchmark(root, commands, warmup, runs, prepare)
 
+
+def _hyperfine_benchmark(
+    executable: str,
+    root: Path,
+    commands: list[str],
+    warmup: int,
+    runs: int,
+    prepare: str | None,
+) -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        output = Path(handle.name)
+    try:
+        args = [
+            executable,
+            "--warmup",
+            str(warmup),
+            "--runs",
+            str(runs),
+            "--export-json",
+            str(output),
+            "--style",
+            "basic",
+        ]
+        if prepare:
+            args += ["--prepare", prepare]
+        args += commands
+        result = run_cmd(args, cwd=root, timeout=max(120, runs * 120))
+        if result.returncode != 0:
+            raise AgentQError(
+                compact_line(result.stderr or result.stdout or "hyperfine failed", 600)
+            )
+        obj = json.loads(output.read_text(encoding="utf-8"))
+        results = []
+        for item in obj.get("results", []):
+            results.append(
+                {
+                    "command": item.get("command"),
+                    "mean": item.get("mean"),
+                    "stddev": item.get("stddev"),
+                    "median": item.get("median"),
+                    "min": item.get("min"),
+                    "max": item.get("max"),
+                    "times": item.get("times", []),
+                }
+            )
+        return {
+            "engine": "hyperfine",
+            "warmup": warmup,
+            "runs": runs,
+            "results": results,
+        }
+    finally:
+        output.unlink(missing_ok=True)
+
+
+def _fallback_benchmark(
+    root: Path, commands: list[str], warmup: int, runs: int, prepare: str | None
+) -> dict[str, Any]:
+    # Out-of-scope subprocess use: the fallback timing harness intentionally runs
+    # user shell commands with DEVNULL and is not an agent command lifecycle.
     results = []
     for command in commands:
         if prepare:

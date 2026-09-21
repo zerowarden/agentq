@@ -11,14 +11,15 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from agentq_lib import codemod  # noqa: E402
-from agentq_lib import evidence  # noqa: E402
-from agentq_lib.paths import (
-    RepoPath,
-    RepoScope,
+from agentq_lib import (  # noqa: E402
+    codemod,
+    evidence,
+)
+from agentq_lib.common import AgentQError  # noqa: E402
+from agentq_lib.paths import (  # noqa: E402
     resolve_repo_path,
     resolve_repo_scopes,
-)  # noqa: E402
+)
 from agentq_lib.redaction import StreamingRedactor, redact_text  # noqa: E402
 
 AGENTQ = str(SCRIPTS / "agentq.py")
@@ -39,12 +40,12 @@ class PathConfinementTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_outside_relative_rejected(self) -> None:
-        with self.assertRaises(Exception):
+        with self.assertRaises(AgentQError):
             resolve_repo_path(self.repo, "../outside/package.json")
 
     def test_outside_absolute_rejected(self) -> None:
         outside = Path(self.temp.name) / "outside" / "package.json"
-        with self.assertRaises(Exception):
+        with self.assertRaises(AgentQError):
             resolve_repo_path(self.repo, str(outside))
 
     def test_nested_valid_path(self) -> None:
@@ -58,7 +59,7 @@ class PathConfinementTests(unittest.TestCase):
         self.assertEqual(rp.absolute, self.repo.resolve())
 
     def test_scopes_require_existence(self) -> None:
-        with self.assertRaises(Exception):
+        with self.assertRaises(AgentQError):
             resolve_repo_scopes(self.repo, ["does-not-exist"])
 
     def test_symlink_escaping_repository_rejected(self) -> None:
@@ -66,7 +67,7 @@ class PathConfinementTests(unittest.TestCase):
         outside.write_text("x")
         link = self.repo / "escape"
         link.symlink_to(outside)
-        with self.assertRaises(Exception):
+        with self.assertRaises(AgentQError):
             resolve_repo_path(self.repo, "escape")
 
     def test_symlink_inside_repository_allowed(self) -> None:
@@ -126,7 +127,7 @@ class RegexEquivalenceTests(unittest.TestCase):
 
     def test_backreference_replacement(self) -> None:
         (self.repo / "c.txt").write_text("a1 b2 c3\n")
-        result = codemod.apply_data(
+        codemod.apply_data(
             self.repo,
             r"(\w)(\d)",
             r"\2\1",
@@ -140,7 +141,7 @@ class RegexEquivalenceTests(unittest.TestCase):
         # A pattern accepted by Python re but not necessarily by ripgrep's default
         # regex engine must still scan/apply identically.
         (self.repo / "d.txt").write_text("abc123\n")
-        result = codemod.apply_data(
+        codemod.apply_data(
             self.repo,
             r"(?<=a)\w+",
             "X",
@@ -280,7 +281,7 @@ class SensitiveExclusionTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_sensitive_excluded_by_default(self) -> None:
-        result = codemod.apply_data(
+        codemod.apply_data(
             self.repo,
             "secret123",
             "REDACTED",
@@ -292,7 +293,7 @@ class SensitiveExclusionTests(unittest.TestCase):
         self.assertEqual((self.repo / ".env").read_text(), "password=secret123\n")
 
     def test_sensitive_included_with_flag(self) -> None:
-        result = codemod.apply_data(
+        codemod.apply_data(
             self.repo,
             "secret123",
             "REDACTED",

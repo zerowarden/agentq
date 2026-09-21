@@ -498,16 +498,33 @@ class VerificationContractTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
-    def test_plan_digest_mismatch_rejected(self) -> None:
-        plan = sample_plan()
-        plan["files"][0]["matches"] = 99
-        with self.assertRaises(ContractError):
-            MutationPlan.from_wire(plan)
-
-    def test_unknown_schema_rejected(self) -> None:
-        plan = sample_plan(schema="agentq.codemod-plan/v0")
-        with self.assertRaises(ContractError):
-            MutationPlan.from_wire(plan)
+    def test_malformed_plans_are_rejected(self) -> None:
+        tampered = sample_plan()
+        tampered["files"][0]["matches"] = 99
+        boolean_count = sample_plan()
+        boolean_count["files"][0]["matches"] = True
+        boolean_count["plan_id"] = plan_digest(boolean_count)
+        cases = {
+            "digest mismatch": tampered,
+            "unknown schema": sample_plan(schema="agentq.codemod-plan/v0"),
+            "boolean count": boolean_count,
+            "duplicate paths": sample_plan(
+                files=[
+                    {"path": "a.txt", "matches": 1},
+                    {"path": "a.txt", "matches": 1},
+                ]
+            ),
+        }
+        for label, plan in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(ContractError):
+                    MutationPlan.from_wire(plan)
+        for bad_path in (".", "..", "../x", "/etc/passwd", "src//a.txt", "src/"):
+            with self.subTest(path=bad_path):
+                with self.assertRaises(ContractError):
+                    MutationPlan.from_wire(
+                        sample_plan(files=[{"path": bad_path, "matches": 1}])
+                    )
 
     def test_ast_plan_requires_language(self) -> None:
         plan = sample_plan(engine="ast-grep")
@@ -515,29 +532,6 @@ class MutationContractTests(unittest.TestCase):
             MutationPlan.from_wire(plan)
         plan = sample_plan(engine="ast-grep", language="ts")
         self.assertEqual(MutationPlan.from_wire(plan).language, "ts")
-
-    def test_boolean_count_rejected(self) -> None:
-        plan = sample_plan()
-        plan["files"][0]["matches"] = True
-        plan["plan_id"] = plan_digest(plan)
-        with self.assertRaises(ContractError):
-            MutationPlan.from_wire(plan)
-
-    def test_directory_and_traversal_paths_rejected(self) -> None:
-        for bad in (".", "..", "../x", "/etc/passwd", "src//a.txt", "src/"):
-            plan = sample_plan(files=[{"path": bad, "matches": 1}])
-            with self.assertRaises(ContractError):
-                MutationPlan.from_wire(plan)
-
-    def test_duplicate_paths_rejected(self) -> None:
-        plan = sample_plan(
-            files=[
-                {"path": "a.txt", "matches": 1},
-                {"path": "a.txt", "matches": 1},
-            ]
-        )
-        with self.assertRaises(ContractError):
-            MutationPlan.from_wire(plan)
 
     def test_edits_must_be_ordered_and_hashed(self) -> None:
         with self.assertRaises(ContractError):

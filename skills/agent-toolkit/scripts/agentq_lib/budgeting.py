@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 _MISSING = object()
 _PREFERRED_LISTS = (
@@ -71,7 +72,7 @@ def _project(
         projected: list[Any] = []
         used = 2
         encoded_items = [_encode(item) for item in value]
-        for index, (item, encoded) in enumerate(zip(value, encoded_items)):
+        for index, (item, encoded) in enumerate(zip(value, encoded_items, strict=True)):
             cost = len(encoded) + (1 if projected else 0)
             if used + cost > budget:
                 _record_omission(omitted, path, len(value) - index)
@@ -187,7 +188,7 @@ def budget_text_records(
     if total_count is None or budget <= 0:
         materialized = [record.rstrip() for record in records if record.rstrip()]
         total_count = len(materialized)
-        full = separator.join((([prefix] if prefix else []) + materialized))
+        full = separator.join(([prefix] if prefix else []) + materialized)
         full_chars = len(full)
         if budget <= 0 or len(full) <= budget:
             return rendered_text(full, prebudget_chars=full_chars), False

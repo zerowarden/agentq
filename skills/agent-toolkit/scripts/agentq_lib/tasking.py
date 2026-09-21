@@ -222,32 +222,40 @@ def _duration(seconds: int | None) -> str:
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
+_TASK_SIMPLE_RENDERINGS = {
+    "begin": "task started",
+    "next": "task accepted; next task started",
+    "accept": "task accepted",
+    "abandon": "task abandoned",
+}
+
+
 def render_task(data: dict[str, Any]) -> str:
     action = data.get("action")
     if action == "changes":
-        files = data.get("files") or []
-        lines = [f"task changes: {len(files)} files"]
-        lines.extend(f"  {path}" for path in files)
-        excluded = data.get("excluded_preexisting_unchanged") or []
-        if excluded:
-            lines.append(f"excluded unchanged pre-task dirty files: {len(excluded)}")
-        ambiguous = data.get("ambiguous_preexisting") or []
-        if ambiguous:
-            lines.append(
-                f"changed from already-dirty baseline: {len(ambiguous)} (attribution conservative)"
-            )
-        return "\n".join(lines)
+        return _render_task_changes(data)
     if action == "status":
-        if not data.get("active"):
-            return "no active task"
-        age = _duration(data.get("age_seconds"))
-        return "task active" + (f" · {age}" if age else "")
-    if action == "begin":
-        return "task started"
-    if action == "next":
-        return "task accepted; next task started"
-    if action == "accept":
-        return "task accepted"
-    if action == "abandon":
-        return "task abandoned"
-    return "task state updated"
+        return _render_task_status(data)
+    return _TASK_SIMPLE_RENDERINGS.get(str(action), "task state updated")
+
+
+def _render_task_changes(data: dict[str, Any]) -> str:
+    files = data.get("files") or []
+    lines = [f"task changes: {len(files)} files"]
+    lines.extend(f"  {path}" for path in files)
+    excluded = data.get("excluded_preexisting_unchanged") or []
+    if excluded:
+        lines.append(f"excluded unchanged pre-task dirty files: {len(excluded)}")
+    ambiguous = data.get("ambiguous_preexisting") or []
+    if ambiguous:
+        lines.append(
+            f"changed from already-dirty baseline: {len(ambiguous)} (attribution conservative)"
+        )
+    return "\n".join(lines)
+
+
+def _render_task_status(data: dict[str, Any]) -> str:
+    if not data.get("active"):
+        return "no active task"
+    age = _duration(data.get("age_seconds"))
+    return "task active" + (f" · {age}" if age else "")

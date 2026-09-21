@@ -6,11 +6,10 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .budgeting import budget_text_records, rendered_text
 from .common import (
@@ -26,7 +25,6 @@ from .common import (
     parse_json_lines,
     redact_text,
     relpath,
-    repo_root,
     run_cmd,
     safe_int,
     scope_match,
@@ -40,9 +38,13 @@ from .evidence import (
     SAMPLED,
     SCAN_CAP,
     SYNTACTIC,
-    complete as complete_coverage,
-    coverage as coverage_block,
     status_of,
+)
+from .evidence import (
+    complete as complete_coverage,
+)
+from .evidence import (
+    coverage as coverage_block,
 )
 from .pythonnav import python_outline
 from .redaction import StreamingRedactor
@@ -240,24 +242,15 @@ def _matching_line_counts(
         include_sensitive=include_sensitive,
     )
     args += ["--", query, *scopes]
-    result = subprocess.run(
-        args,
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
-        timeout=90,
-    )
+    result = run_cmd(args, cwd=root, timeout=90, env={"NO_COLOR": "1", "TERM": "dumb"})
     if result.returncode not in (0, 1):
-        raise _rg_error(
-            result.stderr.decode("utf-8", errors="replace"), result.returncode
-        )
+        raise _rg_error(result.stderr, result.returncode)
     counts: dict[str, int] = {}
     for record in result.stdout.splitlines():
-        if b"\0" not in record:
+        if "\0" not in record:
             continue
-        raw_path, raw_count = record.rsplit(b"\0", 1)
-        path = raw_path.decode("utf-8", errors="replace").replace(os.sep, "/")
+        raw_path, raw_count = record.rsplit("\0", 1)
+        path = raw_path.replace(os.sep, "/")
         while path.startswith("./"):
             path = path[2:]
         if not path or (not include_sensitive and is_sensitive_path(path)):
@@ -485,31 +478,25 @@ def search_data(
         include_sensitive=include_sensitive,
     )
     sample_args += ["--", query, *scopes]
-    proc = subprocess.Popen(
-        sample_args,
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
-    )
     hits: list[dict[str, Any]] = []
     candidate_chars = 0
     scan_limited = False
-    assert proc.stdout is not None
-    for raw_event in proc.stdout:
+    stderr_chunks: list[str] = []
+
+    def handle(event) -> bool:
+        nonlocal candidate_chars, scan_limited
         try:
-            event = json.loads(raw_event)
+            payload_event = json.loads(event.text)
         except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        payload = event.get("data") or {}
+            return True
+        if payload_event.get("type") != "match":
+            return True
+        payload = payload_event.get("data") or {}
         path = ((payload.get("path") or {}).get("text") or "").replace(os.sep, "/")
         while path.startswith("./"):
             path = path[2:]
         if not path or (not include_sensitive and is_sensitive_path(path)):
-            continue
+            return True
         line_number = safe_int(payload.get("line_number"))
         line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
         candidate_chars += len(line)
@@ -556,15 +543,39 @@ def search_data(
         )
         if len(hits) >= max(scan_cap, limit):
             scan_limited = True
-            proc.terminate()
-            break
-    try:
-        _, stderr = proc.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        _, stderr = proc.communicate()
-    if proc.returncode not in (0, 1, -15) and not scan_limited:
-        raise _rg_error(stderr or "", proc.returncode)
+            return False
+        return True
+
+    from .contracts.execution import ExecutionSpec, StopReason, StreamMode
+    from .process import (
+        STREAM_RECORD_LIMIT_BYTES,
+        is_spawn_failure,
+        raise_if_cancelled,
+        route_stdout,
+        supervise,
+    )
+
+    outcome = supervise(
+        ExecutionSpec(
+            argv=tuple(sample_args),
+            cwd=str(root),
+            stream_mode=StreamMode.SEPARATE,
+            deadline_seconds=90,
+            record_limit_bytes=STREAM_RECORD_LIMIT_BYTES,
+            env=(("NO_COLOR", "1"), ("TERM", "dumb")),
+        ),
+        route_stdout(handle, stderr_chunks),
+    )
+    raise_if_cancelled(outcome)
+    stderr = "".join(stderr_chunks)
+    if is_spawn_failure(outcome.stop_reason):
+        raise AgentQError("ripgrep (rg) is required for compact repository search")
+    if outcome.stop_reason is StopReason.CAPTURE_ERROR:
+        raise AgentQError("ripgrep output exceeded the bounded record capture limit")
+    if outcome.stop_reason is StopReason.TIMEOUT:
+        raise _rg_error(stderr, 124)
+    if outcome.child_returncode not in (0, 1) and not scan_limited:
+        raise _rg_error(stderr or "", outcome.child_returncode or 1)
     if coverage_policy == "exact":
         count_quality = "exact"
     else:
@@ -1202,7 +1213,7 @@ def render_search(data: dict[str, Any], *, budget: int = 0) -> str:
         footer.append(line)
     budget_continuation = data.get("budget_continuation") or {}
     budget_command = budget_continuation.get("command")
-    omission = f"… {{count}} complete blocks omitted by render budget"
+    omission = "… {count} complete blocks omitted by render budget"
     if budget_command:
         omission += f"; continue: {budget_command}"
     records = [_search_file_block(item, view=view, samples=samples) for item in files]

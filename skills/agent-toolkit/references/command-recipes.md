@@ -64,6 +64,15 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 
 ## Verification and review
 
+`agentq run` exits with the wrapped command's shell outcome: the child exit
+code, `124` on deadline, `126`/`127` on spawn failure, `130`/`143` on
+cancellation, and `70` on a wrapper failure. Shell chains such as
+`agentq run -- failing-command && next-command` therefore stop on failure.
+JSON output keeps wrapper and child facts separately under `execution`.
+Incomplete output capture is a wrapper failure (`70`): a command whose
+descendant outlives the leader and retains the pipes is terminated and reported
+as `FAIL`, never as an implicit success.
+
 ```bash
 "$AQ" run -- pnpm --filter @app/dispatch test
 "$AQ" run --cwd crates/engine -- cargo check

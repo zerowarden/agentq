@@ -7,13 +7,13 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
-from .redaction import SECRET_PATTERNS, redact_text
+from .redaction import redact_text
 
 VERSION = "1.8.0"
 
@@ -168,6 +168,22 @@ class AgentQError(RuntimeError):
     pass
 
 
+class AgentQCancelled(AgentQError):
+    """A supervised command was cancelled by SIGINT or SIGTERM.
+
+    ``exit_code`` is the shared shell mapping supplied by
+    :func:`agentq_lib.process.cli_exit_code` (130 for SIGINT, 143 for SIGTERM),
+    so callers never re-derive the cancellation policy.
+    """
+
+    def __init__(self, *, exit_code: int = 130, signum: int | None = None) -> None:
+        self.exit_code = exit_code
+        self.signum = signum
+        super().__init__(
+            f"interrupted by signal {signum}" if signum is not None else "interrupted"
+        )
+
+
 @dataclass
 class Completed:
     args: Sequence[str]
@@ -254,13 +270,23 @@ def find_executable(name: str) -> str | None:
     if name == "ast-grep":
         sg = shutil.which("sg")
         if sg:
-            probe = subprocess.run([sg, "--version"], text=True, capture_output=True)
+            # Bounded executable-identity probe, not an agent command lifecycle.
+            try:
+                probe = subprocess.run(
+                    [sg, "--version"],
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
             if "ast-grep" in (probe.stdout + probe.stderr).lower():
                 return sg
     return None
 
 
 def tool_version(executable: str) -> str:
+    # Bounded version probe; a missing or hanging tool degrades to "installed".
     for flags in (["--version"], ["-V"], ["version"]):
         try:
             result = subprocess.run(
@@ -281,43 +307,60 @@ def run_cmd(
     timeout: float | None = 60,
     check: bool = False,
     env: dict[str, str] | None = None,
-    input_text: str | None = None,
 ) -> Completed:
-    merged = os.environ.copy()
-    merged.update(
-        {
-            "NO_COLOR": "1",
-            "CLICOLOR": "0",
-            "TERM": "dumb",
-            "PAGER": "cat",
-            "GIT_PAGER": "cat",
-        }
-    )
+    from .contracts.execution import ExecutionSpec, StopReason, StreamMode
+    from .process import BUFFERED_RECORD_LIMIT_BYTES, raise_if_cancelled, supervise
+
+    overrides = {
+        "NO_COLOR": "1",
+        "CLICOLOR": "0",
+        "TERM": "dumb",
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+    }
     if env:
-        merged.update(env)
-    try:
-        proc = subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            input=input_text,
-            capture_output=True,
-            timeout=timeout,
-            env=merged,
-        )
-    except FileNotFoundError as exc:
-        raise AgentQError(f"required command not found: {args[0]}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise AgentQError(
-            f"command timed out after {timeout}s: {' '.join(args)}"
-        ) from exc
-    completed = Completed(
-        args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr
+        overrides.update(env)
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def collect(event) -> bool:
+        captured[event.stream].append(event.text)
+        return True
+
+    spec = ExecutionSpec(
+        argv=tuple(str(item) for item in args),
+        cwd=str(cwd) if cwd else os.getcwd(),
+        stream_mode=StreamMode.SEPARATE,
+        deadline_seconds=timeout,
+        record_limit_bytes=BUFFERED_RECORD_LIMIT_BYTES,
+        env=tuple(overrides.items()),
     )
-    if check and proc.returncode != 0:
-        detail = compact_line(proc.stderr or proc.stdout or "command failed", 500)
+    outcome = supervise(spec, collect)
+    raise_if_cancelled(outcome)
+    if outcome.stop_reason is StopReason.SPAWN_ERROR:
+        raise AgentQError(f"required command not found: {args[0]}")
+    if outcome.stop_reason is StopReason.EXEC_ERROR:
+        raise AgentQError(f"required command cannot be executed: {args[0]}")
+    if outcome.stop_reason is StopReason.TIMEOUT:
+        raise AgentQError(f"command timed out after {timeout}s: {' '.join(args)}")
+    if outcome.stop_reason is StopReason.CAPTURE_ERROR:
+        detail = outcome.error_detail or "output exceeded the bounded capture limit"
         raise AgentQError(
-            f"command failed ({proc.returncode}): {' '.join(args)}\n{detail}"
+            compact_line(f"command output capture failed: {detail}", 600)
+        )
+    completed = Completed(
+        args=args,
+        returncode=(
+            outcome.child_returncode if outcome.child_returncode is not None else 1
+        ),
+        stdout="".join(captured["stdout"]),
+        stderr="".join(captured["stderr"]),
+    )
+    if check and completed.returncode != 0:
+        detail = compact_line(
+            completed.stderr or completed.stdout or "command failed", 500
+        )
+        raise AgentQError(
+            f"command failed ({completed.returncode}): {' '.join(args)}\n{detail}"
         )
     return completed
 
