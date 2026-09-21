@@ -36,7 +36,7 @@ agentq verify --mode focused
 agentq verify --mode thorough
 ```
 
-The legacy spelling `verified-changed` remains accepted for compatibility. New instructions should use `verify` unless an explicit scope override is required. Dry-run results are reported as `DRY-RUN`, not as pending work.
+Use `verify` unless an explicit scope override (`verify-changed`, `verify-task`) is required. Dry-run results are reported as `DRY-RUN`, not as pending work.
 
 ## Explicit command fallback
 

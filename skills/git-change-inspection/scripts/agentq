@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-TOOLKIT="$(CDPATH= cd -- "$SCRIPT_DIR/../../agent-toolkit/scripts" && pwd)/agentq"
-exec "$TOOLKIT" "$@"

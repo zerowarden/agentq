@@ -16,7 +16,6 @@ This skill maintains the shared `agentq` runtime used by the other skills. Ordin
 
 ```bash
 agentq doctor
-~/.agents/skills/agent-toolkit/scripts/validate-skills
 ```
 
 Use `search --format compact-json` for structured search results. Use legacy `--format json` only when a consumer requires its compatibility fields.
@@ -143,21 +142,20 @@ Use `--hot-only` to leave archived history untouched and `--all-repos` only to i
 Read `references/tooling.md` before installing anything. The bundle works with Git, ripgrep, and Python alone. The installer is dry-run by default:
 
 ```bash
-~/.agents/skills/agent-toolkit/scripts/install-tools.sh
-~/.agents/skills/agent-toolkit/scripts/install-tools.sh --apply
+~/.agents/agentq/scripts/install-tools.sh
+~/.agents/agentq/scripts/install-tools.sh --apply
 ```
 
 ## OpenCode integration
 
-OpenCode already has capable built-in read, search, Bash, and LSP tools. Agent Skills are the default integration because they add less tool-schema context. An optional read-only custom-tool adapter is under `assets/opencode-tools/`; install it only after measuring whether it improves invocation reliability.
+OpenCode already has capable built-in read, search, Bash, and LSP tools. Agent Skills are the default integration because they add less tool-schema context. An optional read-only custom-tool adapter is under `~/.agents/agentq/integrations/opencode/`; install it only after measuring whether it improves invocation reliability.
 
 ## Maintenance
 
 After changing any skill or script:
 
 ```bash
-~/.agents/skills/agent-toolkit/scripts/validate-skills
-~/.agents/skills/agent-toolkit/tests/self-test.sh
+~/.agents/agentq/tests/self-test.sh
 ```
 
 Do not add generated reports, caches, virtual environments, package stores, or `__pycache__` directories.

@@ -3,7 +3,7 @@
 Use these only after loading the workflow-specific skill. All paths are repository-relative unless `--allow-outside` is explicit.
 
 ```bash
-AQ=~/.agents/skills/agent-toolkit/scripts/agentq
+AQ=agentq
 ```
 
 ## Discovery

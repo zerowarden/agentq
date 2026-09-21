@@ -1,0 +1,106 @@
+[project]
+name = "agentq"
+version = "0.1.0"
+description = "Privacy-preserving, token-bounded repository tools for coding agents."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+agentq = "agentq.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentq = ["ts_nav.mjs"]
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+# Static checks cover the production package and the project test suite.
+# The typed boundary surface introduced by W01 remains the pyright scope.
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+include = [
+    "src/**/*.py",
+    "tests/**/*.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "SIM102",
+    "SIM103",
+    "SIM114",
+    "SIM116",
+    "RET505",
+    "RUF100",
+]
+
+# Legacy complexity backlog: each entry is a file whose functions still exceed
+# the complexity defaults. Remove a file once its functions are decomposed; do
+# not add new files. Everything else in these files is still enforced.
+[tool.ruff.lint.per-file-ignores]
+"src/agentq/audit.py" = ["C901", "PLR0912"]
+"src/agentq/codemod.py" = ["C901"]
+"src/agentq/gitops.py" = ["C901", "PLR0911"]
+"src/agentq/impact.py" = ["C901", "PLR0912"]
+"src/agentq/inspectops.py" = ["C901", "PLR0911"]
+"src/agentq/pythonnav.py" = ["C901", "PLR0912"]
+"src/agentq/runops.py" = ["C901", "PLR0912"]
+"src/agentq/discovery/outline.py" = ["C901", "PLR0912"]
+"src/agentq/discovery/read.py" = ["C901", "PLR0912"]
+"src/agentq/discovery/rendering.py" = ["C901"]
+"src/agentq/discovery/repo_map.py" = ["C901"]
+"src/agentq/discovery/search.py" = ["C901", "PLR0912"]
+"src/agentq/core/budget.py" = ["C901", "PLR0912"]
+"src/agentq/telemetry/__init__.py" = ["C901", "PLR0911", "PLR0912"]
+"src/agentq/testplan.py" = ["C901", "PLR0912"]
+"src/agentq/tsnav.py" = ["C901", "PLR0912"]
+"src/agentq/verification.py" = ["C901", "PLR0912"]
+"src/agentq/verifychanged.py" = ["C901", "PLR0912"]
+
+[tool.black]
+target-version = ["py310"]
+line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = [
+    "src/agentq/cli",
+    "src/agentq/core/errors.py",
+    "src/agentq/core/evidence.py",
+    "src/agentq/core/request.py",
+    "src/agentq/core/result.py",
+    "src/agentq/core/validation.py",
+    "src/agentq/delivery",
+    "src/agentq/execution",
+    "src/agentq/mutation",
+    "src/agentq/telemetry/models.py",
+    "src/agentq/continuations.py",
+    "src/agentq/emission.py",
+    "src/agentq/process.py",
+]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"

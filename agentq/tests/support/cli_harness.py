@@ -1,0 +1,245 @@
+"""Shared CLI integration harness for the split test modules."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+from pathlib import Path
+
+AGENTQ = Path(sys.executable).with_name("agentq")
+TESTS_DIR = Path(__file__).resolve().parents[1]
+SCALE_BENCHMARK = TESTS_DIR / "scale_benchmark.py"
+
+
+def render_noop(data: dict, *args, **kwargs) -> str:
+    return ""
+
+
+def seed_delivery_receipt(cache_module, state_module, root, command, key, kind):
+    """Forge one already-emitted receipt fragment for suppression tests."""
+    identity = cache_module.suppression_identity(root)
+    if identity is None:
+        raise AssertionError("no suppression identity for receipt fixture")
+    context, consumer = identity
+    state_module.store_receipt(
+        {
+            "receipt_id": key,
+            "repo_id": cache_module.repo_id(root),
+            "context_id": context,
+            "consumer_id": consumer or None,
+            "request_id": key,
+            "output_digest": key,
+            "written_bytes": 0,
+            "transport": "emitted",
+            "acknowledgment": "unacknowledged",
+            "emitted_at": time.time(),
+        },
+        [
+            {
+                "command": command,
+                "kind": kind,
+                "key": key,
+                "payload": None,
+                "consumer_id": consumer,
+            }
+        ],
+        now=time.time(),
+    )
+
+
+class AgentQIntegrationHarness(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="agentq-test-")
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.telemetry = Path(self.temp.name) / "telemetry"
+        self.archive = Path(self.temp.name) / "state" / "events.jsonl"
+        self.bin = Path(self.temp.name) / "bin"
+        self.bin.mkdir()
+
+        fake_pnpm = self.bin / "pnpm"
+        fake_pnpm.write_text(
+            textwrap.dedent("""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf 'fake pnpm cwd=%s args=%s\\n' "$PWD" "$*"
+            case "${AGENTQ_TEST_FAIL:-}" in
+              a-typecheck)
+                if [[ "$PWD" == */packages/a && "$*" == "run typecheck" ]]; then
+                  echo 'ERROR simulated a typecheck failure' >&2
+                  exit 7
+                fi
+                ;;
+              b-typecheck)
+                if [[ "$PWD" == */packages/b && "$*" == "run typecheck" ]]; then
+                  echo 'ERROR simulated b typecheck failure' >&2
+                  exit 8
+                fi
+                ;;
+            esac
+            exit 0
+        """),
+            encoding="utf-8",
+        )
+        fake_pnpm.chmod(0o755)
+
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "AGENTQ_TELEMETRY_HOT": str(self.telemetry),
+                "AGENTQ_TELEMETRY_STATE": str(self.archive),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "PATH": str(self.bin) + os.pathsep + self.env.get("PATH", ""),
+                "TERM": "dumb",
+                "NO_COLOR": "1",
+            }
+        )
+
+        self.git("init", "-q")
+        self.git("config", "user.email", "agentq@example.invalid")
+        self.git("config", "user.name", "AgentQ Test")
+        (self.repo / "packages/a/src").mkdir(parents=True)
+        (self.repo / "packages/a/tests").mkdir(parents=True)
+        (self.repo / "packages/b/src").mkdir(parents=True)
+        (self.repo / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "root",
+                    "private": True,
+                    "workspaces": ["packages/*"],
+                    "devDependencies": {"vitest": "^4.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "pnpm-workspace.yaml").write_text(
+            "packages:\n  - 'packages/*'\n", encoding="utf-8"
+        )
+        (self.repo / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\n", encoding="utf-8"
+        )
+        (self.repo / "tsconfig.json").write_text(
+            json.dumps(
+                {
+                    "compilerOptions": {"module": "ESNext", "target": "ES2022"},
+                    "include": ["packages/**/*.ts"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "packages/a/package.json").write_text(
+            json.dumps(
+                {
+                    "name": "@test/a",
+                    "private": True,
+                    "scripts": {
+                        "test": "vitest run",
+                        "typecheck": "tsc --noEmit",
+                        "lint": "eslint .",
+                    },
+                    "devDependencies": {"vitest": "^4.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "packages/b/package.json").write_text(
+            json.dumps(
+                {
+                    "name": "@test/b",
+                    "private": True,
+                    "scripts": {"test": "vitest run", "typecheck": "tsc --noEmit"},
+                    "dependencies": {"@test/a": "workspace:*"},
+                    "devDependencies": {"vitest": "^4.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.repo / "packages/a/src/index.ts").write_text(
+            textwrap.dedent("""\
+            export interface OldName { value: string }
+            export function makeOldName(value: string): OldName {
+              return { value }
+            }
+            export const literal = 'A|B'
+        """),
+            encoding="utf-8",
+        )
+        (self.repo / "packages/a/tests/index.test.ts").write_text(
+            "import { makeOldName } from '../src/index'\n", encoding="utf-8"
+        )
+        (self.repo / "packages/b/src/index.ts").write_text(
+            "import type { OldName } from '../../a/src/index'\nexport type Wrapped = OldName\n",
+            encoding="utf-8",
+        )
+        (self.repo / ".env").write_text(
+            "API_KEY=secret-do-not-read\n", encoding="utf-8"
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "initial")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(self.repo), *args],
+            text=True,
+            capture_output=True,
+            check=True,
+            env=self.env,
+        )
+
+    def aq(
+        self, *args: str, expect: int = 0, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if not args:
+            raise AssertionError("missing agentq subcommand")
+        argv = [
+            str(AGENTQ),
+            args[0],
+            "--repo",
+            str(self.repo),
+            "--format",
+            "json",
+            "--budget",
+            "1000000",
+            *args[1:],
+        ]
+        env = self.env.copy()
+        if extra_env:
+            env.update(extra_env)
+        result = subprocess.run(
+            argv, text=True, capture_output=True, env=env, cwd=self.repo
+        )
+        self.assertEqual(result.returncode, expect, msg=result.stderr or result.stdout)
+        return result
+
+    def data(
+        self, *args: str, expect: int = 0, extra_env: dict[str, str] | None = None
+    ) -> dict:
+        return json.loads(self.aq(*args, expect=expect, extra_env=extra_env).stdout)
+
+    def change_a(self, text: str = "\nexport const changed = true\n") -> None:
+        path = self.repo / "packages/a/src/index.ts"
+        path.write_text(path.read_text() + text, encoding="utf-8")
+
+    def _make_single_ecosystem(self) -> None:
+        for name in (
+            "package.json",
+            "pnpm-workspace.yaml",
+            "pnpm-workspace.yml",
+            "pnpm-lock.yaml",
+            "tsconfig.json",
+        ):
+            path = self.repo / name
+            if path.exists():
+                path.unlink()
+        shutil.rmtree(self.repo / "packages", ignore_errors=True)

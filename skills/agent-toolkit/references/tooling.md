@@ -40,4 +40,4 @@ The bundle is intentionally useful with only **Git**, **ripgrep**, and **Python 
 
 `agentq` does not initiate network access. It reads the current repository, invokes explicitly requested local commands, and writes redacted mode-`0600` logs under a private sandbox-safe runtime directory, normally `/tmp/agentq-<uid>/<repository-hash>/`.
 
-`install-tools.sh --apply` is the only bundled script that intentionally contacts package registries. Review its printed plan before applying it.
+`~/.agents/agentq/scripts/install-tools.sh --apply` is the only bundled script that intentionally contacts package registries. Review its printed plan before applying it.
