@@ -230,7 +230,9 @@ class ContinuationWireTests(unittest.TestCase):
             request_id="r1",
             repo_id="repo",
             worktree_id="wt",
-            options=DiffSelection(staged=True, paths=("src",), view="hunks"),
+            options=DiffSelection(
+                staged=True, paths=("src",), view="patch", max_lines=300
+            ),
             budget=Budget(output_chars=120),
             output_format="json",
         )
@@ -238,9 +240,6 @@ class ContinuationWireTests(unittest.TestCase):
     def _follow_up(self) -> continuations.QueryFollowUp:
         return continuations.QueryFollowUp(
             request=self._request(),
-            refinement=continuations.QueryRefinement(
-                paths=("src/a.py",), view="patch", max_lines=300
-            ),
             guard=continuations.SourceGuard(
                 kind="git-diff-source", fingerprint="a" * 64, paths=("src",)
             ),
@@ -268,16 +267,22 @@ class ContinuationWireTests(unittest.TestCase):
                 {"kind": "unknown-kind", "schema": "agentq.continuation/v2"}
             )
 
-    def test_refinement_rejects_mode_and_unknown_fields(self) -> None:
-        for payload in (
-            {"staged": True},
-            {"range": "a..b"},
-            {"view": "everything"},
-            {"max_lines": 0},
-            {"paths": ["/etc/passwd"]},
-        ):
-            with self.assertRaises(ContractError):
-                continuations.QueryRefinement.from_wire(payload)
+    def test_only_resumable_operations_are_records(self) -> None:
+        with self.assertRaises(ContractError):
+            continuations.QueryFollowUp(
+                request=OperationRequest(
+                    operation="files",
+                    request_id="r",
+                    repo_id="repo",
+                    worktree_id="wt",
+                    options=None,
+                )
+            )
+
+    def test_command_only_blocks_are_display_only(self) -> None:
+        self.assertFalse(continuations.is_typed_block({"command": "agentq files x"}))
+        with self.assertRaises(ContractError):
+            continuations.parse_block({"command": "agentq files zz-none"})
 
     def test_guard_requires_a_guarded_operation(self) -> None:
         with self.assertRaises(ContractError):
@@ -321,22 +326,11 @@ class ContinuationWireTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             continuations.ArtifactPage.from_wire(payload)
 
-    def test_legacy_command_block_validates_argv(self) -> None:
-        record = continuations.parse_block({"command": "agentq files zz-none"})
-        self.assertIsNone(record)
-        legacy = continuations.LegacyArgv.from_command("agentq search needle")
-        self.assertEqual(legacy.argv, ("agentq", "search", "needle"))
-        for command in ("rm -rf /", "agentq continue other", "agentq"):
-            with self.assertRaises(ContractError):
-                continuations.LegacyArgv.from_command(command)
-
     def test_producer_blocks_strip_display_fields(self) -> None:
         from agentq.git import DiffFollowUp
 
         follow_up = continuations.QueryFollowUp(
-            request=self._request(),
-            refinement=continuations.QueryRefinement(view="patch"),
-            reason=("render-budget",),
+            request=self._request(), reason=("render-budget",)
         )
         block = DiffFollowUp(
             record=follow_up,
@@ -349,23 +343,6 @@ class ContinuationWireTests(unittest.TestCase):
         self.assertIsInstance(record, continuations.QueryFollowUp)
         self.assertEqual(record.reason, ("render-budget",))
         self.assertNotIn("omitted", record.to_wire())
-
-    def test_refinement_applies_only_allowed_fields(self) -> None:
-        request = self._request()
-        refined = continuations.apply_refinement(
-            request,
-            continuations.QueryRefinement(
-                paths=("src/a.py",), view="patch", max_lines=300, output_chars=900
-            ),
-        )
-        self.assertEqual(refined.options.view, "patch")
-        self.assertEqual(refined.options.paths, ("src/a.py",))
-        self.assertEqual(refined.options.base, request.options.base)
-        self.assertEqual(refined.budget.output_chars, 900)
-        with self.assertRaises(ContractError):
-            continuations.apply_refinement(
-                request, continuations.QueryRefinement(scan_cap=10)
-            )
 
     def test_dispatch_argv_uses_the_typed_request(self) -> None:
         record = self._follow_up()
@@ -817,7 +794,7 @@ class RequestNormalizationTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             requests.request_from_json('{"operation": "rm-rf", "options": {}}')
 
-    def test_argv_codec_requires_search_query(self) -> None:
+    def test_argv_codec_requires_searchquery_provider(self) -> None:
         from agentq import requests
 
         request = requests.request_from_args(
@@ -834,7 +811,7 @@ class RequestNormalizationTests(unittest.TestCase):
 class NavigationBoundaryTests(unittest.TestCase):
     def test_provider_without_payload_is_unavailable_not_complete(self) -> None:
         from agentq import navigation
-        from agentq.navigation.resolution import _query
+        from agentq.navigation import query_provider
 
         class SilentProvider:
             name = "silent"
@@ -850,14 +827,14 @@ class NavigationBoundaryTests(unittest.TestCase):
                 return None
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = _query(SilentProvider(), request, include_references=True)
+        result = query_provider(SilentProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.UNAVAILABLE)
         self.assertFalse(result.coverage.is_complete())
         self.assertEqual(result.payload, None)
 
     def test_explicit_empty_scan_can_be_complete_empty(self) -> None:
         from agentq import navigation
-        from agentq.navigation.resolution import _query
+        from agentq.navigation import query_provider
 
         class EmptyProvider:
             name = "python"
@@ -877,13 +854,13 @@ class NavigationBoundaryTests(unittest.TestCase):
                 return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = _query(EmptyProvider(), request, include_references=True)
+        result = query_provider(EmptyProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.EMPTY)
         self.assertTrue(result.coverage.is_complete())
 
     def test_missing_coverage_is_unknown_not_complete(self) -> None:
         from agentq import navigation
-        from agentq.navigation.resolution import _query
+        from agentq.navigation import query_provider
 
         class BareProvider:
             name = "python"
@@ -903,7 +880,7 @@ class NavigationBoundaryTests(unittest.TestCase):
                 return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = _query(BareProvider(), request, include_references=True)
+        result = query_provider(BareProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.OK)
         self.assertFalse(result.coverage.is_complete())
 
@@ -919,7 +896,7 @@ class NavigationBoundaryTests(unittest.TestCase):
 
     def test_provider_metadata_comes_from_the_provider(self) -> None:
         from agentq import navigation
-        from agentq.navigation.resolution import _query
+        from agentq.navigation import query_provider
 
         class CustomProvider:
             name = "custom-provider"
@@ -940,7 +917,7 @@ class NavigationBoundaryTests(unittest.TestCase):
                 return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = _query(CustomProvider(), request, include_references=True)
+        result = query_provider(CustomProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.OK)
         self.assertEqual(result.provenance, evidence.SEMANTIC)
         self.assertEqual(result.candidate_count, 1)

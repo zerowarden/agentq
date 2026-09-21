@@ -104,7 +104,7 @@ def doctor_data(root: Path) -> dict[str, Any]:
     }
 
 
-def render_doctor(data: dict[str, Any]) -> str:
+def render_doctor(data: dict[str, Any], *, budget: int = 0) -> str:
     lines = [
         f"agentq {data['agentq_version']} on Python {data['python']}",
         f"platform: {data['platform']}",

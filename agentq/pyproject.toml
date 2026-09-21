@@ -56,24 +56,6 @@ select = [
     "RUF100",
 ]
 
-# Legacy complexity backlog: each entry is a file whose functions still exceed
-# the complexity defaults. Remove a file once its functions are decomposed; do
-# not add new files. Everything else in these files is still enforced.
-[tool.ruff.lint.per-file-ignores]
-"src/agentq/audit.py" = ["C901", "PLR0912"]
-"src/agentq/codemod.py" = ["C901"]
-"src/agentq/impact.py" = ["C901", "PLR0912"]
-"src/agentq/navigation/inspect.py" = ["C901", "PLR0911"]
-"src/agentq/navigation/providers/python.py" = ["C901", "PLR0912"]
-"src/agentq/navigation/providers/typescript.py" = ["C901", "PLR0912"]
-"src/agentq/discovery/outline.py" = ["C901", "PLR0912"]
-"src/agentq/discovery/read.py" = ["C901", "PLR0912"]
-"src/agentq/discovery/rendering.py" = ["C901"]
-"src/agentq/discovery/repo_map.py" = ["C901"]
-"src/agentq/discovery/search.py" = ["C901", "PLR0912"]
-"src/agentq/core/budget.py" = ["C901", "PLR0912"]
-"src/agentq/telemetry/__init__.py" = ["C901", "PLR0911", "PLR0912"]
-
 [tool.black]
 target-version = ["py310"]
 line-length = 88
@@ -82,22 +64,16 @@ line-length = 88
 testpaths = ["tests"]
 
 [tool.pyright]
-include = [
-    "src/agentq/cli",
-    "src/agentq/core/errors.py",
-    "src/agentq/core/evidence.py",
-    "src/agentq/core/request.py",
-    "src/agentq/core/result.py",
-    "src/agentq/core/validation.py",
-    "src/agentq/delivery",
-    "src/agentq/execution",
-    "src/agentq/git",
-    "src/agentq/mutation",
-    "src/agentq/telemetry/models.py",
-    "src/agentq/verification",
-    "src/agentq/workspace",
-    "src/agentq/continuations.py",
-    "src/agentq/emission.py",
+include = ["src/agentq"]
+strict = [
+    "src/agentq/core",
+    "src/agentq/audit.py",
+    "src/agentq/impact.py",
+    "src/agentq/requests.py",
+    "src/agentq/persistence",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+reportMissingTypeArgument = "error"
+reportMissingParameterType = "error"
+reportUnknownParameterType = "error"

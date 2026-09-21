@@ -122,6 +122,44 @@ class RepoMapResult:
         }
 
 
+def _manifest_for(path: Path, rel: str) -> Manifest | None:
+    name = path.name.lower()
+    if name == "package.json":
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            obj = {}
+        return Manifest(
+            path=rel,
+            kind="npm",
+            name=obj.get("name"),
+            scripts=tuple(sorted((obj.get("scripts") or {}).keys())[:20]),
+            dependencies=len(obj.get("dependencies") or {}),
+            dev_dependencies=len(obj.get("devDependencies") or {}),
+        )
+    if name == "cargo.toml":
+        text = path.read_text(encoding="utf-8", errors="replace")
+        package = re.search(r"(?ms)^\[package\].*?^name\s*=\s*[\"']([^\"']+)", text)
+        workspace = bool(re.search(r"(?m)^\[workspace\]", text))
+        return Manifest(
+            path=rel,
+            kind="cargo",
+            name=package.group(1) if package else None,
+            workspace=workspace,
+        )
+    if name == "pyproject.toml":
+        text = path.read_text(encoding="utf-8", errors="replace")
+        project = re.search(r"(?ms)^\[project\].*?^name\s*=\s*[\"']([^\"']+)", text)
+        return Manifest(
+            path=rel,
+            kind="python",
+            name=project.group(1) if project else None,
+        )
+    if name in {"pnpm-workspace.yaml", "pnpm-workspace.yml"}:
+        return Manifest(path=rel, kind="pnpm-workspace")
+    return None
+
+
 def repo_map(request: RepoMapRequest) -> RepoMapResult:
     root = request.root
     files = list_repo_files(root)
@@ -146,45 +184,9 @@ def repo_map(request: RepoMapRequest) -> RepoMapResult:
         name = path.name.lower()
         if name in {"agents.md", "claude.md", "readme.md", "contributing.md"}:
             instructions.append(rel)
-        if name == "package.json":
-            try:
-                obj = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                obj = {}
-            manifests.append(
-                Manifest(
-                    path=rel,
-                    kind="npm",
-                    name=obj.get("name"),
-                    scripts=tuple(sorted((obj.get("scripts") or {}).keys())[:20]),
-                    dependencies=len(obj.get("dependencies") or {}),
-                    dev_dependencies=len(obj.get("devDependencies") or {}),
-                )
-            )
-        elif name == "cargo.toml":
-            text = path.read_text(encoding="utf-8", errors="replace")
-            package = re.search(r"(?ms)^\[package\].*?^name\s*=\s*[\"']([^\"']+)", text)
-            workspace = bool(re.search(r"(?m)^\[workspace\]", text))
-            manifests.append(
-                Manifest(
-                    path=rel,
-                    kind="cargo",
-                    name=package.group(1) if package else None,
-                    workspace=workspace,
-                )
-            )
-        elif name == "pyproject.toml":
-            text = path.read_text(encoding="utf-8", errors="replace")
-            project = re.search(r"(?ms)^\[project\].*?^name\s*=\s*[\"']([^\"']+)", text)
-            manifests.append(
-                Manifest(
-                    path=rel,
-                    kind="python",
-                    name=project.group(1) if project else None,
-                )
-            )
-        elif name in {"pnpm-workspace.yaml", "pnpm-workspace.yml"}:
-            manifests.append(Manifest(path=rel, kind="pnpm-workspace"))
+        manifest = _manifest_for(path, rel)
+        if manifest is not None:
+            manifests.append(manifest)
     branch = run_cmd(
         ["git", "branch", "--show-current"], cwd=root, timeout=5
     ).stdout.strip()

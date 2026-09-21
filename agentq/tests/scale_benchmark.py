@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from agentq.continuations import QueryFollowUp, QueryRefinement
+from agentq.continuations import QueryFollowUp
 from agentq.core import (
     Budget,
     DiffSelection,
@@ -246,10 +246,11 @@ def _follow_up_record() -> QueryFollowUp:
             request_id="scale-benchmark",
             repo_id="scale-benchmark",
             worktree_id="scale-benchmark",
-            options=DiffSelection(paths=("src/large.py",), view="patch"),
+            options=DiffSelection(
+                paths=("src/large.py",), view="patch", max_lines=300
+            ),
             budget=Budget(output_chars=12_000),
         ),
-        refinement=QueryRefinement(paths=("src/large.py",), view="patch", max_lines=300),
         reason=("hunk-follow-up",),
     )
 

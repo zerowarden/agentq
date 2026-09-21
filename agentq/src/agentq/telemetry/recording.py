@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agentq.core import telemetry_enabled
-from agentq.emission import DispatchResult
+from agentq.delivery import DispatchResult
 
 
 @dataclass(frozen=True)

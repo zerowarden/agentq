@@ -11,10 +11,11 @@ import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from agentq.continuations import QueryFollowUp
 from agentq.core import (
     COMPLETE,
     LEXICAL,
@@ -22,9 +23,15 @@ from agentq.core import (
     SAMPLED,
     SCAN_CAP,
     AgentQError,
+    Budget,
+    ContractError,
     Coverage,
+    RequestContext,
+    SearchOptions,
     classify_path,
     is_sensitive_path,
+    new_operation_request,
+    session_id,
     status_of,
     typed_coverage,
     typed_from_wire,
@@ -254,98 +261,45 @@ class SearchResume:
     output_format: str
     budget: int
 
-    def command(
-        self,
-        result: SearchResult,
-        *,
-        target_path: str | None = None,
-        target_total: int | None = None,
-        budget: int | None = None,
-        output_format: str | None = None,
-    ) -> str:
-        import shlex
 
-        argv = ["agentq", "search"]
-        if self.mode == "regex":
-            argv.append("--regex")
-        if self.word:
-            argv.append("--word")
-        if self.case != "smart":
-            argv.extend(("--case", self.case))
-        for glob in self.globs:
-            argv.extend(("--glob", glob))
-        for file_type in self.types:
-            argv.extend(("--type", file_type))
-        if self.include_sensitive:
-            argv.append("--include-sensitive")
-
-        paths = [target_path] if target_path else list(result.paths or ["."])
-        if paths != ["."]:
-            argv.extend(("--path", *paths))
-        view = "snippets" if result.effective_view == "snippets" else "matches"
-        argv.extend(("--view", view))
-        context = result.context if view == "snippets" else 0
-        if context:
-            argv.extend(("--context", str(context)))
-        argv.extend(("--max-chars", str(self.max_chars)))
-
-        current_limit = self.limit
-        current_per_file = self.per_file
-        current_max_files = self.max_files
-        current_scan_cap = self.scan_cap
-        if target_path:
-            target_count = max(1, int(target_total or 1))
-            current_limit = target_count
-            current_per_file = target_count
-            current_max_files = 1
-            current_scan_cap = max(current_scan_cap, target_count)
-            if budget is None:
-                budget = max(
-                    self.budget * 2,
-                    target_count * (self.max_chars + 96) + 600,
-                )
-        argv.extend(
-            (
-                "--max-results",
-                str(current_limit),
-                "--samples-per-file",
-                str(current_per_file),
-                "--max-files",
-                str(current_max_files),
-            )
-        )
-        if current_scan_cap != 5000:
-            argv.extend(("--scan-cap", str(current_scan_cap)))
-        if self.coverage_policy != "auto":
-            argv.extend(("--coverage", self.coverage_policy))
-        argv.extend(("--format", output_format or self.output_format))
-        if budget is not None:
-            argv.extend(("--budget", str(max(1, budget))))
-        argv.extend(("--repeat", "--", self.query or "QUERY"))
-        return shlex.join(argv)
 
 
 @dataclass(frozen=True)
-class SearchContinuation:
-    reason: tuple[str, ...]
-    command: str
+class SearchFollowUp:
+    """One typed search resume request plus its display/cursor state.
+
+    ``record`` is the executable continuation; ``command`` is display text that
+    becomes an ``agentq continue CURSOR`` reference once the block is stored.
+    """
+
+    record: QueryFollowUp
     omitted: OmittedCounts | None = None
+    command: str = ""
 
     def to_wire(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "reason": list(self.reason),
-            "command": self.command,
-        }
+        block: dict[str, Any] = dict(self.record.to_wire())
+        block["command"] = self.command
         if self.omitted is not None:
-            data["omitted"] = self.omitted.to_wire()
-        return data
+            block["omitted"] = self.omitted.to_wire()
+        return block
+
+    def with_display(self, block: Mapping[str, Any]) -> SearchFollowUp:
+        command = block.get("command")
+        if not isinstance(command, str) or command == self.command:
+            return self
+        return replace(self, command=command)
 
     @classmethod
-    def from_wire(cls, payload: Mapping[str, Any]) -> SearchContinuation:
+    def from_wire(cls, payload: Mapping[str, Any]) -> SearchFollowUp:
         omitted = payload.get("omitted")
         return cls(
-            reason=tuple(str(item) for item in payload.get("reason") or []),
-            command=str(payload.get("command", "")),
+            record=QueryFollowUp.from_wire(
+                {
+                    key: payload.get(key)
+                    for key in ("schema", "kind", "request", "guard", "reason")
+                },
+                what="search continuation",
+            ),
             omitted=(
                 OmittedCounts(
                     matches=int(omitted.get("matches", 0) or 0),
@@ -354,22 +308,7 @@ class SearchContinuation:
                 if isinstance(omitted, Mapping)
                 else None
             ),
-        )
-
-
-@dataclass(frozen=True)
-class SearchBudgetContinuation:
-    command: str
-    reason: tuple[str, ...] = ("render-budget",)
-
-    def to_wire(self) -> dict[str, Any]:
-        return {"reason": list(self.reason), "command": self.command}
-
-    @classmethod
-    def from_wire(cls, payload: Mapping[str, Any]) -> SearchBudgetContinuation:
-        return cls(
             command=str(payload.get("command", "")),
-            reason=tuple(str(item) for item in payload.get("reason") or []),
         )
 
 
@@ -427,8 +366,8 @@ class SearchResult:
     context: int
     provenance: str = LEXICAL
     empty: bool = False
-    continuation: SearchContinuation | None = None
-    budget_continuation: SearchBudgetContinuation | None = None
+    continuation: SearchFollowUp | None = None
+    budget_continuation: SearchFollowUp | None = None
 
     @property
     def shown(self) -> int:
@@ -572,23 +511,15 @@ class SearchResult:
         return data
 
     def with_wire_continuations(self, wire: Mapping[str, Any]) -> SearchResult:
-        """Reflect cursor display commands attached to the wire payload."""
+        """Reflect cursor display state attached to the wire payload."""
         continuation = self.continuation
         block = wire.get("continuation")
-        if (
-            continuation is not None
-            and isinstance(block, Mapping)
-            and isinstance(block.get("command"), str)
-        ):
-            continuation = replace(continuation, command=block["command"])
+        if continuation is not None and isinstance(block, Mapping):
+            continuation = continuation.with_display(block)
         budget = self.budget_continuation
         budget_block = wire.get("budget_continuation")
-        if (
-            budget is not None
-            and isinstance(budget_block, Mapping)
-            and isinstance(budget_block.get("command"), str)
-        ):
-            budget = replace(budget, command=budget_block["command"])
+        if budget is not None and isinstance(budget_block, Mapping):
+            budget = budget.with_display(budget_block)
         if continuation is self.continuation and budget is self.budget_continuation:
             return self
         return replace(self, continuation=continuation, budget_continuation=budget)
@@ -640,16 +571,8 @@ class SearchResult:
             empty="provenance" not in payload
             and int(payload.get("total", 0) or 0) == 0
             and int(payload.get("shown", 0) or 0) == 0,
-            continuation=(
-                SearchContinuation.from_wire(continuation)
-                if isinstance(continuation, Mapping)
-                else None
-            ),
-            budget_continuation=(
-                SearchBudgetContinuation.from_wire(budget)
-                if isinstance(budget, Mapping)
-                else None
-            ),
+            continuation=_follow_up_from_wire(continuation),
+            budget_continuation=_follow_up_from_wire(budget),
         )
 
 
@@ -774,6 +697,50 @@ def _declared_symbol(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _merge_hit_ranges(
+    requested: list[tuple[int, int]], line_count: int
+) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(requested):
+        end = min(line_count, end)
+        if not merged or start > merged[-1][1] + 1:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _snippet_lines(
+    path: str,
+    start: int,
+    end: int,
+    lines: list[str],
+    hit_lines: set[int],
+    hit_text: dict[tuple[str, int], str],
+    max_chars: int,
+) -> tuple[list[SnippetLine], list[ContextLine]]:
+    block_lines: list[SnippetLine] = []
+    context_lines: list[ContextLine] = []
+    for number in range(start, end + 1):
+        is_match = number in hit_lines
+        text = (
+            hit_text.get((path, number), compact_line(lines[number - 1], max_chars))
+            if is_match
+            else compact_line(lines[number - 1], max_chars)
+        )
+        block_lines.append(SnippetLine(line=number, text=text, match=is_match))
+        if not is_match:
+            context_lines.append(
+                ContextLine(
+                    path=path,
+                    line=number,
+                    text=text,
+                    role=classify_path(path),
+                )
+            )
+    return block_lines, context_lines
+
+
 def _build_context_snippets(
     root: Path,
     hits: list[SearchHit],
@@ -802,37 +769,15 @@ def _build_context_snippets(
             lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        merged: list[tuple[int, int]] = []
-        for start, end in sorted(requested[path]):
-            end = min(len(lines), end)
-            if not merged or start > merged[-1][1] + 1:
-                merged.append((start, end))
-            else:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        merged = _merge_hit_ranges(requested[path], len(lines))
         entries: list[SourceSnippet] = []
         for start, end in merged:
             if ranges_used >= max_ranges:
                 break
-            block_lines: list[SnippetLine] = []
-            for number in range(start, end + 1):
-                is_match = number in hit_lines[path]
-                text = (
-                    hit_text.get(
-                        (path, number), compact_line(lines[number - 1], max_chars)
-                    )
-                    if is_match
-                    else compact_line(lines[number - 1], max_chars)
-                )
-                block_lines.append(SnippetLine(line=number, text=text, match=is_match))
-                if not is_match:
-                    flat_context.append(
-                        ContextLine(
-                            path=path,
-                            line=number,
-                            text=text,
-                            role=classify_path(path),
-                        )
-                    )
+            block_lines, context_lines = _snippet_lines(
+                path, start, end, lines, hit_lines[path], hit_text, max_chars
+            )
+            flat_context.extend(context_lines)
             entries.append(
                 SourceSnippet(start=start, end=end, lines=tuple(block_lines))
             )
@@ -842,10 +787,22 @@ def _build_context_snippets(
     return snippets, flat_context
 
 
-def search(request: SearchRequest) -> SearchResult:
-    rg = find_executable("rg")
-    if not rg:
-        raise AgentQError("ripgrep (rg) is required for compact repository search")
+def _none_found(
+    request: SearchRequest, root: Path, scopes: list[str]
+) -> SearchResult:
+    return SearchResult.none_found(
+        root,
+        request.query,
+        request.mode,
+        request.word,
+        scopes,
+        request.view,
+        request.context,
+        request.coverage_policy,
+    )
+
+
+def _validate_search_request(request: SearchRequest) -> None:
     if not request.query:
         raise AgentQError("search query cannot be empty")
     if request.view not in {"auto", "summary", "snippets", "matches"}:
@@ -855,61 +812,49 @@ def search(request: SearchRequest) -> SearchResult:
             f"unsupported search coverage policy: {request.coverage_policy}"
         )
 
-    root = request.root
-    scopes = validated_scopes(root, list(request.scopes))
-    globs = request.globs
-    types = request.types
-    counts_by_file: dict[str, int] = {}
-    if request.coverage_policy == "exact":
-        counts_by_file = _matching_line_counts(
-            root,
-            rg,
-            request.query,
-            scopes,
-            mode=request.mode,
-            word=request.word,
-            case=request.case,
-            globs=globs,
-            types=types,
-            include_sensitive=request.include_sensitive,
-        )
-        if not counts_by_file:
-            return SearchResult.none_found(
-                root,
-                request.query,
-                request.mode,
-                request.word,
-                scopes,
-                request.view,
-                request.context,
-                request.coverage_policy,
+
+def _byte_column(line: str, byte_start: int) -> int:
+    return (
+        len(
+            line.encode("utf-8", errors="replace")[:byte_start].decode(
+                "utf-8", errors="ignore"
             )
-    total_matching_lines = sum(counts_by_file.values())
-    matching_files = len(counts_by_file)
-
-    # The match pass is not capped per-file: samples-per-file is a rendering
-    # control, not a discovery control. scan_cap is the only safety bound on
-    # collection. Under fast/auto policies this is the only pass: per-file
-    # counts accumulate while streaming, so totals are exact when the stream
-    # exhausts naturally and lower bounds when the scan cap is reached.
-    sample_args = [rg, "--json", "--no-messages", "--color=never", "--hidden"]
-    _rg_search_flags(
-        sample_args,
-        mode=request.mode,
-        word=request.word,
-        case=request.case,
-        globs=globs,
-        types=types,
-        include_sensitive=request.include_sensitive,
+        )
+        + 1
     )
-    sample_args += ["--", request.query, *scopes]
-    hits: list[SearchHit] = []
-    candidate_chars = 0
-    scan_limited = False
-    stderr_chunks: list[str] = []
 
-    def handle(event) -> bool:
-        nonlocal candidate_chars, scan_limited
+
+def _is_relevant_declaration(
+    request: SearchRequest, line: str
+) -> tuple[str | None, bool]:
+    declared = _declared_symbol(line)
+    relevant = bool(
+        declared
+        and (
+            request.mode == "regex"
+            or not TS_JS_IDENTIFIER_RE.fullmatch(request.query)
+            or declared == request.query
+            or declared.startswith(request.query)
+        )
+    )
+    return declared, relevant
+
+
+def _hit_kind(stripped_line: str, *, is_relevant_decl: bool) -> str:
+    if is_relevant_decl:
+        return "definition"
+    return "import" if IMPORT_RE.search(stripped_line) else "reference"
+
+
+@dataclass
+class _HitCollector:
+    request: SearchRequest
+    counts_by_file: dict[str, int]
+    hits: list[SearchHit] = field(default_factory=list)
+    candidate_chars: int = 0
+    scan_limited: bool = False
+
+    def handle(self, event: Any) -> bool:
         try:
             payload_event = json.loads(event.text)
         except json.JSONDecodeError:
@@ -920,66 +865,52 @@ def search(request: SearchRequest) -> SearchResult:
         path = ((payload.get("path") or {}).get("text") or "").replace(os.sep, "/")
         while path.startswith("./"):
             path = path[2:]
-        if not path or (not request.include_sensitive and is_sensitive_path(path)):
+        if not path or (not self.request.include_sensitive and is_sensitive_path(path)):
             return True
         line_number = safe_int(payload.get("line_number"))
         line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
-        candidate_chars += len(line)
-        if request.coverage_policy != "exact":
-            counts_by_file[path] = counts_by_file.get(path, 0) + 1
+        self.candidate_chars += len(line)
+        if self.request.coverage_policy != "exact":
+            self.counts_by_file[path] = self.counts_by_file.get(path, 0) + 1
         submatches = payload.get("submatches") or []
         first = submatches[0] if submatches else {}
         byte_start = safe_int(first.get("start"))
         byte_end = safe_int(first.get("end"))
-        column = (
-            len(
-                line.encode("utf-8", errors="replace")[:byte_start].decode(
-                    "utf-8", errors="ignore"
-                )
-            )
-            + 1
-        )
-        declared = _declared_symbol(line)
-        stripped = line.lstrip()
-        is_relevant_decl = bool(
-            declared
-            and (
-                request.mode == "regex"
-                or not TS_JS_IDENTIFIER_RE.fullmatch(request.query)
-                or declared == request.query
-                or declared.startswith(request.query)
-            )
-        )
-        hit_kind = (
-            "definition"
-            if is_relevant_decl
-            else "import" if IMPORT_RE.search(stripped) else "reference"
-        )
-        hits.append(
+        declared, is_relevant_decl = _is_relevant_declaration(self.request, line)
+        self.hits.append(
             SearchHit(
                 path=path,
                 line=line_number,
-                column=column,
-                text=_match_window(line, byte_start, byte_end, request.max_chars),
+                column=_byte_column(line, byte_start),
+                text=_match_window(line, byte_start, byte_end, self.request.max_chars),
                 role=classify_path(path),
-                kind=hit_kind,
+                kind=_hit_kind(line.lstrip(), is_relevant_decl=is_relevant_decl),
                 declared_symbol=declared if is_relevant_decl else None,
             )
         )
-        if len(hits) >= max(request.scan_cap, request.limit):
-            scan_limited = True
+        if len(self.hits) >= max(self.request.scan_cap, self.request.limit):
+            self.scan_limited = True
             return False
         return True
 
-    from agentq.execution import ExecutionSpec, StopReason, StreamMode
-    from agentq.execution.supervisor import (
+
+def _run_sample_search(
+    sample_args: list[str],
+    root: Path,
+    collector: _HitCollector,
+) -> None:
+    from agentq.execution import (
         STREAM_RECORD_LIMIT_BYTES,
+        ExecutionSpec,
+        StopReason,
+        StreamMode,
         is_spawn_failure,
         raise_if_cancelled,
         route_stdout,
         supervise,
     )
 
+    stderr_chunks: list[str] = []
     outcome = supervise(
         ExecutionSpec(
             argv=tuple(sample_args),
@@ -989,7 +920,7 @@ def search(request: SearchRequest) -> SearchResult:
             record_limit_bytes=STREAM_RECORD_LIMIT_BYTES,
             env=(("NO_COLOR", "1"), ("TERM", "dumb")),
         ),
-        route_stdout(handle, stderr_chunks),
+        route_stdout(collector.handle, stderr_chunks),
     )
     raise_if_cancelled(outcome)
     stderr = "".join(stderr_chunks)
@@ -999,36 +930,17 @@ def search(request: SearchRequest) -> SearchResult:
         raise AgentQError("ripgrep output exceeded the bounded record capture limit")
     if outcome.stop_reason is StopReason.TIMEOUT:
         raise _rg_error(stderr, 124)
-    if outcome.child_returncode not in (0, 1) and not scan_limited:
+    if outcome.child_returncode not in (0, 1) and not collector.scan_limited:
         raise _rg_error(stderr or "", outcome.child_returncode or 1)
-    if request.coverage_policy == "exact":
-        count_quality = "exact"
-    else:
-        total_matching_lines = sum(counts_by_file.values())
-        matching_files = len(counts_by_file)
-        if not counts_by_file:
-            return SearchResult.none_found(
-                root,
-                request.query,
-                request.mode,
-                request.word,
-                scopes,
-                request.view,
-                request.context,
-                request.coverage_policy,
-            )
-        count_quality = "lower-bound" if scan_limited else "exact"
 
-    hits.sort(
-        key=lambda h: (
-            _PRIORITY.get(h.kind, 9),
-            _ROLE_PRIORITY.get(h.role, 9),
-            -counts_by_file.get(h.path, 0),
-            h.path,
-            h.line,
-            h.column,
-        )
-    )
+
+def _query_intent(
+    request: SearchRequest,
+    hits: list[SearchHit],
+    *,
+    total_matching_lines: int,
+    matching_files: int,
+) -> tuple[list[str], bool, str, bool]:
     symbol_candidates = (
         sorted(
             {
@@ -1052,16 +964,25 @@ def search(request: SearchRequest) -> SearchResult:
         query_intent = "broad-summary"
     else:
         query_intent = "literal-matches"
-    selected_hits: list[SearchHit] = []
+    return symbol_candidates, semantic_candidate, query_intent, broad_query
+
+
+def _select_hits(hits: list[SearchHit], *, limit: int, per_file: int) -> list[SearchHit]:
+    selected: list[SearchHit] = []
     per_path: Counter[str] = Counter()
     for hit in hits:
-        if per_path[hit.path] >= request.per_file:
+        if per_path[hit.path] >= per_file:
             continue
-        selected_hits.append(hit)
+        selected.append(hit)
         per_path[hit.path] += 1
-        if len(selected_hits) >= request.limit:
+        if len(selected) >= limit:
             break
+    return selected
 
+
+def _effective_view_context(
+    request: SearchRequest, *, broad_query: bool
+) -> tuple[str, int]:
     if request.view == "auto":
         if request.context > 0:
             effective_view = "snippets"
@@ -1074,14 +995,20 @@ def search(request: SearchRequest) -> SearchResult:
     effective_context = request.context
     if effective_view == "snippets" and effective_context == 0:
         effective_context = 2
+    return effective_view, effective_context
 
-    snippets, flat_context = _build_context_snippets(
-        root,
-        selected_hits,
-        context=effective_context,
-        max_chars=request.max_chars,
-    )
 
+def _search_files(
+    request: SearchRequest,
+    selected_hits: list[SearchHit],
+    snippets: dict[str, tuple[SourceSnippet, ...]],
+    counts_by_file: dict[str, int],
+) -> tuple[
+    list[SearchFile],
+    list[SearchHit],
+    list[MatchFileSummary],
+    dict[str, list[SearchHit]],
+]:
     grouped: dict[str, list[SearchHit]] = defaultdict(list)
     for hit in selected_hits:
         grouped[hit.path].append(hit)
@@ -1122,16 +1049,127 @@ def search(request: SearchRequest) -> SearchResult:
             counts_by_file.items(), key=lambda item: (-item[1], item[0])
         )
     ]
-    counts_by_role = Counter(classify_path(path) for path in counts_by_file)
-    shown = len(visible_hits)
-    shown_files = len(search_files)
+    return search_files, visible_hits, match_file_summary, grouped
+
+
+def _search_coverage(
+    *,
+    scan_limited: bool,
+    shown: int,
+    total_matching_lines: int,
+    shown_files: int,
+    matching_files: int,
+) -> Coverage:
     causes: list[str] = []
     if scan_limited:
         causes.append(SCAN_CAP)
     if shown < total_matching_lines or shown_files < matching_files:
         causes.append(RESULT_LIMIT)
-    coverage = (
-        typed_coverage(COMPLETE) if not causes else typed_coverage(SAMPLED, *causes)
+    return typed_coverage(COMPLETE) if not causes else typed_coverage(SAMPLED, *causes)
+
+
+def search(request: SearchRequest) -> SearchResult:
+    rg = find_executable("rg")
+    if not rg:
+        raise AgentQError("ripgrep (rg) is required for compact repository search")
+    _validate_search_request(request)
+
+    root = request.root
+    scopes = validated_scopes(root, list(request.scopes))
+    globs = request.globs
+    types = request.types
+    counts_by_file: dict[str, int] = {}
+    if request.coverage_policy == "exact":
+        counts_by_file = _matching_line_counts(
+            root,
+            rg,
+            request.query,
+            scopes,
+            mode=request.mode,
+            word=request.word,
+            case=request.case,
+            globs=globs,
+            types=types,
+            include_sensitive=request.include_sensitive,
+        )
+        if not counts_by_file:
+            return _none_found(request, root, scopes)
+    total_matching_lines = sum(counts_by_file.values())
+    matching_files = len(counts_by_file)
+
+    # The match pass is not capped per-file: samples-per-file is a rendering
+    # control, not a discovery control. scan_cap is the only safety bound on
+    # collection. Under fast/auto policies this is the only pass: per-file
+    # counts accumulate while streaming, so totals are exact when the stream
+    # exhausts naturally and lower bounds when the scan cap is reached.
+    sample_args = [rg, "--json", "--no-messages", "--color=never", "--hidden"]
+    _rg_search_flags(
+        sample_args,
+        mode=request.mode,
+        word=request.word,
+        case=request.case,
+        globs=globs,
+        types=types,
+        include_sensitive=request.include_sensitive,
+    )
+    sample_args += ["--", request.query, *scopes]
+    collector = _HitCollector(request=request, counts_by_file=counts_by_file)
+    _run_sample_search(sample_args, root, collector)
+    hits = collector.hits
+    candidate_chars = collector.candidate_chars
+    scan_limited = collector.scan_limited
+    if request.coverage_policy == "exact":
+        count_quality = "exact"
+    else:
+        total_matching_lines = sum(counts_by_file.values())
+        matching_files = len(counts_by_file)
+        if not counts_by_file:
+            return _none_found(request, root, scopes)
+        count_quality = "lower-bound" if scan_limited else "exact"
+
+    hits.sort(
+        key=lambda h: (
+            _PRIORITY.get(h.kind, 9),
+            _ROLE_PRIORITY.get(h.role, 9),
+            -counts_by_file.get(h.path, 0),
+            h.path,
+            h.line,
+            h.column,
+        )
+    )
+    (
+        symbol_candidates,
+        semantic_candidate,
+        query_intent,
+        broad_query,
+    ) = _query_intent(
+        request,
+        hits,
+        total_matching_lines=total_matching_lines,
+        matching_files=matching_files,
+    )
+    selected_hits = _select_hits(hits, limit=request.limit, per_file=request.per_file)
+    effective_view, effective_context = _effective_view_context(
+        request, broad_query=broad_query
+    )
+    snippets, flat_context = _build_context_snippets(
+        root,
+        selected_hits,
+        context=effective_context,
+        max_chars=request.max_chars,
+    )
+    search_files, visible_hits, match_file_summary, grouped = _search_files(
+        request, selected_hits, snippets, counts_by_file
+    )
+    counts_by_role = Counter(classify_path(path) for path in counts_by_file)
+    shown = len(visible_hits)
+    shown_files = len(search_files)
+    coverage = _search_coverage(
+        scan_limited=scan_limited,
+        shown=shown,
+        total_matching_lines=total_matching_lines,
+        shown_files=shown_files,
+        matching_files=matching_files,
     )
     result = SearchResult(
         repo_root=str(root),
@@ -1165,7 +1203,7 @@ def search(request: SearchRequest) -> SearchResult:
     )
     if request.resume is not None:
         continuation, budget_continuation = _search_continuations(
-            result, request.resume
+            root, result, request.resume
         )
         result = _with_continuations(result, continuation, budget_continuation)
     return result
@@ -1173,8 +1211,8 @@ def search(request: SearchRequest) -> SearchResult:
 
 def _with_continuations(
     result: SearchResult,
-    continuation: SearchContinuation | None,
-    budget_continuation: SearchBudgetContinuation | None,
+    continuation: SearchFollowUp | None,
+    budget_continuation: SearchFollowUp | None,
 ) -> SearchResult:
     return replace(
         result,
@@ -1195,18 +1233,91 @@ def _continuation_target(
     return None, 1
 
 
+def _search_follow_up(
+    root: Path,
+    result: SearchResult,
+    resume: SearchResume,
+    *,
+    reason: tuple[str, ...],
+    omitted: OmittedCounts | None = None,
+    budget: int | None = None,
+    output_format: str | None = None,
+    target_path: str | None = None,
+    target_total: int | None = None,
+) -> SearchFollowUp:
+    """Build the typed resume request for a truncated search result."""
+    paths = [target_path] if target_path else list(result.paths or ["."])
+    view = "snippets" if result.effective_view == "snippets" else "matches"
+    context = result.context if view == "snippets" else 0
+    limit = resume.limit
+    per_file = resume.per_file
+    max_files = resume.max_files
+    scan_cap = resume.scan_cap
+    if target_path:
+        target_count = max(1, int(target_total or 1))
+        limit = target_count
+        per_file = target_count
+        max_files = 1
+        scan_cap = max(scan_cap, target_count)
+        if budget is None:
+            budget = max(
+                resume.budget * 2,
+                target_count * (resume.max_chars + 96) + 600,
+            )
+    options = SearchOptions(
+        query=resume.query,
+        mode=resume.mode,
+        word=resume.word,
+        case=resume.case,
+        globs=resume.globs,
+        types=resume.types,
+        include_sensitive=resume.include_sensitive,
+        limit=limit,
+        per_file=per_file,
+        context=context,
+        max_chars=resume.max_chars,
+        max_files=max_files,
+        scan_cap=scan_cap,
+        coverage_policy=resume.coverage_policy,
+        view=view,
+    )
+    request = new_operation_request(
+        root=root,
+        operation="search",
+        options=options,
+        encode_options=SearchOptions.to_wire,
+        scopes=tuple(paths) if paths != ["."] else (),
+        budget=Budget(output_chars=budget or 0),
+        output_format=output_format or resume.output_format,
+        repeat=True,
+        context=RequestContext(session_id=session_id()),
+    )
+    return SearchFollowUp(
+        record=QueryFollowUp(request=request, reason=reason), omitted=omitted
+    )
+
+
+def _follow_up_from_wire(value: Any) -> SearchFollowUp | None:
+    if not isinstance(value, Mapping) or "request" not in value:
+        return None
+    try:
+        return SearchFollowUp.from_wire(value)
+    except ContractError:
+        return None
+
+
 def _search_continuations(
-    result: SearchResult, resume: SearchResume
-) -> tuple[SearchContinuation | None, SearchBudgetContinuation]:
+    root: Path, result: SearchResult, resume: SearchResume
+) -> tuple[SearchFollowUp | None, SearchFollowUp]:
     return (
-        _search_continuation(result, resume),
-        _search_budget_continuation(result, resume),
+        _search_continuation(root, result, resume),
+        _search_budget_continuation(root, result, resume),
     )
 
 
 def _search_continuation(
-    result: SearchResult, resume: SearchResume
-) -> SearchContinuation | None:
+    root: Path, result: SearchResult, resume: SearchResume
+) -> SearchFollowUp | None:
     if result.coverage.is_complete() and result.scan_complete:
         return None
     shown_by_path = {item.path: item.shown for item in result.files}
@@ -1216,25 +1327,27 @@ def _search_continuation(
         reasons.append("sampled")
     if not result.scan_complete:
         reasons.append("scan-cap")
-    return SearchContinuation(
+    return _search_follow_up(
+        root,
+        result,
+        resume,
         reason=tuple(reasons),
         omitted=OmittedCounts(
             matches=max(0, result.total_matching_lines - result.shown),
             files=max(0, result.matching_files - result.shown_files),
         ),
-        command=resume.command(
-            result,
-            target_path=target_path,
-            target_total=target_total,
-        ),
+        target_path=target_path,
+        target_total=target_total,
     )
 
 
 def _search_budget_continuation(
-    result: SearchResult, resume: SearchResume
-) -> SearchBudgetContinuation:
+    root: Path, result: SearchResult, resume: SearchResume
+) -> SearchFollowUp:
     required = max(resume.budget * 2, result.candidate_chars + 2000)
-    return SearchBudgetContinuation(command=resume.command(result, budget=required))
+    return _search_follow_up(
+        root, result, resume, reason=("render-budget",), budget=required
+    )
 
 
 def _compact_file_record(item: SearchFile, *, view: str) -> dict[str, Any]:
@@ -1331,19 +1444,20 @@ def _compact_continuation(
         reasons.append("sampled")
     if not result.scan_complete:
         reasons.append("scan-cap")
-    return {
-        "reason": reasons,
-        "omitted": {
-            "matches": max(0, total - shown),
-            "files": max(0, matching_files - shown_files),
-        },
-        "command": resume.command(
-            result,
-            output_format="compact-json",
-            target_path=target_path,
-            target_total=target_total,
+    follow_up = _search_follow_up(
+        Path(result.repo_root),
+        result,
+        resume,
+        reason=tuple(reasons),
+        omitted=OmittedCounts(
+            matches=max(0, total - shown),
+            files=max(0, matching_files - shown_files),
         ),
-    }
+        output_format="compact-json",
+        target_path=target_path,
+        target_total=target_total,
+    )
+    return follow_up.to_wire()
 
 
 def _compact_payload(

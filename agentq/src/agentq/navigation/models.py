@@ -246,7 +246,10 @@ class DeclarationSpan:
 
 @dataclass(frozen=True)
 class TypeScriptContinuation:
-    """Typed description of how to resume a truncated TypeScript overview."""
+    """Display hint for resuming a truncated TypeScript overview.
+
+    ``command`` is presentation text only; it is never stored or executed.
+    """
 
     command: str
     symbol: str
@@ -361,7 +364,11 @@ class TypeScriptNav:
                         if self.declaration_span is not None
                         else None
                     )
-                    data["definition"] = self.definition.to_wire()
+                    data["definition"] = (
+                        self.definition.to_wire()
+                        if self.definition is not None
+                        else None
+                    )
                     data["references"] = (
                         self.references.to_wire()
                         if self.references is not None
@@ -527,7 +534,10 @@ class PythonReferenceSection:
 
 @dataclass(frozen=True)
 class PythonContinuation:
-    """Typed description of how to resume a truncated Python overview."""
+    """Display hint for resuming a truncated Python overview.
+
+    ``command`` is presentation text only; it is never stored or executed.
+    """
 
     command: str
     symbol: str
@@ -1142,12 +1152,3 @@ class InspectResult:
         if not updates:
             return self
         return replace(self, **updates)
-
-
-def best_provenance_of(entries: tuple[ProviderMetadata, ...]) -> str:
-    from agentq.core import best_provenance
-
-    return (
-        best_provenance(*(item.provenance for item in entries if item.candidate_count))
-        or LEXICAL
-    )

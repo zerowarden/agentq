@@ -191,7 +191,7 @@ def _int_or(value: Any, default: int) -> int:
 def _python_outline(request: OutlineRequest) -> OutlineResult:
     # The stdlib-AST definition engine is owned by the Python navigation
     # provider; import it lazily so discovery never imports navigation at load.
-    from agentq.navigation.providers.python import python_outline
+    from agentq.navigation import python_outline
 
     return python_outline(request)
 
@@ -238,16 +238,57 @@ def _outline_ast_grep(request: OutlineRequest) -> OutlineResult | None:
     )
 
 
+def _ctags_files(request: OutlineRequest) -> list[str]:
+    root = request.root
+    return [
+        path
+        for path in list_repo_files(root)
+        if scope_match(path, list(request.paths) or ["."])
+        and not is_sensitive_path(path)
+    ]
+
+
+def _ctags_symbol(
+    obj: dict[str, Any],
+    root: Path,
+    pattern: re.Pattern[str] | None,
+    *,
+    public: bool,
+) -> OutlineSymbol | None:
+    if obj.get("_type") != "tag":
+        return None
+    name = str(obj.get("name", ""))
+    if not name or (pattern and not pattern.search(name)):
+        return None
+    if public and name.startswith("_"):
+        return None
+    path = str(obj.get("path", ""))
+    try:
+        path = Path(path).resolve().relative_to(root).as_posix()
+    except Exception:
+        pass
+    signature = str(obj.get("signature") or "")
+    if signature.startswith("("):
+        signature = name + signature
+    elif not signature:
+        signature = name
+    return OutlineSymbol(
+        name=name,
+        kind=obj.get("kind"),
+        file=path,
+        line=obj.get("line"),
+        signature=signature,
+        scope=obj.get("scope"),
+        language=obj.get("language"),
+    )
+
+
 def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
     exe = find_executable("ctags")
     if not exe:
         return None
     root = request.root
-    files = [
-        p
-        for p in list_repo_files(root)
-        if scope_match(p, list(request.paths) or ["."]) and not is_sensitive_path(p)
-    ]
+    files = _ctags_files(request)
     if not files:
         return OutlineResult(
             engine="universal-ctags",
@@ -279,34 +320,12 @@ def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
     pattern = re.compile(request.match, re.I) if request.match else None
     symbols: list[OutlineSymbol] = []
     for obj in parse_json_lines(result.stdout):
-        if obj.get("_type") != "tag":
-            continue
-        name = str(obj.get("name", ""))
-        if not name or (pattern and not pattern.search(name)):
-            continue
-        if request.public and name.startswith("_"):
-            continue
-        path = str(obj.get("path", ""))
-        try:
-            path = Path(path).resolve().relative_to(root).as_posix()
-        except Exception:
-            pass
-        signature = str(obj.get("signature") or "")
-        if signature.startswith("("):
-            signature = name + signature
-        elif not signature:
-            signature = name
-        symbols.append(
-            OutlineSymbol(
-                name=name,
-                kind=obj.get("kind"),
-                file=path,
-                line=obj.get("line"),
-                signature=signature,
-                scope=obj.get("scope"),
-                language=obj.get("language"),
-            )
+        symbol = _ctags_symbol(
+            obj, root, pattern, public=bool(request.public)
         )
+        if symbol is None:
+            continue
+        symbols.append(symbol)
         if len(symbols) >= request.limit:
             break
     truncated = len(symbols) >= request.limit
@@ -326,7 +345,7 @@ def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
 
 
 def _outline_fallback(request: OutlineRequest) -> OutlineResult:
-    from agentq.navigation.providers.python import python_outline
+    from agentq.navigation import python_outline
 
     root = request.root
     query = re.compile(request.match, re.I) if request.match else None

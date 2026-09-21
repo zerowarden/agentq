@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from agentq.core import AgentQError
-from agentq.emission import DispatchResult
+from agentq.delivery import DispatchResult
 
 from .parsers.options import (
     SubParsers,

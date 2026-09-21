@@ -51,6 +51,7 @@ from .resolution import (
     LANGUAGE_PROVIDERS,
     LEXICAL_FALLBACK,
     SymbolResolution,
+    query_provider,
     resolve_symbol,
 )
 
@@ -94,6 +95,7 @@ __all__ = [
     "render_inspect",
     "render_python_overview",
     "render_ts_nav",
+    "query_provider",
     "resolve_symbol",
     "ts_nav",
 ]

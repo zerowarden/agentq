@@ -22,13 +22,13 @@ from agentq.core import (
     typed_from_wire,
 )
 from agentq.discovery import OutlineRequest
-from agentq.navigation.providers import (
+from agentq.navigation import (
     python_outline,
     python_symbol_overview,
+    query_provider,
     render_python_overview,
     render_ts_nav,
 )
-from agentq.navigation.resolution import _query
 
 
 def make_repo(files: dict[str, str]) -> tuple[tempfile.TemporaryDirectory, Path]:
@@ -186,7 +186,7 @@ class ProviderCoverageTests(unittest.TestCase):
             request = navigation_module.NavigationRequest(
                 root=root, symbol="Dup", paths=(".",), limit=2, lang="python"
             )
-            outcome = _query(navigation_module.PythonProvider(), request, True)
+            outcome = query_provider(navigation_module.PythonProvider(), request, True)
             self.assertEqual(outcome.candidate_count, 4)
         finally:
             temp.cleanup()
@@ -362,10 +362,10 @@ class ProviderCoverageTests(unittest.TestCase):
                 return self.locate(_request)
 
         self.assertEqual(
-            _query(NullProvider(), request, True).status,
+            query_provider(NullProvider(), request, True).status,
             ProviderStatus.UNAVAILABLE,
         )
-        missing = _query(NoCoverageProvider(), request, True)
+        missing = query_provider(NoCoverageProvider(), request, True)
         self.assertEqual(missing.coverage.status, "unknown")
         self.assertFalse(missing.coverage.is_complete())
 

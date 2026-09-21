@@ -51,17 +51,16 @@ class SuppressionCliTests(AgentQIntegrationHarness):
         self.assertFalse(other["items"][0].get("suppressed", False))
 
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import state as state_module
+            from agentq import persistence as persistence_module
 
         with mock.patch.dict(os.environ, self.env, clear=False):
-            raw = state_module.database_path().read_bytes()
+            raw = persistence_module.database_path().read_bytes()
         self.assertNotIn(secret_session.encode("utf-8"), raw)
 
     def test_emit_cached_skips_workspace_identity_when_suppression_inactive(
         self,
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import context_cache as cache_module
             from agentq.cli import emit_cached
 
         from types import SimpleNamespace
@@ -76,8 +75,9 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             {**self.env, "AGENTQ_CONTEXT_CACHE": "0", "AGENTQ_SESSION_ID": "probe"},
         ):
             with mock.patch("builtins.print"):
-                with mock.patch.object(
-                    cache_module, "run_cmd", side_effect=AssertionError("git ran")
+                with mock.patch(
+                    "agentq.execution.run_cmd",
+                    side_effect=AssertionError("git ran"),
                 ) as run_mock:
                     emit_cached(
                         args, self.repo, "search", {"query": "x"}, producer, render_noop
@@ -87,9 +87,8 @@ class SuppressionCliTests(AgentQIntegrationHarness):
 
         with mock.patch.dict(os.environ, {**self.env, "AGENTQ_SESSION_ID": "probe"}):
             with mock.patch("builtins.print"):
-                with mock.patch.object(
-                    cache_module,
-                    "run_cmd",
+                with mock.patch(
+                    "agentq.execution.run_cmd",
                     return_value=SimpleNamespace(returncode=0, stdout="head\n"),
                 ) as run_mock:
                     emit_cached(
@@ -101,9 +100,9 @@ class SuppressionCliTests(AgentQIntegrationHarness):
         self,
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import context_cache as cache_module
-            from agentq import state as state_module
+            from agentq import persistence as persistence_module
             from agentq.core import DiffSelection
+            from agentq.delivery import suppression as cache_module
             from agentq.git import DiffRequest
             from agentq.git import diff as git_diff
 
@@ -116,7 +115,7 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             )
             seed_delivery_receipt(
                 cache_module,
-                state_module,
+                persistence_module,
                 self.repo,
                 "search",
                 operation_key,
@@ -125,13 +124,13 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             for index in range(1100):
                 seed_delivery_receipt(
                     cache_module,
-                    state_module,
+                    persistence_module,
                     self.repo,
                     "search",
                     __import__("hashlib").sha256(f"key-{index}".encode()).hexdigest(),
                     "operation",
                 )
-            db_path = state_module.database_path()
+            db_path = persistence_module.database_path()
             self.assertTrue(db_path.is_file())
             self.assertNotIn(secret.encode("utf-8"), db_path.read_bytes())
             reader = sqlite3.connect(db_path)
@@ -182,7 +181,7 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             diff_key = first.delivery_result_key
             assert diff_key is not None
             seed_delivery_receipt(
-                cache_module, state_module, self.repo, "git-diff", diff_key, "result"
+                cache_module, persistence_module, self.repo, "git-diff", diff_key, "result"
             )
             with mock.patch(
                 "agentq.git.diff._stream_bounded_patch",

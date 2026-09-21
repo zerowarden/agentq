@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any
 
 from agentq.core import (
+    AgentQError,
     ContractError,
     canonical_digest,
     optional_int,
@@ -64,6 +65,22 @@ class ByteEdit:
 
     def to_wire(self) -> dict[str, Any]:
         return {"start": self.start, "end": self.end, "replacement": self.replacement}
+
+
+def apply_edits(original: bytes, edits: tuple[ByteEdit, ...]) -> bytes:
+    """Materialize the postimage from ordered, non-overlapping byte edits."""
+    assembled = bytearray()
+    cursor = 0
+    for edit in edits:
+        if edit.start < cursor or edit.end > len(original):
+            raise AgentQError(
+                "planned byte edits are out of range or overlap the preimage"
+            )
+        assembled += original[cursor : edit.start]
+        assembled += edit.replacement.encode("utf-8")
+        cursor = edit.end
+    assembled += original[cursor:]
+    return bytes(assembled)
 
 
 @dataclass(frozen=True)

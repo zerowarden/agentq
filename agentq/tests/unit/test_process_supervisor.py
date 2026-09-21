@@ -13,6 +13,7 @@ from unittest import mock
 
 from agentq.core import AgentQCancelled
 from agentq.execution import (
+    CancellationToken,
     CaptureStatus,
     CleanupStatus,
     ExecutionOutcome,
@@ -20,9 +21,6 @@ from agentq.execution import (
     StopReason,
     StreamMode,
     WrapperStatus,
-)
-from agentq.execution.supervisor import (
-    CancellationToken,
     cli_exit_code,
     set_active_cancellation,
     supervise,

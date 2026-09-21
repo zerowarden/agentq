@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -188,6 +188,8 @@ class ReadOverlap:
 
 @dataclass(frozen=True)
 class ReadContinuation:
+    """Recovery hint for remaining windows; display text, never executed."""
+
     command: str
     remaining_windows: int
     shown_windows: int
@@ -557,7 +559,7 @@ def _plan_read_overlap(
     cache_command: str,
     max_chars: int,
 ) -> tuple[list[ReadWindow], list[ReadWindow], ReadOverlap | None]:
-    from agentq.context_cache import read_repeat_advice
+    from agentq.delivery import read_repeat_advice
 
     probe = {
         "items": [
@@ -591,27 +593,98 @@ def _plan_read_overlap(
     return unseen, suppressed, overlap
 
 
-def read(request: ReadRequest) -> ReadResult:
-    root = request.root
-    specs = list(request.specs)
-    if not specs:
-        raise AgentQError("at least one file path is required")
-    global_anchors = sorted(set(request.line_anchors))
-    global_ranges = list(request.line_ranges)
-    if global_anchors or global_ranges:
-        if len(specs) != 1:
-            raise AgentQError(
-                "--line/--lines accept one file; use FILE:30,85 or FILE:20-45,110 to batch files"
-            )
-        if (
-            request.start is not None
-            or request.end is not None
-            or request.around is not None
-        ):
-            raise AgentQError(
-                "--line/--lines cannot be combined with --start, --end, or --around"
-            )
+def _validate_read_locations(
+    request: ReadRequest,
+    specs: list[str],
+    global_anchors: list[int],
+    global_ranges: list[tuple[int, int]],
+) -> None:
+    if not (global_anchors or global_ranges):
+        return
+    if len(specs) != 1:
+        raise AgentQError(
+            "--line/--lines accept one file; use FILE:30,85 or FILE:20-45,110 to batch files"
+        )
+    if (
+        request.start is not None
+        or request.end is not None
+        or request.around is not None
+    ):
+        raise AgentQError(
+            "--line/--lines cannot be combined with --start, --end, or --around"
+        )
 
+
+def _load_source_state(request: ReadRequest, path: Path, relative: str) -> _SourceState:
+    if is_sensitive_path(path) and not request.include_sensitive:
+        return _SourceState(
+            path=relative,
+            refused=True,
+            reason="sensitive path; pass --include-sensitive explicitly",
+        )
+    try:
+        safe_lines, version, redaction = _safe_source_lines(
+            path,
+            strict_private_keys=is_sensitive_path(path),
+        )
+    except AgentQError:
+        return _SourceState(path=relative, refused=True, reason="binary file")
+    return _SourceState(
+        path=relative,
+        safe_lines=safe_lines,
+        version=version,
+        redaction=redaction or None,
+    )
+
+
+def _apply_source_windows(
+    request: ReadRequest,
+    state: _SourceState,
+    relative: str,
+    anchors: list[int],
+    ranges: list[tuple[int, int]],
+) -> bool:
+    explicit_windows = bool(anchors or ranges)
+    total = len(state.safe_lines)
+    if explicit_windows:
+        windows, anchor_set = _requested_source_windows(
+            relative, total, anchors, ranges, request.context
+        )
+        state.anchor_set.update(anchor_set)
+    elif total == 0:
+        state.empty = True
+        return False
+    else:
+        local_start = (
+            max(1, request.around - request.context)
+            if request.around is not None
+            else max(1, request.start or 1)
+        )
+        if local_start > total:
+            raise AgentQError(
+                f"source start is outside {relative} ({total} lines): {local_start}"
+            )
+        local_end = (
+            min(total, request.around + request.context)
+            if request.around is not None
+            else min(total, request.end or total)
+        )
+        windows = [(local_start, max(local_start, local_end))]
+        if request.around is not None:
+            state.anchor_set.add(request.around)
+    state.ranges.extend(ranges)
+    state.windows.extend(windows)
+    state.windowed = bool(state.windowed or explicit_windows)
+    return True
+
+
+def _plan_sources(
+    request: ReadRequest,
+    specs: list[str],
+    global_anchors: list[int],
+    global_ranges: list[tuple[int, int]],
+) -> list[_SourceState]:
+    root = request.root
     requests: list[_SourceState] = []
     requests_by_path: dict[str, _SourceState] = {}
     for spec in specs:
@@ -635,67 +708,20 @@ def read(request: ReadRequest) -> ReadResult:
         relative = relpath(root, path)
         state = requests_by_path.get(relative)
         if state is None:
-            if is_sensitive_path(path) and not request.include_sensitive:
-                state = _SourceState(
-                    path=relative,
-                    refused=True,
-                    reason="sensitive path; pass --include-sensitive explicitly",
-                )
-            else:
-                try:
-                    safe_lines, version, redaction = _safe_source_lines(
-                        path,
-                        strict_private_keys=is_sensitive_path(path),
-                    )
-                except AgentQError:
-                    state = _SourceState(
-                        path=relative, refused=True, reason="binary file"
-                    )
-                else:
-                    state = _SourceState(
-                        path=relative,
-                        safe_lines=safe_lines,
-                        version=version,
-                        redaction=redaction or None,
-                    )
+            state = _load_source_state(request, path, relative)
             requests_by_path[relative] = state
             requests.append(state)
         if state.refused:
             continue
         anchors = global_anchors or inline_anchors
         ranges = global_ranges or inline_ranges
-        explicit_windows = bool(anchors or ranges)
-        total = len(state.safe_lines)
-        if explicit_windows:
-            windows, anchor_set = _requested_source_windows(
-                relative, total, anchors, ranges, request.context
-            )
-            state.anchor_set.update(anchor_set)
-        elif total == 0:
-            state.empty = True
-            continue
-        else:
-            local_start = (
-                max(1, request.around - request.context)
-                if request.around is not None
-                else max(1, request.start or 1)
-            )
-            if local_start > total:
-                raise AgentQError(
-                    f"source start is outside {relative} ({total} lines): {local_start}"
-                )
-            local_end = (
-                min(total, request.around + request.context)
-                if request.around is not None
-                else min(total, request.end or total)
-            )
-            windows = [(local_start, max(local_start, local_end))]
-            if request.around is not None:
-                state.anchor_set.add(request.around)
-        state.ranges.extend(ranges)
-        state.windows.extend(windows)
-        state.windowed = bool(state.windowed or explicit_windows)
+        _apply_source_windows(request, state, relative, anchors, ranges)
+    return requests
 
+
+def _base_items_and_windows(
+    requests: list[_SourceState],
+) -> tuple[list[ReadItem], list[ReadWindow]]:
     base_items: list[ReadItem] = []
     planned: list[ReadWindow] = []
     for state in requests:
@@ -736,7 +762,209 @@ def read(request: ReadRequest) -> ReadResult:
             )
             for window_start, window_end in _merge_source_windows(state.windows)
         )
+    return base_items, planned
 
+
+def _source_item(
+    state: _SourceState,
+    window_start: int,
+    window_end: int,
+    *,
+    max_chars: int,
+    selected: bool = True,
+    truncated: bool = False,
+) -> ReadItem:
+    lines = (
+        tuple(
+            ReadLine(
+                line=number,
+                text=compact_line(state.safe_lines[number - 1], max_chars),
+                anchor=number in state.anchor_set,
+            )
+            for number in range(window_start, window_end + 1)
+        )
+        if selected
+        else ()
+    )
+    return ReadItem(
+        path=state.path,
+        total_lines=len(state.safe_lines),
+        start=window_start,
+        end=window_end,
+        lines=lines,
+        version=state.version,
+        truncated=truncated,
+        suppressed=not selected,
+        redaction=state.redaction,
+    )
+
+
+def _build_read_result(
+    request: ReadRequest,
+    root: Path,
+    requests: list[_SourceState],
+    base_items: list[ReadItem],
+    planned: list[ReadWindow],
+    suppressed: list[ReadWindow],
+    states_by_path: dict[str, _SourceState],
+    *,
+    requested_windows: int,
+    total_unseen_lines: int,
+    source_line_cap: int,
+    line_cap: int,
+) -> ReadResult:
+    items = list(base_items)
+    items.extend(
+        _source_item(
+            states_by_path[window.path],
+            window.start,
+            window.end,
+            max_chars=request.max_chars,
+            selected=False,
+        )
+        for window in suppressed
+    )
+    remaining = max(0, line_cap)
+    continuation_windows: list[ReadWindow] = []
+    for index, window in enumerate(planned):
+        if remaining <= 0:
+            continuation_windows.extend(planned[index:])
+            break
+        actual_end = min(window.end, window.start + remaining - 1)
+        items.append(
+            _source_item(
+                states_by_path[window.path],
+                window.start,
+                actual_end,
+                max_chars=request.max_chars,
+                truncated=actual_end < window.end,
+            )
+        )
+        remaining -= actual_end - window.start + 1
+        if actual_end < window.end:
+            continuation_windows.append(replace(window, start=actual_end + 1))
+            continuation_windows.extend(planned[index + 1 :])
+            break
+
+    selected_lines = sum(len(item.lines) for item in items if not item.refused)
+    data = ReadResult(
+        repo_root=str(root),
+        items=tuple(items),
+        truncated=bool(continuation_windows),
+        coverage=(
+            typed_coverage(SAMPLED, LINE_CAP)
+            if continuation_windows
+            else typed_coverage(COMPLETE)
+        ),
+        source_cap_truncated=total_unseen_lines > request.max_lines,
+        render_budget_truncated=line_cap < source_line_cap,
+        max_lines=request.max_lines,
+        max_chars=request.max_chars,
+        windowed=any(state.windowed for state in requests),
+        windows=requested_windows,
+        candidate_lines=selected_lines,
+        candidate_chars=sum(len(line.text) for item in items for line in item.lines),
+        repeat=request.repeat,
+        render_budget=request.budget if line_cap < source_line_cap else None,
+    )
+    continuation = _read_continuation(
+        continuation_windows,
+        max_lines=request.max_lines,
+        max_chars=request.max_chars,
+        budget=request.budget,
+        include_sensitive=request.include_sensitive,
+        allow_outside=request.allow_outside,
+        repeat=request.repeat,
+        output_format=request.output_format,
+    )
+    if continuation is not None:
+        data = replace(data, continuation=continuation)
+    readable = [state for state in requests if not state.refused]
+    if len(readable) == 1 and readable[0].windowed:
+        state = readable[0]
+        data = replace(
+            data,
+            path=state.path,
+            total_lines=len(state.safe_lines),
+            anchors=tuple(sorted(state.anchor_set)),
+            requested_ranges=tuple(
+                RequestedRange(start=start, end=end)
+                for start, end in _merge_source_windows(state.ranges)
+            ),
+            redaction=state.redaction,
+        )
+    return data
+
+
+def _rendered_size(candidate: ReadResult, output_format: str) -> int:
+    if output_format in {"json", "compact-json"}:
+        return len(
+            json.dumps(
+                candidate.to_wire(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    from .rendering import render_read
+
+    return len(render_read(candidate))
+
+
+def _fit_render_budget(
+    request: ReadRequest,
+    data: ReadResult,
+    build_data: Callable[[int], ReadResult],
+    source_line_cap: int,
+    planned: list[ReadWindow],
+) -> tuple[int, ReadResult]:
+    if (
+        _rendered_size(data, request.output_format) <= request.budget
+        or source_line_cap <= 0
+    ):
+        return source_line_cap, data
+    low, high, best = 0, source_line_cap - 1, 0
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = build_data(middle)
+        if _rendered_size(candidate, request.output_format) <= request.budget:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    data = build_data(best)
+    if best == 0:
+        # The budget fits zero evidence lines: say so explicitly with
+        # a recovery budget instead of suggesting the same dead end.
+        required = max(
+            request.budget * 2,
+            _rendered_size(build_data(source_line_cap), request.output_format) + 256,
+        )
+        data = replace(
+            data,
+            continuation=_read_continuation(
+                planned,
+                max_lines=request.max_lines,
+                max_chars=request.max_chars,
+                budget=required,
+                include_sensitive=request.include_sensitive,
+                allow_outside=request.allow_outside,
+                repeat=request.repeat,
+                output_format=request.output_format,
+            ),
+        )
+    return best, data
+
+
+def read(request: ReadRequest) -> ReadResult:
+    root = request.root
+    specs = list(request.specs)
+    if not specs:
+        raise AgentQError("at least one file path is required")
+    global_anchors = sorted(set(request.line_anchors))
+    global_ranges = list(request.line_ranges)
+    _validate_read_locations(request, specs, global_anchors, global_ranges)
+    requests = _plan_sources(request, specs, global_anchors, global_ranges)
+    base_items, planned = _base_items_and_windows(requests)
     requested_windows = len(planned)
     planned, suppressed, overlap = _plan_read_overlap(
         root,
@@ -747,170 +975,29 @@ def read(request: ReadRequest) -> ReadResult:
     )
     total_unseen_lines = sum(window.end - window.start + 1 for window in planned)
     source_line_cap = min(request.max_lines, total_unseen_lines)
-
-    def source_item(
-        state: _SourceState,
-        window_start: int,
-        window_end: int,
-        *,
-        selected: bool = True,
-        truncated: bool = False,
-    ) -> ReadItem:
-        lines = (
-            tuple(
-                ReadLine(
-                    line=number,
-                    text=compact_line(state.safe_lines[number - 1], request.max_chars),
-                    anchor=number in state.anchor_set,
-                )
-                for number in range(window_start, window_end + 1)
-            )
-            if selected
-            else ()
-        )
-        return ReadItem(
-            path=state.path,
-            total_lines=len(state.safe_lines),
-            start=window_start,
-            end=window_end,
-            lines=lines,
-            version=state.version,
-            truncated=truncated,
-            suppressed=not selected,
-            redaction=state.redaction,
-        )
-
     states_by_path = {state.path: state for state in requests if not state.refused}
 
     def build_data(line_cap: int) -> ReadResult:
-        items = list(base_items)
-        items.extend(
-            source_item(
-                states_by_path[window.path], window.start, window.end, selected=False
-            )
-            for window in suppressed
+        data = _build_read_result(
+            request,
+            root,
+            requests,
+            base_items,
+            planned,
+            suppressed,
+            states_by_path,
+            requested_windows=requested_windows,
+            total_unseen_lines=total_unseen_lines,
+            source_line_cap=source_line_cap,
+            line_cap=line_cap,
         )
-        remaining = max(0, line_cap)
-        continuation_windows: list[ReadWindow] = []
-        for index, window in enumerate(planned):
-            if remaining <= 0:
-                continuation_windows.extend(planned[index:])
-                break
-            actual_end = min(window.end, window.start + remaining - 1)
-            items.append(
-                source_item(
-                    states_by_path[window.path],
-                    window.start,
-                    actual_end,
-                    truncated=actual_end < window.end,
-                )
-            )
-            remaining -= actual_end - window.start + 1
-            if actual_end < window.end:
-                continuation_windows.append(replace(window, start=actual_end + 1))
-                continuation_windows.extend(planned[index + 1 :])
-                break
-
-        selected_lines = sum(len(item.lines) for item in items if not item.refused)
-        data = ReadResult(
-            repo_root=str(root),
-            items=tuple(items),
-            truncated=bool(continuation_windows),
-            coverage=(
-                typed_coverage(SAMPLED, LINE_CAP)
-                if continuation_windows
-                else typed_coverage(COMPLETE)
-            ),
-            source_cap_truncated=total_unseen_lines > request.max_lines,
-            render_budget_truncated=line_cap < source_line_cap,
-            max_lines=request.max_lines,
-            max_chars=request.max_chars,
-            windowed=any(state.windowed for state in requests),
-            windows=requested_windows,
-            candidate_lines=selected_lines,
-            candidate_chars=sum(
-                len(line.text) for item in items for line in item.lines
-            ),
-            repeat=request.repeat,
-            render_budget=request.budget if line_cap < source_line_cap else None,
-        )
-        continuation = _read_continuation(
-            continuation_windows,
-            max_lines=request.max_lines,
-            max_chars=request.max_chars,
-            budget=request.budget,
-            include_sensitive=request.include_sensitive,
-            allow_outside=request.allow_outside,
-            repeat=request.repeat,
-            output_format=request.output_format,
-        )
-        if continuation is not None:
-            data = replace(data, continuation=continuation)
-        readable = [state for state in requests if not state.refused]
-        if len(readable) == 1 and readable[0].windowed:
-            state = readable[0]
-            data = replace(
-                data,
-                path=state.path,
-                total_lines=len(state.safe_lines),
-                anchors=tuple(sorted(state.anchor_set)),
-                requested_ranges=tuple(
-                    RequestedRange(start=start, end=end)
-                    for start, end in _merge_source_windows(state.ranges)
-                ),
-                redaction=state.redaction,
-            )
         if overlap is not None:
             data = replace(data, read_overlap=overlap)
         return data
 
-    selected_cap = source_line_cap
-    data = build_data(selected_cap)
+    data = build_data(source_line_cap)
     if request.budget > 0:
-
-        def rendered_size(candidate: ReadResult) -> int:
-            if request.output_format in {"json", "compact-json"}:
-                return len(
-                    json.dumps(
-                        candidate.to_wire(),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                )
-            from .rendering import render_read
-
-            return len(render_read(candidate))
-
-        if rendered_size(data) > request.budget and source_line_cap > 0:
-            low, high, best = 0, source_line_cap - 1, 0
-            while low <= high:
-                middle = (low + high) // 2
-                candidate = build_data(middle)
-                if rendered_size(candidate) <= request.budget:
-                    best = middle
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            selected_cap = best
-            data = build_data(selected_cap)
-            if best == 0:
-                # The budget fits zero evidence lines: say so explicitly with
-                # a recovery budget instead of suggesting the same dead end.
-                required = max(
-                    request.budget * 2,
-                    rendered_size(build_data(source_line_cap)) + 256,
-                )
-                data = replace(
-                    data,
-                    continuation=_read_continuation(
-                        planned,
-                        max_lines=request.max_lines,
-                        max_chars=request.max_chars,
-                        budget=required,
-                        include_sensitive=request.include_sensitive,
-                        allow_outside=request.allow_outside,
-                        repeat=request.repeat,
-                        output_format=request.output_format,
-                    ),
-                )
+        _, data = _fit_render_budget(
+            request, data, build_data, source_line_cap, planned
+        )
     return data

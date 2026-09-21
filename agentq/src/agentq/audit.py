@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from agentq.git import (
     DiffRequest,
     DiffResult,
     StatusRequest,
+    StatusResult,
     diff,
     parse_diff_header_paths,
     status,
@@ -71,6 +72,9 @@ RULES: list[tuple[str, str, re.Pattern[str], str]] = [
 SECRET_SIGNAL_RE = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key)\s*[:=]"
 )
+SECRET_CONTEXT_RE = re.compile(
+    r"(?i)(process\.env|os\.environ|getenv|schema|example|placeholder)"
+)
 GENERATED_BAD_RE = re.compile(
     r"(^|/)(__pycache__|\.cache|coverage|dist|build|target)(/|$)|\.pyc$", re.I
 )
@@ -99,7 +103,7 @@ def _added_lines(
     current = ""
     file_index = 0
     new_line: int | None = None
-    out = []
+    out: list[tuple[str, int | None, str]] = []
     for line in patch.splitlines():
         if line.startswith("diff --git "):
             item = files[file_index] if files and file_index < len(files) else None
@@ -121,15 +125,64 @@ def _added_lines(
     return out
 
 
-def audit_data(
+class _FindingCollector:
+    """Bounded finding collector preserving append order and cap semantics."""
+
+    def __init__(self, max_findings: int) -> None:
+        self.items: list[dict[str, Any]] = []
+        self.max_findings = max_findings
+
+    def add(
+        self,
+        rule: str,
+        severity: str,
+        message: str,
+        path: str | None = None,
+        line: int | None = None,
+    ) -> None:
+        if len(self.items) < self.max_findings:
+            self.items.append(
+                {
+                    "rule": rule,
+                    "severity": severity,
+                    "message": message,
+                    "path": path,
+                    "line": line,
+                }
+            )
+
+    @property
+    def truncated(self) -> bool:
+        return len(self.items) >= self.max_findings
+
+
+def _filtered_status(status_result: StatusResult, paths: list[str]) -> StatusResult:
+    """Restrict a status result to the explicitly selected paths."""
+    selected = set(paths)
+    files = tuple(
+        item
+        for item in status_result.files
+        if item.path in selected or item.original in selected
+    )
+    return replace(
+        status_result,
+        files=files,
+        counts=dict(Counter(item.category for item in files)),
+        total=len(files),
+        shown=len(files),
+        truncated=False,
+    )
+
+
+def _audit_inputs(
     root: Path,
     *,
-    staged: bool = False,
-    base: str | None = None,
-    paths: list[str] | None = None,
-    task_scope: bool = False,
-    max_findings: int = 100,
-) -> dict[str, Any]:
+    staged: bool,
+    base: str | None,
+    paths: list[str] | None,
+    task_scope: bool,
+) -> tuple[StatusResult, DiffResult]:
+    """Collect the bounded status and diff evidence the audit rules inspect."""
     status_result = status(StatusRequest(root=root, limit=200))
     if task_scope and not paths:
         diff_result = DiffResult.empty(
@@ -154,54 +207,50 @@ def audit_data(
         if task_scope:
             diff_result = replace(diff_result, scope="active-task")
     if paths is not None:
-        selected = set(paths)
-        status_files = tuple(
-            item
-            for item in status_result.files
-            if item.path in selected or item.original in selected
-        )
-        status_result = replace(
-            status_result,
-            files=status_files,
-            counts=dict(Counter(item.category for item in status_files)),
-            total=len(status_files),
-            shown=len(status_files),
-            truncated=False,
-        )
-    findings: list[dict[str, Any]] = []
+        status_result = _filtered_status(status_result, paths)
+    return status_result, diff_result
 
-    def add(
-        rule: str,
-        severity: str,
-        message: str,
-        path: str | None = None,
-        line: int | None = None,
-    ) -> None:
-        if len(findings) < max_findings:
-            findings.append(
-                {
-                    "rule": rule,
-                    "severity": severity,
-                    "message": message,
-                    "path": path,
-                    "line": line,
-                }
-            )
 
+@dataclass(frozen=True)
+class _PatchPaths:
+    """Patch paths grouped by the roles the audit rules classify."""
+
+    paths: list[str]
+    source: list[str]
+    tests: list[str]
+    manifests: list[str]
+    locks: list[str]
+
+
+def _patch_paths(diff_result: DiffResult) -> _PatchPaths:
+    paths = [item.path for item in diff_result.files]
+    return _PatchPaths(
+        paths=paths,
+        source=[p for p in paths if classify_path(p) == "source"],
+        tests=[p for p in paths if classify_path(p) == "test"],
+        manifests=[p for p in paths if Path(p).name in MANIFEST_NAMES],
+        locks=[p for p in paths if Path(p).name in LOCK_NAMES],
+    )
+
+
+def _add_patch_findings(
+    findings: _FindingCollector, status_result: StatusResult, diff_result: DiffResult
+) -> None:
+    """Record unmerged-path, diff-check, and patch-size findings."""
     if status_result.counts.get("conflict"):
-        add(
+        findings.add(
             "unmerged-paths",
             "high",
             f"{status_result.counts['conflict']} unmerged paths remain",
         )
     if not diff_result.diff_check_ok:
         for message in diff_result.diff_check[:20]:
-            add("git-diff-check", "high", message)
+            findings.add("git-diff-check", "high", message)
     if (
         diff_result.total_files > 30
         or (diff_result.total_added + diff_result.total_deleted) > 1200
     ):
-        add(
+        findings.add(
             "large-patch",
             "medium",
             f"broad patch: {diff_result.total_files} files, "
@@ -211,61 +260,69 @@ def audit_data(
         diff_result.total_files > 15
         or (diff_result.total_added + diff_result.total_deleted) > 600
     ):
-        add(
+        findings.add(
             "large-patch",
             "low",
             f"substantial patch: {diff_result.total_files} files, "
             f"+{diff_result.total_added} -{diff_result.total_deleted}",
         )
 
-    paths = [item.path for item in diff_result.files]
-    source_paths = [p for p in paths if classify_path(p) == "source"]
-    test_paths = [p for p in paths if classify_path(p) == "test"]
-    manifests = [p for p in paths if Path(p).name in MANIFEST_NAMES]
-    locks = [p for p in paths if Path(p).name in LOCK_NAMES]
-    for path in paths:
+
+def _add_path_findings(
+    findings: _FindingCollector, diff_result: DiffResult, paths: _PatchPaths
+) -> None:
+    """Record findings derived from the changed path set."""
+    for path in paths.paths:
         if is_sensitive_path(path):
-            add(
+            findings.add(
                 "sensitive-file",
                 "high",
                 "sensitive file is part of the patch; verify it is intentional and contains no credentials",
                 path,
             )
         if GENERATED_BAD_RE.search(path):
-            add(
+            findings.add(
                 "generated-artifact",
                 "high",
                 "cache/build/generated artifact is part of the patch",
                 path,
             )
-    if manifests and not locks:
-        add(
+    if paths.manifests and not paths.locks:
+        findings.add(
             "manifest-without-lock",
             "medium",
-            f"dependency/workspace manifest changed without a lockfile: {', '.join(manifests[:5])}",
+            f"dependency/workspace manifest changed without a lockfile: {', '.join(paths.manifests[:5])}",
         )
-    if locks and not manifests:
-        add(
+    if paths.locks and not paths.manifests:
+        findings.add(
             "lock-without-manifest",
             "low",
-            f"lockfile changed without a visible manifest change: {', '.join(locks[:5])}",
+            f"lockfile changed without a visible manifest change: {', '.join(paths.locks[:5])}",
         )
     if (
-        source_paths
-        and not test_paths
+        paths.source
+        and not paths.tests
         and diff_result.total_added + diff_result.total_deleted >= 40
     ):
-        add(
+        findings.add(
             "no-test-change",
             "low",
             "source changed substantially but no test file changed; existing tests may still be sufficient",
         )
 
+
+def _is_secret_like_addition(text: str) -> bool:
+    """Secret-like assignment outside env/schema/placeholder contexts."""
+    return bool(SECRET_SIGNAL_RE.search(text)) and not SECRET_CONTEXT_RE.search(text)
+
+
+def _add_content_findings(
+    findings: _FindingCollector, diff_result: DiffResult
+) -> None:
+    """Record findings from added patch lines."""
     for path, line, text in _added_lines(diff_result.patch or "", diff_result.files):
-        if SECRET_SIGNAL_RE.search(text) and not re.search(
-            r"(?i)(process\.env|os\.environ|getenv|schema|example|placeholder)", text
-        ):
-            add(
+        if _is_secret_like_addition(text):
+            findings.add(
                 "secret-like-addition",
                 "high",
                 "secret-like assignment added; value omitted from report",
@@ -274,19 +331,25 @@ def audit_data(
             )
         for rule, severity, pattern, message in RULES:
             if pattern.search(text):
-                add(rule, severity, message, path, line)
+                findings.add(rule, severity, message, path, line)
 
+
+def _audit_report(
+    root: Path, diff_result: DiffResult, findings: _FindingCollector
+) -> dict[str, Any]:
+    """Assemble the sorted audit payload from the collected findings."""
     severity_order = {"high": 0, "medium": 1, "low": 2}
-    findings.sort(
+    ordered = sorted(
+        findings.items,
         key=lambda item: (
             severity_order[item["severity"]],
             item.get("path") or "",
             item.get("line") or 0,
             item["rule"],
-        )
+        ),
     )
-    counts = Counter(f["severity"] for f in findings)
-    truncated = len(findings) >= max_findings
+    counts = Counter(item["severity"] for item in ordered)
+    truncated = findings.truncated
     return {
         "repo_root": str(root),
         "scope": diff_result.scope,
@@ -296,7 +359,7 @@ def audit_data(
             "deleted": diff_result.total_deleted,
         },
         "counts": dict(counts),
-        "findings": findings,
+        "findings": ordered,
         "truncated": truncated,
         "provenance": HEURISTIC,
         "coverage": (
@@ -306,7 +369,26 @@ def audit_data(
     }
 
 
-def render_audit(data: dict[str, Any]) -> str:
+def audit_data(
+    root: Path,
+    *,
+    staged: bool = False,
+    base: str | None = None,
+    paths: list[str] | None = None,
+    task_scope: bool = False,
+    max_findings: int = 100,
+) -> dict[str, Any]:
+    status_result, diff_result = _audit_inputs(
+        root, staged=staged, base=base, paths=paths, task_scope=task_scope
+    )
+    findings = _FindingCollector(max_findings)
+    _add_patch_findings(findings, status_result, diff_result)
+    _add_path_findings(findings, diff_result, _patch_paths(diff_result))
+    _add_content_findings(findings, diff_result)
+    return _audit_report(root, diff_result, findings)
+
+
+def render_audit(data: dict[str, Any], *, budget: int = 0) -> str:
     p = data["patch"]
     lines = [
         f"patch audit: {data['scope']} — {p['files']} files, +{p['added']} -{p['deleted']}",

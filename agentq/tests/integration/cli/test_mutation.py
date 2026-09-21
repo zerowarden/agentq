@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from tests.support.cli_harness import (
     AGENTQ,
@@ -42,6 +43,32 @@ class MutationCliTests(AgentQIntegrationHarness):
         )
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["remaining_matches"], 0)
+
+    def test_reviewed_plan_round_trip_through_the_cli(self) -> None:
+        plan_file = Path(self.temp.name) / "reviewed-plan.json"
+        scanned = self.data(
+            "codemod-scan",
+            "OldName",
+            "--rewrite",
+            "NewName",
+            "--path",
+            "packages",
+            "--plan-out",
+            str(plan_file),
+        )
+        self.assertEqual(scanned["plan"]["plan_out"], str(plan_file))
+        self.assertTrue(plan_file.is_file())
+
+        dry = self.data("codemod-apply", "--plan", str(plan_file))
+        self.assertFalse(dry["applied"])
+        self.assertTrue(dry["reviewed_plan"])
+        self.assertEqual(dry["matches"], scanned["matches"])
+
+        applied = self.data("codemod-apply", "--plan", str(plan_file), "--apply")
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["reviewed_plan"])
+        self.assertEqual(applied["remaining_matches"], 0)
+        self.assertEqual(applied["matches"], scanned["matches"])
 
     def test_impact_reports_observations_and_rules(self) -> None:
         self.change_a("\nexport const fanout = true\n")

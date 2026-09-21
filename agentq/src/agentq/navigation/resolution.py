@@ -50,8 +50,8 @@ LANGUAGE_PROVIDERS: tuple[NavigationProvider, ...] = (
 LEXICAL_FALLBACK: NavigationProvider = LexicalFallbackProvider()
 
 
-def _query(
-    provider,
+def query_provider(
+    provider: NavigationProvider,
     request: NavigationRequest,
     include_references: bool,
 ) -> ProviderResult[NavigationPayload]:
@@ -170,11 +170,13 @@ def resolve_symbol(
         budget=budget or Budget(),
     )
     outcomes = tuple(
-        _query(provider, request, include_references)
+        query_provider(provider, request, include_references)
         for provider in LANGUAGE_PROVIDERS
         if provider.supports(request)
     )
     resolution = SymbolResolution(outcomes=outcomes)
     if not any(payload_candidate_count(outcome.payload) for outcome in outcomes):
-        resolution.fallback = _query(LEXICAL_FALLBACK, request, include_references)
+        resolution.fallback = query_provider(
+            LEXICAL_FALLBACK, request, include_references
+        )
     return resolution

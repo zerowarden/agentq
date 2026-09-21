@@ -28,7 +28,7 @@ class BudgetCliTests(AgentQIntegrationHarness):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertLessEqual(len(result.stdout.rstrip("\n")), 180)
         self.assertIn("Render budget reached", result.stdout)
-        self.assertIn("continue: agentq continue", result.stdout)
+        self.assertIn("continue: agentq read", result.stdout)
         self.assertNotIn("omitted by render budget", result.stdout)
 
     def test_budgeted_json_keeps_useful_data(self) -> None:

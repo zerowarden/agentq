@@ -55,9 +55,8 @@ class RuntimeCliTests(AgentQIntegrationHarness):
 
     def test_legacy_json_state_migrates_into_sqlite_store(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import context_cache as cache_module
-            from agentq import state as state_module
             from agentq import tasking as tasking_module
+            from agentq.delivery import suppression as cache_module
 
         state_db = Path(self.temp.name) / "legacy-state" / "state.db"
         state_db.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +98,6 @@ class RuntimeCliTests(AgentQIntegrationHarness):
             )
             malformed = legacy_context.with_name(f"{'b' * 16}.json")
             malformed.write_text("{broken legacy state", encoding="utf-8")
-            state_module._legacy_imported = False
             restored = tasking_module._read_state(self.repo)
             self.assertIsNotNone(restored)
             self.assertEqual(restored["task_id"], "legacy123")
@@ -142,11 +140,11 @@ class RuntimeCliTests(AgentQIntegrationHarness):
             self.assertEqual(process.returncode, 0, msg=stderr or stdout)
 
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import context_cache as cache_module
-            from agentq import state as state_module
+            from agentq import persistence as persistence_module
+            from agentq.delivery import suppression as cache_module
 
         with mock.patch.dict(os.environ, env, clear=False):
-            reader = sqlite3.connect(state_module.database_path())
+            reader = sqlite3.connect(persistence_module.database_path())
             try:
                 stored = reader.execute(
                     "SELECT COUNT(*) FROM receipt_fragments WHERE repo_id = ? AND context_id = ? AND command = ? AND kind = ?",

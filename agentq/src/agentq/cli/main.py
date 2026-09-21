@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 from agentq.core import AgentQCancelled, AgentQError, ContractError, telemetry_enabled
+from agentq.delivery import DispatchResult
 from agentq.discovery import repo_root
-from agentq.emission import DispatchResult
 from agentq.execution import run_with_cancellation
 
 from .errors import report_error

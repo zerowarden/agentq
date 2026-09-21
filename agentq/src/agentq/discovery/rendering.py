@@ -5,8 +5,11 @@ Renderers are pure text projection: they never collect, mutate, or execute.
 
 from __future__ import annotations
 
+from typing import Any
+
 from agentq.core import (
     COMPLETE,
+    RenderedText,
     budget_text_records,
     rendered_text,
     status_of,
@@ -15,12 +18,12 @@ from agentq.delivery import read_item_header, read_line_text
 
 from .files import FilesResult
 from .outline import OutlineResult
-from .read import ReadOverlap, ReadResult
+from .read import ReadItem, ReadOverlap, ReadResult
 from .repo_map import RepoMapResult
 from .search import SearchFile, SearchResult
 
 
-def render_files(result: FilesResult) -> str:
+def render_files(result: FilesResult, *, budget: int = 0) -> str:
     lines = [
         f"files: {result.shown}/{result.total}"
         + (" (truncated)" if result.truncated else "")
@@ -64,7 +67,7 @@ def _search_file_block(item: SearchFile, *, view: str, samples: int) -> str:
     return "\n".join(lines)
 
 
-def render_search(result: SearchResult, *, budget: int = 0) -> str:
+def render_search(result: SearchResult, *, budget: int = 0) -> str | RenderedText:
     total = result.total_matching_lines
     matching_files = result.matching_files
     shown = result.shown
@@ -132,7 +135,7 @@ def _pct_hint(value: float) -> str:
     return f"{float(value):.1f}% overlap" if value else "overlap detected"
 
 
-def _redaction_note(redaction: dict | None) -> str | None:
+def _redaction_note(redaction: dict[str, Any] | None) -> str | None:
     if not redaction or not redaction.get("private_key_blocks"):
         return None
     blocks = int(redaction.get("private_key_blocks", 0))
@@ -149,49 +152,45 @@ def _overlap_note(overlap: ReadOverlap) -> str:
     )
 
 
-def render_read(result: ReadResult, *, budget: int = 0) -> str:
-    blocks: list[str] = []
-    for item in result.items:
-        if item.refused:
-            blocks.append(f"{item.path}: [not read: {item.reason}]")
-            continue
-        width = len(str(item.end))
-        lines = [read_item_header(item.path, item.start, item.end, item.total_lines)]
-        redaction_note = _redaction_note(
-            dict(item.redaction) if item.redaction else None
-        )
-        if redaction_note:
-            lines.append(redaction_note)
-        if item.suppressed:
-            lines.append("[already returned; use --repeat to show]")
-        for entry in item.lines:
-            marker = ">" if entry.anchor else " "
-            lines.append(read_line_text(marker, entry.line, width, entry.text))
-        if item.truncated:
-            cause = "render budget" if result.render_budget_truncated else "source cap"
-            lines.append(f"… window stopped at {cause}")
-        blocks.append("\n".join(lines))
+def _read_block(item: ReadItem, *, render_budget_truncated: bool) -> str:
+    if item.refused:
+        return f"{item.path}: [not read: {item.reason}]"
+    width = len(str(item.end))
+    lines = [read_item_header(item.path, item.start, item.end, item.total_lines)]
+    redaction_note = _redaction_note(dict(item.redaction) if item.redaction else None)
+    if redaction_note:
+        lines.append(redaction_note)
+    if item.suppressed:
+        lines.append("[already returned; use --repeat to show]")
+    for entry in item.lines:
+        marker = ">" if entry.anchor else " "
+        lines.append(read_line_text(marker, entry.line, width, entry.text))
+    if item.truncated:
+        cause = "render budget" if render_budget_truncated else "source cap"
+        lines.append(f"… window stopped at {cause}")
+    return "\n".join(lines)
+
+
+def _read_truncation_block(result: ReadResult) -> str:
+    continuation = result.continuation
+    command = continuation.command if continuation is not None else None
+    if not command:
+        return f"Source cap reached ({result.max_lines} lines)."
+    if result.render_budget_truncated:
+        reason = f"Render budget reached ({int(result.render_budget or 0)} chars"
+    else:
+        reason = f"Source cap reached ({result.max_lines} lines"
+    remaining = continuation.remaining_windows if continuation is not None else 0
+    return f"{reason}; {remaining} windows remain).\ncontinue: {command}"
+
+
+def render_read(result: ReadResult, *, budget: int = 0) -> RenderedText:
+    blocks = [
+        _read_block(item, render_budget_truncated=result.render_budget_truncated)
+        for item in result.items
+    ]
     if result.truncated:
-        command = (
-            result.continuation.command if result.continuation is not None else None
-        )
-        if command:
-            if result.render_budget_truncated:
-                reason = (
-                    f"Render budget reached ({int(result.render_budget or 0)} chars"
-                )
-            else:
-                reason = f"Source cap reached ({result.max_lines} lines"
-            remaining = (
-                result.continuation.remaining_windows
-                if result.continuation is not None
-                else 0
-            )
-            blocks.append(
-                f"{reason}; {remaining} windows remain).\ncontinue: {command}"
-            )
-        else:
-            blocks.append(f"Source cap reached ({result.max_lines} lines).")
+        blocks.append(_read_truncation_block(result))
     if result.read_overlap is not None:
         blocks.append(_overlap_note(result.read_overlap))
     rendered, _ = budget_text_records(
@@ -204,7 +203,7 @@ def render_read(result: ReadResult, *, budget: int = 0) -> str:
     return rendered
 
 
-def render_repo_map(result: RepoMapResult) -> str:
+def render_repo_map(result: RepoMapResult, *, budget: int = 0) -> str:
     lines = [
         f"repository: {result.repo_root}",
         f"branch: {result.branch}",
@@ -229,7 +228,7 @@ def render_repo_map(result: RepoMapResult) -> str:
     return "\n".join(lines)
 
 
-def render_outline(result: OutlineResult) -> str:
+def render_outline(result: OutlineResult, *, budget: int = 0) -> str:
     status = status_of(result.coverage)
     lines = [
         f"outline engine: {result.engine}",

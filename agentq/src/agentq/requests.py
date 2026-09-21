@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import (
     Budget,
@@ -18,12 +18,9 @@ from agentq.core import (
     OperationRequest,
     RequestContext,
     SearchOptions,
-    canonical_json,
+    new_operation_request,
     session_id,
-    stable_id,
 )
-
-from .tasking import current_task_id
 
 OptionsCodec = tuple[Callable[[Any], Any], Callable[[Any], Any]]
 
@@ -35,6 +32,8 @@ OPTIONS_CODECS: dict[str, OptionsCodec] = {
 
 def current_context(root: Path, *, consumer_id: str | None = None) -> RequestContext:
     """Host identity for this invocation; every field stays optional."""
+    from .tasking import current_task_id
+
     task = current_task_id(root)
     return RequestContext(
         task_id=task or None,
@@ -72,7 +71,7 @@ def request_from_args(
     scopes: tuple[str, ...] = (),
     execution_deadline_seconds: float | None = None,
     consumer_id: str | None = None,
-) -> OperationRequest:
+) -> OperationRequest[Any]:
     """Normalize one CLI invocation into an accepted request."""
     return request_for(
         root,
@@ -103,7 +102,7 @@ def request_for(
     repeat: bool = False,
     consumer_id: str | None = None,
     context: RequestContext | None = None,
-) -> OperationRequest:
+) -> OperationRequest[Any]:
     """Build one accepted request without depending on argparse.
 
     ``context`` lets a caller supply an identity it already resolved; the
@@ -114,15 +113,11 @@ def request_for(
         raise ContractError(
             f"request normalization is not implemented for operation {operation!r}"
         )
-    if context is None:
-        context = current_context(root, consumer_id=consumer_id)
-    return OperationRequest(
+    return new_operation_request(
+        root=root,
         operation=operation,
-        request_id=_request_identity(root, operation, options, scopes, codec[1]),
-        repo_id=stable_id(str(root.expanduser().resolve()), length=32),
-        worktree_id=stable_id(str(root.expanduser().resolve()), length=32),
         options=options,
-        context=context,
+        encode_options=codec[1],
         scopes=scopes,
         budget=Budget(
             output_chars=output_chars,
@@ -132,26 +127,15 @@ def request_for(
         ),
         output_format=output_format,
         repeat=repeat,
-    )
-
-
-def _request_identity(
-    root: Path, operation: str, options: Any, scopes: tuple[str, ...], encoder
-) -> str:
-    return stable_id(
-        canonical_json(
-            {
-                "operation": operation,
-                "options": encoder(options),
-                "scopes": list(scopes),
-                "repo": str(root.expanduser().resolve()),
-            }
+        context=(
+            context
+            if context is not None
+            else current_context(root, consumer_id=consumer_id)
         ),
-        length=32,
     )
 
 
-def request_to_json(request: OperationRequest) -> str:
+def request_to_json(request: OperationRequest[Any]) -> str:
     codec = OPTIONS_CODECS.get(request.operation)
     if codec is None:
         raise ContractError(
@@ -165,21 +149,24 @@ def request_to_json(request: OperationRequest) -> str:
     )
 
 
-def request_from_json(text: str) -> OperationRequest:
+def request_from_json(text: str) -> OperationRequest[Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ContractError(f"request JSON is not valid JSON: {exc}") from exc
-    operation = payload.get("operation") if isinstance(payload, dict) else None
+    mapping = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
+    operation = mapping.get("operation")
     codec = OPTIONS_CODECS.get(operation if isinstance(operation, str) else "")
     if codec is None:
         raise ContractError(
             f"request JSON names an unsupported operation: {operation!r}"
         )
-    return OperationRequest.from_wire(payload, codec[0])
+    return cast(
+        "OperationRequest[Any]", OperationRequest.from_wire(mapping, codec[0])
+    )
 
 
-def request_argv(request: OperationRequest) -> list[str]:
+def request_argv(request: OperationRequest[Any]) -> list[str]:
     """Explicit argv codec used by continuations; no shell interpretation."""
     if request.operation == "search":
         return _search_argv(request)
@@ -190,7 +177,7 @@ def request_argv(request: OperationRequest) -> list[str]:
     )
 
 
-def _presentation_args(request: OperationRequest) -> list[str]:
+def _presentation_args(request: OperationRequest[Any]) -> list[str]:
     """Presentation flags shared by every continuation argv."""
     args = ["--format", request.output_format]
     if request.budget.output_chars > 0:
@@ -198,7 +185,7 @@ def _presentation_args(request: OperationRequest) -> list[str]:
     return args
 
 
-def _search_argv(request: OperationRequest) -> list[str]:
+def _search_argv(request: OperationRequest[Any]) -> list[str]:
     options = request.options
     if not isinstance(options, SearchOptions) or not options.query:
         raise ContractError("a search continuation requires a non-empty query")
@@ -241,7 +228,7 @@ def _search_argv(request: OperationRequest) -> list[str]:
     return argv
 
 
-def _diff_argv(request: OperationRequest) -> list[str]:
+def _diff_argv(request: OperationRequest[Any]) -> list[str]:
     options = request.options
     if not isinstance(options, DiffSelection):
         raise ContractError("a git-diff continuation requires a diff selection")

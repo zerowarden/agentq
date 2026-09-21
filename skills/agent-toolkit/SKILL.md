@@ -70,7 +70,7 @@ If `inspect` reports candidates across languages (`kind: "ambiguous"`), narrow w
 
 Search totals follow `--coverage fast|auto|exact`: `auto` (default) scans once and reports exact totals unless the scan cap is reached; `fast` never runs a counting pass; `exact` preserves exhaustive counting. When `count_quality` is `lower-bound`, treat totals as `>=` values instead of exact counts.
 
-Truncated results return a short continuation cursor (`continue: agentq continue q7H2a`). Run `agentq continue CURSOR` to resume the exact stored operation; cursors are scoped to the repository and session, expire after one hour, and are refused when the workspace has changed since creation.
+Truncated `search` and `git-diff` results return a short continuation cursor (`continue: agentq continue q7H2a`). Run `agentq continue CURSOR` to resume the exact stored operation; cursors are scoped to the repository and session and expire after one hour. Other truncated operations return a display-only recovery command to rerun directly.
 
 ## Verification configuration
 

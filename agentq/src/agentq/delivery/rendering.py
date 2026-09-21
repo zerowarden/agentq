@@ -6,11 +6,16 @@ They never write to stdout/stderr.
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
+from typing import Any, Protocol
 
+from agentq.core import AgentQError, RenderedText, project_json
 from agentq.redaction import redact_text
 
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+JSON_FORMATS = frozenset({"json", "compact-json"})
 
 
 def strip_ansi(text: str) -> str:
@@ -69,3 +74,94 @@ def human_bytes(value: int) -> str:
             return f"{current:.1f} {unit}" if unit != "B" else f"{int(current)} B"
         current /= 1024
     return f"{value} B"
+
+
+class Renderer(Protocol):
+    """Every renderer accepts the typed value and an optional char budget."""
+
+    def __call__(
+        self, result: Any, /, *, budget: int = 0
+    ) -> str | RenderedText: ...
+
+
+@dataclass(frozen=True)
+class RenderedOutput:
+    """The budget projection of one result, before transport."""
+
+    visible: str
+    prebudget_chars: int = 0
+    truncated: bool = False
+
+
+def project_output(
+    data: dict[str, Any],
+    renderer: Renderer,
+    *,
+    result: Any | None = None,
+    output_format: str = "text",
+    budget: int = 0,
+) -> RenderedOutput:
+    """Render one result under its budget, without writing anything.
+
+    JSON formats project the wire payload with :func:`project_json`; text
+    formats call the renderer with the budget and hard-cut any renderer that
+    ignored it. ``prebudget_chars`` is the size before truncation.
+    """
+    source = result if result is not None else data
+    if output_format in JSON_FORMATS:
+        full = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        visible, truncated = project_json(data, budget)
+        return RenderedOutput(visible, len(full), truncated)
+    rendered = renderer(source, budget=budget)
+    visible = str(rendered).rstrip()
+    prebudget_chars = (
+        rendered.prebudget_chars if isinstance(rendered, RenderedText) else len(visible)
+    )
+    truncated = rendered.truncated if isinstance(rendered, RenderedText) else False
+    if budget > 0 and len(visible) > budget:
+        visible, hard_cut = bound_output(visible, budget)
+        truncated = truncated or hard_cut
+    return RenderedOutput(visible, prebudget_chars, truncated)
+
+
+def _is_evidence_only(command: str, data: dict[str, Any]) -> bool:
+    """True when the final output is usable only if it carries source evidence."""
+    if command == "read":
+        return True
+    return command == "inspect" and data.get("kind") == "source-windows"
+
+
+def require_usable_budget(
+    command: str,
+    data: dict[str, Any],
+    rendered: RenderedOutput,
+    budget: int,
+    evidence: Any,
+    render_budget_truncated: bool,
+) -> None:
+    """Refuse a successful page that shows neither evidence nor recovery.
+
+    An evidence-only command whose render was budget-truncated, emitted no
+    fragment, and lost its recovery continuation is a dead end: exit 0 there
+    would read as a completed scan. The caller gets an explicit budget error
+    naming a sufficient budget instead.
+    """
+    if (
+        budget <= 0
+        or not render_budget_truncated
+        or evidence
+        or not _is_evidence_only(command, data)
+    ):
+        return
+    from agentq.continuations import iter_continuation_blocks
+
+    if any(
+        isinstance(block.get("command"), str) and block["command"] in rendered.visible
+        for block in iter_continuation_blocks(data)
+    ):
+        return
+    needed = max(budget * 2, int(rendered.prebudget_chars) + 64)
+    raise AgentQError(
+        f"{command}: render budget {budget} chars is too small to return evidence "
+        f"or a recovery step; retry with --budget {needed} or higher"
+    )

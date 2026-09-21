@@ -14,6 +14,8 @@ from agentq.core import (
 )
 from agentq.discovery import (
     FilesRequest,
+    FilesResult,
+    PackageManifest,
     SearchRequest,
     SearchResult,
     files,
@@ -58,15 +60,16 @@ def _variants(target: str) -> list[str]:
     return ordered
 
 
-def impact_data(
-    root: Path, target: str, scopes: list[str], limit: int = 120
-) -> dict[str, Any]:
-    target_repo = resolve_repo_path(root, target)
-    target_path = target_repo.absolute
-    exists = target_path.exists()
-    variants = _variants(target)
-    primary = Path(target).stem or Path(target).name if exists else target
-    refs = search(
+def _search_term(target: str, *, exists: bool) -> str:
+    """Stem-based search term for existing targets, literal name otherwise."""
+    return Path(target).stem if exists else target
+
+
+def _reference_search(
+    root: Path, target: str, scopes: list[str], limit: int, *, exists: bool
+) -> SearchResult:
+    primary = (Path(target).stem or Path(target).name) if exists else target
+    return search(
         SearchRequest(
             root=root,
             query=primary,
@@ -77,18 +80,30 @@ def impact_data(
             per_file=10,
         )
     )
-    filename_candidates = files(
+
+
+def _filename_search(
+    root: Path, target: str, scopes: list[str], *, exists: bool
+) -> FilesResult:
+    return files(
         FilesRequest(
             root=root,
-            query=Path(target).stem if exists else target,
+            query=_search_term(target, exists=exists),
             scopes=tuple(scopes),
             limit=40,
         )
     )
-    imports: SearchResult | None = None
-    import_pattern = rf"(?:import|export|from|require|use|mod).*{re.escape(Path(target).stem if exists else target)}"
+
+
+def _import_search(
+    root: Path, target: str, scopes: list[str], *, exists: bool
+) -> SearchResult | None:
+    import_pattern = (
+        rf"(?:import|export|from|require|use|mod).*"
+        rf"{re.escape(_search_term(target, exists=exists))}"
+    )
     try:
-        imports = search(
+        return search(
             SearchRequest(
                 root=root,
                 query=import_pattern,
@@ -99,16 +114,128 @@ def impact_data(
             )
         )
     except Exception:
-        imports = None
+        return None
+
+
+def _impact_observations(
+    *,
+    shared_surface: bool,
+    source_fanout: int,
+    import_fanout: int,
+    test_references: int,
+    config_references: int,
+    owning_package: str | None,
+    scan_capped: bool,
+) -> dict[str, Any]:
+    return {
+        "public_shared_surface": shared_surface,
+        "lexical_source_fanout": source_fanout,
+        "import_pattern_fanout": import_fanout,
+        "direct_test_references": test_references,
+        "config_schema_references": config_references,
+        "owning_package": owning_package,
+        "scan_reached_cap": scan_capped,
+    }
+
+
+def _source_fanout_score(source_fanout: int) -> tuple[int, list[str]]:
+    """Manually weighted score and rules for lexical source fan-out."""
+    if source_fanout >= 20:
+        return 4, ["referenced by at least 20 source files"]
+    if source_fanout >= 6:
+        return 2, ["referenced by multiple source files"]
+    if source_fanout:
+        return 1, []
+    return 0, []
+
+
+def _import_fanout_score(import_fanout: int) -> tuple[int, list[str]]:
+    """Manually weighted score and rules for lexical import fan-out."""
+    if import_fanout >= 10:
+        return 3, ["high import/export fan-out"]
+    if import_fanout:
+        return 1, []
+    return 0, []
+
+
+def _risk_level(score: int) -> str:
+    if score >= 6:
+        return "high"
+    if score >= 3:
+        return "medium"
+    return "low"
+
+
+def _heuristic_risk(
+    *,
+    shared_surface: bool,
+    source_fanout: int,
+    import_fanout: int,
+    has_docs_config: bool,
+    has_tests: bool,
+    has_reference_evidence: bool,
+    scan_capped: bool,
+) -> tuple[str, list[str]]:
+    """Manually weighted rules, not an empirically calibrated risk model."""
+    source_score, rules = _source_fanout_score(source_fanout)
+    import_score, import_rules = _import_fanout_score(import_fanout)
+    score = source_score + import_score
+    rules.extend(import_rules)
+    if shared_surface:
+        score += 3
+        rules.append("target appears to be shared/public/config/schema surface")
+    if has_docs_config:
+        score += 1
+        rules.append("document/config references exist")
+    if not has_tests and has_reference_evidence:
+        score += 1
+        rules.append("no direct lexical test reference found")
+    if scan_capped:
+        score += 2
+        rules.append("reference discovery reached scan safety cap")
+    return _risk_level(score), rules
+
+
+def _validation_steps(
+    *,
+    has_tests: bool,
+    package: PackageManifest | None,
+    has_docs_config: bool,
+    level: str,
+) -> list[str]:
+    validation: list[str] = []
+    if has_tests:
+        validation.append("run directly referenced tests")
+    if package:
+        validation.append(
+            f"run relevant {package.kind} package checks for {package.name or package.path}"
+        )
+    if has_docs_config:
+        validation.append("review docs/config/schema references")
+    if level == "high":
+        validation.append("run broader dependent-package or workspace verification")
+    return validation
+
+
+def impact_data(
+    root: Path, target: str, scopes: list[str], limit: int = 120
+) -> dict[str, Any]:
+    target_repo = resolve_repo_path(root, target)
+    target_path = target_repo.absolute
+    exists = target_path.exists()
+    variants = _variants(target)
+    refs = _reference_search(root, target, scopes, limit, exists=exists)
+    filename_candidates = _filename_search(root, target, scopes, exists=exists)
+    imports = _import_search(root, target, scopes, exists=exists)
     import_hits = imports.hits if imports is not None else ()
     tests = [hit for hit in refs.hits if hit.role == "test"]
     docs_config = [hit for hit in refs.hits if hit.role in {"docs", "config"}]
     source_refs = [hit for hit in refs.hits if hit.role == "source"]
     package = nearest_manifest(root, target_path if exists else root)
-    unique_source_files = {
+    unique_source_files: set[str] = {
         item.path for item in refs.match_file_summary if item.role == "source"
     }
-    unique_import_files = (
+    unique_import_files: set[str] = (
         {item.path for item in imports.match_file_summary}
         if imports is not None
         else set()
@@ -118,59 +245,30 @@ def impact_data(
         SHARED_RISK_RE.search(target.replace("\\", "/"))
         or PUBLIC_NAME_RE.search(target.replace("\\", "/"))
     )
-
-    observations = {
-        "public_shared_surface": shared_surface,
-        "lexical_source_fanout": len(unique_source_files),
-        "import_pattern_fanout": len(unique_import_files),
-        "direct_test_references": len(tests),
-        "config_schema_references": len(docs_config),
-        "owning_package": ((package.name or package.path) if package else None),
-        "scan_reached_cap": scan_capped,
-    }
-
-    # Manually weighted rules, not an empirically calibrated risk model.
-    # The score stays internal; output reports observations and rules only.
-    score = 0
-    rules: list[str] = []
-    if len(unique_source_files) >= 20:
-        score += 4
-        rules.append("referenced by at least 20 source files")
-    elif len(unique_source_files) >= 6:
-        score += 2
-        rules.append("referenced by multiple source files")
-    elif unique_source_files:
-        score += 1
-    if len(unique_import_files) >= 10:
-        score += 3
-        rules.append("high import/export fan-out")
-    elif unique_import_files:
-        score += 1
-    if shared_surface:
-        score += 3
-        rules.append("target appears to be shared/public/config/schema surface")
-    if docs_config:
-        score += 1
-        rules.append("document/config references exist")
-    if not tests and (source_refs or import_hits):
-        score += 1
-        rules.append("no direct lexical test reference found")
-    if scan_capped:
-        score += 2
-        rules.append("reference discovery reached scan safety cap")
-    level = "high" if score >= 6 else "medium" if score >= 3 else "low"
-
-    validation = []
-    if tests:
-        validation.append("run directly referenced tests")
-    if package:
-        validation.append(
-            f"run relevant {package.kind} package checks for {package.name or package.path}"
-        )
-    if docs_config:
-        validation.append("review docs/config/schema references")
-    if level == "high":
-        validation.append("run broader dependent-package or workspace verification")
+    observations = _impact_observations(
+        shared_surface=shared_surface,
+        source_fanout=len(unique_source_files),
+        import_fanout=len(unique_import_files),
+        test_references=len(tests),
+        config_references=len(docs_config),
+        owning_package=(package.name or package.path) if package else None,
+        scan_capped=scan_capped,
+    )
+    level, rules = _heuristic_risk(
+        shared_surface=shared_surface,
+        source_fanout=len(unique_source_files),
+        import_fanout=len(unique_import_files),
+        has_docs_config=bool(docs_config),
+        has_tests=bool(tests),
+        has_reference_evidence=bool(source_refs or import_hits),
+        scan_capped=scan_capped,
+    )
+    validation = _validation_steps(
+        has_tests=bool(tests),
+        package=package,
+        has_docs_config=bool(docs_config),
+        level=level,
+    )
 
     return {
         "repo_root": str(root),
@@ -197,7 +295,7 @@ def impact_data(
     }
 
 
-def render_impact(data: dict[str, Any]) -> str:
+def render_impact(data: dict[str, Any], *, budget: int = 0) -> str:
     o = data["observations"]
     summary = data["heuristic_summary"]
     lines = [

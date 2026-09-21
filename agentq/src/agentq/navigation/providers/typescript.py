@@ -15,6 +15,7 @@ from agentq.core import (
     SEMANTIC,
     AgentQError,
     Coverage,
+    RenderedText,
     budget_text_records,
     ensure_within,
     normalize_scopes_for_wire,
@@ -195,115 +196,132 @@ def _grouped_results(
     return lines
 
 
-def render_ts_nav(nav: TypeScriptNav, *, budget: int = 0) -> str:
+def render_ts_nav(nav: TypeScriptNav, *, budget: int = 0) -> RenderedText:
     if nav.resolution_mode == "symbol" and (
         nav.action == "locate" or nav.ambiguous or not nav.candidates
     ):
-        symbol = nav.symbol or "?"
-        base_status = nav.coverage.status
-        lines = [
-            f"ts symbol {symbol} · {len(nav.candidates)} candidates [{base_status}]"
-        ]
-        for index, item in enumerate(nav.candidates, 1):
-            detail = f" [{item.kind}]" if item.kind else ""
-            config = f" · {item.config}" if item.config else ""
-            lines.append(
-                f"  {index}. {item.path}:{item.line}:{item.column}{detail}{config}"
-            )
-            preview = item.preview or item.display
-            if preview:
-                lines.append(f"     {preview}")
-        if not nav.candidates:
-            if base_status == "complete":
-                lines.append(
-                    "No semantic TypeScript/JavaScript declaration candidate was "
-                    "found in the requested scope."
-                )
-            else:
-                lines.append(
-                    "No semantic TypeScript/JavaScript declaration candidate was "
-                    f"found in the retained sample (coverage {base_status}); narrow "
-                    "--path or retry with a larger limit before concluding absence."
-                )
-        elif nav.ambiguous:
-            lines.append(
-                "resolution incomplete: narrow --path or select a candidate with "
-                "--pick N"
-            )
-        rendered, render_truncated = budget_text_records(
-            lines[0],
-            lines[1:],
-            budget,
-            omission=(
-                "… {count} complete semantic records omitted by render budget; "
-                "narrow --path or lower --limit"
-            ),
-        )
-        if render_truncated and "[complete]" in rendered:
-            visible = visible_coverage(nav.coverage, render_truncated=True)
-            rendered = rendered_text(
-                rendered.replace("[complete]", f"[{visible.status}]", 1),
-                prebudget_chars=rendered.prebudget_chars,
-                truncated=True,
-            )
-        return rendered
-
+        return _render_symbol_result(nav, budget=budget)
     if nav.action == "overview":
-        sections = (
-            ("definition", "definitions", nav.definition),
-            ("references", "references", nav.references),
-            ("implementations", "implementations", nav.implementations),
-        )
-        selection_sampled = nav.section_truncated
-        base = nav.coverage
-        # The typed coverage object is authoritative; a renderer must never
-        # promote partial/sampled/unknown to complete.
-        label = (
-            base.status
-            if base.status != "complete"
-            else ("sampled" if selection_sampled else "complete")
-        )
-        continuation = (
-            nav.continuation.command
-            if nav.continuation is not None
-            else _overview_continuation(nav).command
-        )
-        lines = [
-            f"ts overview {nav.symbol or '?'} · candidate "
-            f"{nav.candidate or 1}/{nav.candidate_count_value() or 1} [{label}]",
-            f"target {nav.target}:{nav.line}:{nav.column} · project {nav.config}",
-        ]
-        if nav.declaration_span is not None:
-            lines.append(
-                "declaration span "
-                f"{nav.declaration_span.start_line}:{nav.declaration_span.end_line}"
-            )
-        for _key, section_label, section in sections:
-            results = section.results if section is not None else ()
-            shown = section.shown if section is not None else 0
-            total = section.total if section is not None else 0
-            lines.append(f"\n{section_label} · {shown}/{total}")
-            lines.extend(_grouped_results(results))
-        if label != "complete":
-            lines.append(f"continue: {continuation}")
-        rendered, truncated = budget_text_records(
-            lines[0],
-            lines[1:],
-            budget,
-            omission=(
-                "… {count} complete semantic overview records omitted; "
-                f"continue: {continuation}"
-            ),
-        )
-        if truncated and "[complete]" in rendered:
-            visible = visible_coverage(nav.coverage, render_truncated=True)
-            rendered = rendered_text(
-                rendered.replace("[complete]", f"[{visible.status}]", 1),
-                prebudget_chars=rendered.prebudget_chars,
-                truncated=True,
-            )
-        return rendered
+        return _render_overview_result(nav, budget=budget)
+    return _render_exact_result(nav, budget=budget)
 
+
+def _render_budgeted_records(
+    nav: TypeScriptNav, lines: list[str], budget: int, *, omission: str
+) -> RenderedText:
+    """Budget one record list and demote a truncated complete claim."""
+    rendered, truncated = budget_text_records(
+        lines[0],
+        lines[1:],
+        budget,
+        omission=omission,
+    )
+    if not (truncated and "[complete]" in rendered):
+        return rendered
+    visible = visible_coverage(nav.coverage, render_truncated=True)
+    return rendered_text(
+        rendered.replace("[complete]", f"[{visible.status}]", 1),
+        prebudget_chars=rendered.prebudget_chars,
+        truncated=True,
+    )
+
+
+def _render_symbol_result(nav: TypeScriptNav, *, budget: int) -> RenderedText:
+    """Symbol-first view: candidate list, or explicit candidate absence."""
+    symbol = nav.symbol or "?"
+    base_status = nav.coverage.status
+    lines = [
+        f"ts symbol {symbol} · {len(nav.candidates)} candidates [{base_status}]"
+    ]
+    for index, item in enumerate(nav.candidates, 1):
+        detail = f" [{item.kind}]" if item.kind else ""
+        config = f" · {item.config}" if item.config else ""
+        lines.append(
+            f"  {index}. {item.path}:{item.line}:{item.column}{detail}{config}"
+        )
+        preview = item.preview or item.display
+        if preview:
+            lines.append(f"     {preview}")
+    if not nav.candidates:
+        if base_status == "complete":
+            lines.append(
+                "No semantic TypeScript/JavaScript declaration candidate was "
+                "found in the requested scope."
+            )
+        else:
+            lines.append(
+                "No semantic TypeScript/JavaScript declaration candidate was "
+                f"found in the retained sample (coverage {base_status}); narrow "
+                "--path or retry with a larger limit before concluding absence."
+            )
+    elif nav.ambiguous:
+        lines.append(
+            "resolution incomplete: narrow --path or select a candidate with "
+            "--pick N"
+        )
+    return _render_budgeted_records(
+        nav,
+        lines,
+        budget,
+        omission=(
+            "… {count} complete semantic records omitted by render budget; "
+            "narrow --path or lower --limit"
+        ),
+    )
+
+
+def _render_overview_result(nav: TypeScriptNav, *, budget: int) -> RenderedText:
+    """Overview view: definition, reference, and implementation sections."""
+    sections = (
+        ("definition", "definitions", nav.definition),
+        ("references", "references", nav.references),
+        ("implementations", "implementations", nav.implementations),
+    )
+    selection_sampled = nav.section_truncated
+    base = nav.coverage
+    # The typed coverage object is authoritative; a renderer must never
+    # promote partial/sampled/unknown to complete.
+    label = (
+        base.status
+        if base.status != "complete"
+        else ("sampled" if selection_sampled else "complete")
+    )
+    continuation = (
+        nav.continuation.command
+        if nav.continuation is not None
+        else _overview_continuation(nav).command
+    )
+    lines = [
+        f"ts overview {nav.symbol or '?'} · candidate "
+        f"{nav.candidate or 1}/{nav.candidate_count_value() or 1} [{label}]",
+        f"target {nav.target}:{nav.line}:{nav.column} · project {nav.config}",
+    ]
+    if nav.declaration_span is not None:
+        lines.append(
+            "declaration span "
+            f"{nav.declaration_span.start_line}:{nav.declaration_span.end_line}"
+        )
+    for _key, section_label, section in sections:
+        results = section.results if section is not None else ()
+        shown = section.shown if section is not None else 0
+        total = section.total if section is not None else 0
+        lines.append(f"\n{section_label} · {shown}/{total}")
+        lines.extend(_grouped_results(results))
+    if label != "complete":
+        lines.append(f"continue: {continuation}")
+    return _render_budgeted_records(
+        nav,
+        lines,
+        budget,
+        omission=(
+            "… {count} complete semantic overview records omitted; "
+            f"continue: {continuation}"
+        ),
+    )
+
+
+def _render_exact_result(nav: TypeScriptNav, *, budget: int) -> RenderedText:
+    """Exact-position view: results for an explicit file/line/column target."""
     lines: list[str] = []
     if nav.symbol:
         lines.append(
@@ -332,23 +350,15 @@ def render_ts_nav(nav: TypeScriptNav, *, budget: int = 0) -> str:
             "coverage sampled; narrow the owning package for exhaustive semantic "
             "evidence"
         )
-    rendered, render_truncated = budget_text_records(
-        lines[0],
-        lines[1:],
+    return _render_budgeted_records(
+        nav,
+        lines,
         budget,
         omission=(
             "… {count} complete semantic records omitted by render budget; "
             "narrow --path or lower --limit"
         ),
     )
-    if render_truncated and "[complete]" in rendered:
-        visible = visible_coverage(nav.coverage, render_truncated=True)
-        rendered = rendered_text(
-            rendered.replace("[complete]", f"[{visible.status}]", 1),
-            prebudget_chars=rendered.prebudget_chars,
-            truncated=True,
-        )
-    return rendered
 
 
 class TypeScriptProvider:

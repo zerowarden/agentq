@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from agentq.core import relpath
 from agentq.workspace import ChangeSet, DependencyGraph, Package, manifest_units
@@ -156,13 +157,13 @@ class PythonVerificationProvider:
             key = manifest.key
             obj = read_toml(manifest.path)
             project_raw = obj.get("project")
-            project: dict = project_raw if isinstance(project_raw, dict) else {}
+            project: dict[str, Any] = project_raw if isinstance(project_raw, dict) else {}
             name = str(
                 project.get("name")
                 or (root.name if key == "." else PurePosixPath(key).name)
             )
             tools_raw = obj.get("tool")
-            tools: dict = tools_raw if isinstance(tools_raw, dict) else {}
+            tools: dict[str, Any] = tools_raw if isinstance(tools_raw, dict) else {}
             declared = {
                 dependency_name(item)
                 for item in (project.get("dependencies") or [])

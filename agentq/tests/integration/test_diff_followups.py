@@ -461,7 +461,7 @@ class ArtifactStorageTests(unittest.TestCase):
             assert stored is not None
             continuations.register_page_handler("search", handler)
             outcome = navigation_commands._run_continue(
-                SimpleNamespace(cursor=stored["cursor"]), self.base
+                SimpleNamespace(cursor=stored.cursor), self.base
             )
 
         self.assertEqual(outcome, 0)
@@ -510,20 +510,20 @@ class ContinuationRecordTests(unittest.TestCase):
 
         env = {**self.env, "AGENTQ_STATE_DB": str(legacy_db)}
         with mock.patch.dict(os.environ, env, clear=False):
-            from agentq import state
+            from agentq import persistence as persistence_module
 
             self.assertIsNone(
-                state.load_continuation("repo", "ctx", "abcd1234", now=time.time())
+                persistence_module.load_continuation("repo", "ctx", "abcd1234", now=time.time())
             )
             columns = {
                 row[1]
-                for row in state.connection().execute(
+                for row in persistence_module.connection().execute(
                     "PRAGMA table_info(continuations)"
                 )
             }
             self.assertIn("payload", columns)
             row = (
-                state.connection()
+                persistence_module.connection()
                 .execute(
                     "SELECT expires_at, payload FROM continuations WHERE cursor = ?",
                     ("abcd1234",),
@@ -533,31 +533,37 @@ class ContinuationRecordTests(unittest.TestCase):
         self.assertEqual(row[0], 0)
         self.assertIsNone(row[1])
 
+    def _search_record(self) -> object:
+        from agentq import continuations
+        from agentq.core import SearchOptions
+        from agentq.requests import request_for
+
+        return continuations.QueryFollowUp(
+            request=request_for(self.base, "search", SearchOptions(query="needle"))
+        )
+
     def test_corrupt_or_unknown_payload_fails_explicitly(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=False):
-            from agentq import continuations, state
+            from agentq import continuations, persistence
 
-            stored = continuations.store_block(
-                self.repo, {"command": "agentq files zz-none"}
-            )
+            record = self._search_record()
+            stored = continuations.store_block(self.repo, record.to_wire())
             assert stored is not None
-            reader = sqlite3.connect(state.database_path())
+            reader = sqlite3.connect(persistence.database_path())
             try:
                 reader.execute(
                     "UPDATE continuations SET payload = ? WHERE cursor = ?",
-                    ("{not json", stored["cursor"]),
+                    ("{not json", stored.cursor),
                 )
                 reader.commit()
             finally:
                 reader.close()
             with self.assertRaises(AgentQError):
-                continuations.load_cursor(self.repo, stored["cursor"])
+                continuations.load_cursor(self.repo, stored.cursor)
 
-            stored = continuations.store_block(
-                self.repo, {"command": "agentq files zz-none"}
-            )
+            stored = continuations.store_block(self.repo, record.to_wire())
             assert stored is not None
-            reader = sqlite3.connect(state.database_path())
+            reader = sqlite3.connect(persistence.database_path())
             try:
                 reader.execute(
                     "UPDATE continuations SET payload = ? WHERE cursor = ?",
@@ -565,35 +571,33 @@ class ContinuationRecordTests(unittest.TestCase):
                         json.dumps(
                             {"schema": "agentq.continuation/v2", "kind": "mystery"}
                         ),
-                        stored["cursor"],
+                        stored.cursor,
                     ),
                 )
                 reader.commit()
             finally:
                 reader.close()
             with self.assertRaises(AgentQError):
-                continuations.load_cursor(self.repo, stored["cursor"])
+                continuations.load_cursor(self.repo, stored.cursor)
 
-    def test_refinement_must_match_the_operation(self) -> None:
+    def test_only_resumable_operations_can_be_stored(self) -> None:
         from agentq import continuations
-        from agentq.core import SearchOptions
-        from agentq.requests import request_for
+        from agentq.core import OperationRequest
 
-        search = request_for(
-            self.base, "search", SearchOptions(query="needle"), output_format="json"
-        )
+        record = self._search_record()
+        self.assertEqual(continuations.QueryFollowUp.from_wire(record.to_wire()), record)
+        command = continuations.display_command(record)
+        self.assertTrue(command is not None and command.startswith("agentq search"))
         with self.assertRaises(ContractError):
             continuations.QueryFollowUp(
-                request=search,
-                refinement=continuations.QueryRefinement(view="patch"),
+                request=OperationRequest(
+                    operation="files",
+                    request_id="r",
+                    repo_id="repo",
+                    worktree_id="wt",
+                    options=None,
+                )
             )
-        self.assertIsInstance(
-            continuations.QueryFollowUp(
-                request=search,
-                refinement=continuations.QueryRefinement(scan_cap=9000),
-            ),
-            continuations.QueryFollowUp,
-        )
 
 
 if __name__ == "__main__":

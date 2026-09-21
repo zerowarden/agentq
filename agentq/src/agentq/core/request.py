@@ -8,12 +8,17 @@ persist the request itself and re-validate it before execution.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Generic, TypeVar
+from pathlib import Path
+from typing import Any, Generic, TypeVar, cast
 
 from .errors import ContractError
+from .runtime import stable_id
 from .validation import (
+    canonical_json,
+    is_instance_of,
     optional_int,
     optional_number,
     optional_str,
@@ -118,9 +123,9 @@ class Budget:
             self.retained_artifact_limit, "budget.retained_artifact_limit", minimum=0
         )
         if self.execution_deadline_seconds is not None:
-            if isinstance(self.execution_deadline_seconds, bool) or not isinstance(
-                self.execution_deadline_seconds, (int, float)
-            ):
+            if is_instance_of(
+                self.execution_deadline_seconds, bool
+            ) or not is_instance_of(self.execution_deadline_seconds, (int, float)):
                 raise ContractError(
                     "budget.execution_deadline_seconds must be a number or null"
                 )
@@ -212,9 +217,9 @@ class SearchOptions:
         ):
             require_int(getattr(self, name), f"search.{name}", minimum=minimum)
         for name in ("globs", "types"):
-            value = getattr(self, name)
-            if not isinstance(value, tuple) or not all(
-                isinstance(item, str) for item in value
+            values = cast("tuple[Any, ...]", getattr(self, name))
+            if not is_instance_of(values, tuple) or not all(
+                is_instance_of(item, str) for item in values
             ):
                 raise ContractError(f"search.{name} must be a tuple of strings")
 
@@ -241,10 +246,12 @@ class SearchOptions:
     def from_wire(cls, value: Any, *, what: str = "search options") -> SearchOptions:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
-        globs = payload.get("globs") or []
-        types = payload.get("types") or []
-        if not isinstance(globs, list) or not isinstance(types, list):
+        globs_raw: Any = payload.get("globs") or []
+        types_raw: Any = payload.get("types") or []
+        if not is_instance_of(globs_raw, list) or not is_instance_of(types_raw, list):
             raise ContractError(f"{what}.globs and {what}.types must be arrays")
+        globs = cast("list[Any]", globs_raw)
+        types = cast("list[Any]", types_raw)
         return cls(
             query=require_str(
                 payload.get("query", ""), f"{what}.query", allow_empty=True
@@ -339,9 +346,10 @@ class DiffSelection:
     def from_wire(cls, value: Any, *, what: str = "diff selection") -> DiffSelection:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
-        paths = payload.get("paths") or []
-        if not isinstance(paths, list):
+        paths_raw: Any = payload.get("paths") or []
+        if not is_instance_of(paths_raw, list):
             raise ContractError(f"{what}.paths must be an array")
+        paths = cast("list[Any]", paths_raw)
         return cls(
             staged=require_bool(payload.get("staged", False), f"{what}.staged"),
             unstaged=require_bool(payload.get("unstaged", False), f"{what}.unstaged"),
@@ -368,6 +376,50 @@ class DiffSelection:
 
 
 OptionsT = TypeVar("OptionsT")
+
+
+def new_operation_request(
+    *,
+    root: Path,
+    operation: str,
+    options: OptionsT,
+    encode_options: Callable[[OptionsT], Any],
+    scopes: tuple[str, ...] = (),
+    budget: Budget | None = None,
+    output_format: str = OutputFormat.TEXT.value,
+    repeat: bool = False,
+    context: RequestContext | None = None,
+) -> OperationRequest[OptionsT]:
+    """Build one accepted request from typed options and host context.
+
+    Request identity is a digest over the operation, encoded options, scopes,
+    and resolved repository, so identical requests share an identity.
+    """
+    resolved_root = str(Path(root).expanduser().resolve())
+    identity = stable_id(resolved_root, length=32)
+    return OperationRequest(
+        operation=operation,
+        request_id=stable_id(
+            canonical_json(
+                {
+                    "operation": operation,
+                    "options": encode_options(options),
+                    "scopes": list(scopes),
+                    "repo": resolved_root,
+                }
+            ),
+            length=32,
+        ),
+        repo_id=identity,
+        worktree_id=identity,
+        options=options,
+        context=context or RequestContext(),
+        scopes=scopes,
+        budget=budget or Budget(),
+        output_format=output_format,
+        repeat=repeat,
+    )
+
 
 _REQUEST_FIELDS = (
     "schema",
@@ -408,9 +460,9 @@ class OperationRequest(Generic[OptionsT]):
         require_str(self.request_id, "request.request_id")
         require_str(self.repo_id, "request.repo_id")
         require_str(self.worktree_id, "request.worktree_id")
-        if not isinstance(self.context, RequestContext):
+        if not is_instance_of(self.context, RequestContext):
             raise ContractError("request.context must be a RequestContext")
-        if not isinstance(self.budget, Budget):
+        if not is_instance_of(self.budget, Budget):
             raise ContractError("request.budget must be a Budget")
         if self.output_format not in {item.value for item in OutputFormat}:
             raise ContractError(
@@ -421,7 +473,7 @@ class OperationRequest(Generic[OptionsT]):
             require_relative_posix(scope, "request scopes entry", allow_root=True)
         require_unique_strings(self.scopes, "request scopes")
 
-    def to_wire(self, options_encoder) -> dict[str, Any]:
+    def to_wire(self, options_encoder: Callable[[OptionsT], Any]) -> dict[str, Any]:
         return {
             "schema": self.schema,
             "operation": self.operation,
@@ -438,8 +490,12 @@ class OperationRequest(Generic[OptionsT]):
 
     @classmethod
     def from_wire(
-        cls, value: Any, options_decoder, *, what: str = "request"
-    ) -> OperationRequest:
+        cls,
+        value: Any,
+        options_decoder: Callable[[Any], OptionsT],
+        *,
+        what: str = "request",
+    ) -> OperationRequest[OptionsT]:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, _REQUEST_FIELDS, what)
         return cls(
@@ -456,7 +512,7 @@ class OperationRequest(Generic[OptionsT]):
             options=options_decoder(payload.get("options")),
             scopes=tuple(
                 require_str(item, f"{what}.scopes entry")
-                for item in payload.get("scopes") or []
+                for item in cast("list[Any]", payload.get("scopes") or [])
             ),
             budget=Budget.from_wire(payload.get("budget"), what=f"{what}.budget"),
             output_format=require_str(

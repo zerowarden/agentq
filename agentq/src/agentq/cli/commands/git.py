@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from agentq.continuations import attach_continuation_cursors
 from agentq.core import DiffSelection
 from agentq.git import (
     DiffRequest,
@@ -22,7 +23,7 @@ from agentq.git import (
     structural,
 )
 
-from ..emit import _attach_continuation_cursors, emit
+from ..emit import emit
 from ..registry import Outcome
 from .task_scope import attach_task_scope
 
@@ -71,7 +72,7 @@ def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
     data = result.to_wire()
     if args.task_scope:
         attach_task_scope(data, scoped, requested=True)
-    _attach_continuation_cursors(root, data)
+    attach_continuation_cursors(root, data)
     result = result.with_wire_continuations(data)
     return emit(args, data, render_diff, root=root, result=result)
 

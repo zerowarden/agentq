@@ -7,6 +7,7 @@ import re
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from agentq.core import (
     LEXICAL,
@@ -352,7 +353,7 @@ def _recovery_messages(
     selected: CandidateRef | None,
     refs: tuple[CandidateRef, ...],
     target: str,
-    outcomes: tuple,
+    outcomes: tuple[Any, ...],
 ) -> tuple[str, ...]:
     if resolution == RESOLVED and selected is not None:
         return (f"agentq read {selected.path}:{selected.line}-{selected.end_line}",)
@@ -569,11 +570,11 @@ def _edit_result(
         incomplete=incomplete,
         resolution=resolution,
     )
-    navigation = (
-        (ts if selected.provider == "typescript" else python)
-        if selected is not None
-        else None
-    )
+    navigation: PythonOverview | TypeScriptNav | None = None
+    if selected is not None:
+        candidate = ts if selected.provider == "typescript" else python
+        if isinstance(candidate, (PythonOverview, TypeScriptNav)):
+            navigation = candidate
 
     if selected is not None:
         declaration, declaration_omission = _selected_declaration(
@@ -706,36 +707,41 @@ def _symbol_result(
     provenance, coverage = _metadata(entries)
     ts = resolution.payload("typescript")
     python = resolution.payload("python")
-    ts_candidates = isinstance(ts, TypeScriptNav) and bool(ts.candidates)
-    py_candidates = isinstance(python, PythonOverview) and bool(python.candidates)
+    ts_nav = ts if isinstance(ts, TypeScriptNav) else None
+    py_nav = python if isinstance(python, PythonOverview) else None
 
-    if ts_candidates and py_candidates:
+    if (
+        ts_nav is not None
+        and ts_nav.candidates
+        and py_nav is not None
+        and py_nav.candidates
+    ):
         return InspectResult(
             kind="ambiguous",
             target=target,
             intent=intent,
-            semantic=ts,
-            python=python,
+            semantic=ts_nav,
+            python=py_nav,
             providers=entries,
             provenance=provenance,
             coverage=coverage,
         )
-    if ts_candidates:
+    if ts_nav is not None and ts_nav.candidates:
         return InspectResult(
             kind="semantic",
             target=target,
             intent=intent,
-            semantic=ts,
+            semantic=ts_nav,
             providers=entries,
             provenance=provenance,
             coverage=coverage,
         )
-    if py_candidates:
+    if py_nav is not None and py_nav.candidates:
         return InspectResult(
             kind="python",
             target=target,
             intent=intent,
-            python=python,
+            python=py_nav,
             providers=entries,
             provenance=provenance,
             coverage=coverage,
@@ -770,6 +776,51 @@ def _symbol_result(
         providers=entries,
         provenance=provenance,
         coverage=coverage,
+    )
+
+
+def _file_result(
+    request: InspectRequest, root: Path, relative: str, candidate_path: Path
+) -> InspectResult:
+    """Outline one file, attaching the owning package when editing."""
+    outline_result = outline(
+        OutlineRequest(
+            root=root,
+            paths=(relative,),
+            limit=min(request.limit, 120),
+        )
+    )
+    if request.intent != "edit":
+        return InspectResult(
+            kind="file",
+            target=request.target,
+            path=relative,
+            role=classify_path(relative),
+            language=language_for(relative),
+            outline=outline_result,
+            intent=request.intent,
+        )
+    package = nearest_manifest(root, candidate_path)
+    verification = (
+        [
+            f"run {package.kind} checks for {package.name or package.path} "
+            "(typecheck, tests)"
+        ]
+        if package
+        else [
+            "no owning manifest found; verify through the workspace-level checks"
+        ]
+    )
+    return InspectResult(
+        kind="file",
+        target=request.target,
+        path=relative,
+        role=classify_path(relative),
+        language=language_for(relative),
+        outline=outline_result,
+        intent=request.intent,
+        package=package,
+        verification=tuple(verification),
     )
 
 
@@ -827,46 +878,7 @@ def inspect(request: InspectRequest) -> InspectResult:
                     language=language_for(relative),
                     source=source,
                 )
-            outline_result = outline(
-                OutlineRequest(
-                    root=root,
-                    paths=(relative,),
-                    limit=min(request.limit, 120),
-                )
-            )
-            if request.intent == "edit":
-                package = nearest_manifest(root, candidate_path)
-                verification = (
-                    [
-                        f"run {package.kind} checks for {package.name or package.path} "
-                        "(typecheck, tests)"
-                    ]
-                    if package
-                    else [
-                        "no owning manifest found; verify through the workspace-level "
-                        "checks"
-                    ]
-                )
-                return InspectResult(
-                    kind="file",
-                    target=request.target,
-                    path=relative,
-                    role=classify_path(relative),
-                    language=language_for(relative),
-                    outline=outline_result,
-                    intent=request.intent,
-                    package=package,
-                    verification=tuple(verification),
-                )
-            return InspectResult(
-                kind="file",
-                target=request.target,
-                path=relative,
-                role=classify_path(relative),
-                language=language_for(relative),
-                outline=outline_result,
-                intent=request.intent,
-            )
+            return _file_result(request, root, relative, candidate_path)
         if anchors or ranges:
             raise AgentQError("--line/--lines require inspect TARGET to be a file")
         return InspectResult(
@@ -944,69 +956,89 @@ def inspect(request: InspectRequest) -> InspectResult:
 
 def render_inspect(result: InspectResult, *, budget: int = 0) -> str:
     if result.kind == "semantic":
+        assert result.semantic is not None
         return render_ts_nav(result.semantic, budget=budget)
     if result.kind == "python":
+        assert result.python is not None
         return render_python_overview(result.python, budget=budget)
     if result.kind == "source-windows":
+        assert result.source is not None
         return render_read(result.source, budget=budget)
     if result.kind == "ambiguous":
         return _render_ambiguous(result, budget=budget)
     if result.kind == "edit":
         return _render_edit(result, budget=budget)
+    return _render_untyped_result(result, budget=budget)
+
+
+def _render_untyped_result(result: InspectResult, *, budget: int) -> str:
+    """Render lexical, file, and directory results, or the empty fallback."""
     if result.kind == "lexical":
-        search_result = result.search
-        # The fallback's own coverage is not the visible coverage: a complete
-        # lexical scan must not erase a failed or partial language provider.
-        # Report both the available fallback and the limitation.
-        visible = merge_typed(result.coverage, search_result.coverage)
-        limited = [
-            item
-            for item in result.providers
-            if item.errors or not item.coverage.is_complete()
-        ]
-        prefix = ""
-        if limited:
-            names = ", ".join(
-                f"{item.provider} ({item.coverage.status})" for item in limited
-            )
-            prefix = f"limited provider evidence ({names}); lexical fallback\n"
-        typed_search = replace(search_result, coverage=visible)
-        rendered = render_search(
-            typed_search,
-            budget=max(0, budget - len(prefix)) if budget else 0,
-        )
-        return rendered_text(
-            prefix + rendered,
-            prebudget_chars=len(prefix)
-            + (
-                rendered.prebudget_chars
-                if isinstance(rendered, RenderedText)
-                else len(rendered)
-            ),
-            truncated=(
-                rendered.truncated if isinstance(rendered, RenderedText) else False
-            ),
-        )
+        return _render_lexical(result, budget=budget)
     if result.kind in {"file", "directory"}:
-        header = f"inspect {result.path}"
-        if result.kind == "file":
-            header += f" [{result.role}; {result.language}]"
-        blocks = [render_outline(result.outline)]
-        if result.package is not None:
-            package = result.package
-            blocks.append(
-                f"owning package: {package.name or package.path} ({package.path})"
-            )
-        blocks.extend(f"verify: {item}" for item in result.verification)
-        rendered, _ = budget_text_records(
-            header,
-            blocks,
-            budget,
-            separator="\n",
-            omission="… {count} inspection records omitted by render budget",
-        )
-        return rendered
+        return _render_outline(result, budget=budget)
     return rendered_text(f"inspect {result.target}: no result")
+
+
+def _render_lexical(result: InspectResult, *, budget: int) -> str:
+    """Render a lexical search result with any limited provider evidence."""
+    search_result = result.search
+    assert search_result is not None
+    # The fallback's own coverage is not the visible coverage: a complete
+    # lexical scan must not erase a failed or partial language provider.
+    # Report both the available fallback and the limitation.
+    visible = merge_typed(result.coverage, search_result.coverage)
+    limited = [
+        item
+        for item in result.providers
+        if item.errors or not item.coverage.is_complete()
+    ]
+    prefix = ""
+    if limited:
+        names = ", ".join(
+            f"{item.provider} ({item.coverage.status})" for item in limited
+        )
+        prefix = f"limited provider evidence ({names}); lexical fallback\n"
+    typed_search = replace(search_result, coverage=visible)
+    rendered = render_search(
+        typed_search,
+        budget=max(0, budget - len(prefix)) if budget else 0,
+    )
+    return rendered_text(
+        prefix + rendered,
+        prebudget_chars=len(prefix)
+        + (
+            rendered.prebudget_chars
+            if isinstance(rendered, RenderedText)
+            else len(rendered)
+        ),
+        truncated=(
+            rendered.truncated if isinstance(rendered, RenderedText) else False
+        ),
+    )
+
+
+def _render_outline(result: InspectResult, *, budget: int) -> str:
+    """Render a file or directory outline with its verification scope."""
+    assert result.outline is not None
+    header = f"inspect {result.path}"
+    if result.kind == "file":
+        header += f" [{result.role}; {result.language}]"
+    blocks = [render_outline(result.outline)]
+    if result.package is not None:
+        package = result.package
+        blocks.append(
+            f"owning package: {package.name or package.path} ({package.path})"
+        )
+    blocks.extend(f"verify: {item}" for item in result.verification)
+    rendered, _ = budget_text_records(
+        header,
+        blocks,
+        budget,
+        separator="\n",
+        omission="… {count} inspection records omitted by render budget",
+    )
+    return rendered
 
 
 def _render_ambiguous(result: InspectResult, *, budget: int) -> str:
@@ -1178,6 +1210,7 @@ def _edit_omission(bundle: EditBundle) -> str:
 
 def _render_edit(result: InspectResult, *, budget: int) -> str:
     bundle = result.edit
+    assert bundle is not None
     header = (
         f"edit bundle {bundle.target.symbol} "
         f"[{bundle.resolution}; coverage {status_of(result.coverage)}]"

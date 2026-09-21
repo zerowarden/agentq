@@ -187,8 +187,8 @@ class TelemetryCliTests(AgentQIntegrationHarness):
 
     def test_disabled_context_cache_advice_does_not_access_storage(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import context_cache as cache_module
-            from agentq import state as state_module
+            from agentq import persistence as persistence_module
+            from agentq.delivery import suppression as cache_module
 
         read = {
             "items": [
@@ -204,7 +204,7 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         diff = {"scope": "HEAD+working-tree", "total_files": 0, "files": []}
         with mock.patch.dict(os.environ, {"AGENTQ_CONTEXT_CACHE": "0"}):
             with mock.patch.object(
-                state_module,
+                persistence_module,
                 "connection",
                 side_effect=AssertionError("state storage accessed"),
             ):
@@ -364,9 +364,10 @@ class TelemetryCliTests(AgentQIntegrationHarness):
     def test_default_stats_orders_compact_events_across_rotated_storage(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq import telemetry as telemetry_module
+            from agentq.core import repo_id
 
         with mock.patch.dict(os.environ, self.env):
-            repository_id = telemetry_module.repo_id(self.repo)
+            repository_id = repo_id(self.repo)
 
             def read_event(
                 identity: str, timestamp: float, start: int, end: int

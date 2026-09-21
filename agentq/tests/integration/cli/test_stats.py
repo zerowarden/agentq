@@ -197,9 +197,9 @@ class StatsCliTests(AgentQIntegrationHarness):
 
         with mock.patch.dict(os.environ, self.env):
             with mock.patch.object(
-                telemetry_module,
+                telemetry_module.report,
                 "_build_context_index",
-                wraps=telemetry_module._build_context_index,
+                wraps=telemetry_module.report._build_context_index,
             ) as build_index:
                 summary = telemetry_module.stats_data(self.repo, since="all")
                 build_index.assert_not_called()

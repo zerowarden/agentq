@@ -10,6 +10,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agentq.core import AgentQError
 from agentq.delivery import compact_line
@@ -50,7 +51,7 @@ def run_cmd(
         overrides.update(env)
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
-    def collect(event) -> bool:
+    def collect(event: Any) -> bool:
         captured[event.stream].append(event.text)
         return True
 

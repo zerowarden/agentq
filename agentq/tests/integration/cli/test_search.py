@@ -193,7 +193,7 @@ class SearchCliTests(AgentQIntegrationHarness):
                 "--format",
                 "compact-json",
                 "--budget",
-                "900",
+                "1500",
                 "CONTINUE_HIT",
                 "--path",
                 "packages/a/src/continuation.ts",
@@ -209,7 +209,7 @@ class SearchCliTests(AgentQIntegrationHarness):
             capture_output=True,
         )
         self.assertEqual(budgeted_result.returncode, 0, msg=budgeted_result.stderr)
-        self.assertLessEqual(len(budgeted_result.stdout.strip()), 900)
+        self.assertLessEqual(len(budgeted_result.stdout.strip()), 1500)
         budgeted = json.loads(budgeted_result.stdout)
         self.assertIn("render-budget", budgeted["continuation"]["reason"])
         self.assertTrue(

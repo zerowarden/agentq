@@ -22,8 +22,13 @@ from unittest import mock
 
 AGENTQ = Path(sys.executable).with_name("agentq")
 
-from agentq import context_cache as cache_module  # noqa: E402
-from agentq import state as state_module  # noqa: E402
+from agentq import persistence as persistence_module  # noqa: E402
+from agentq.delivery import suppression as cache_module  # noqa: E402
+from tests.support.cli_harness import (  # noqa: E402
+    make_fragment,
+    make_receipt,
+    record_receipt,
+)
 
 
 def _harness_env(base: Path, session: str | None = "delivery-test") -> dict[str, str]:
@@ -100,7 +105,7 @@ class DeliveryHarness(unittest.TestCase):
 
     def ledger_counts(self) -> tuple[int, int]:
         with mock.patch.dict(os.environ, self.env, clear=False):
-            reader = sqlite3.connect(state_module.database_path())
+            reader = sqlite3.connect(persistence_module.database_path())
             try:
                 receipts = reader.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
                 fragments = reader.execute(
@@ -231,21 +236,16 @@ class EmissionRecordingTests(DeliveryHarness):
             self.assertTrue(evidence)
             # Lines 6-10 were never emitted, so a later read still returns them.
             identity = cache_module.suppression_identity(self.repo)
-            state_module.store_receipt(
-                {
-                    "receipt_id": "partial-fixture",
-                    "repo_id": cache_module.repo_id(self.repo),
-                    "context_id": identity[0],
-                    "consumer_id": identity[1] or None,
-                    "request_id": "partial-fixture",
-                    "output_digest": "f" * 64,
-                    "written_bytes": len(visible),
-                    "transport": "emitted",
-                    "acknowledgment": "unacknowledged",
-                    "emitted_at": time.time(),
-                },
-                rows,
-                now=time.time(),
+            record_receipt(
+                persistence_module,
+                cache_module.repo_id(self.repo),
+                receipt_id="partial-fixture",
+                context_id=identity[0],
+                consumer_id=identity[1] or None,
+                output_digest="f" * 64,
+                written_bytes=len(visible),
+                rows=rows,
+                command="read",
             )
             advice = cache_module.read_repeat_advice(
                 self.repo,
@@ -288,21 +288,16 @@ class EmissionRecordingTests(DeliveryHarness):
             )
             self.assertTrue(rows)
             identity = cache_module.suppression_identity(self.repo)
-            state_module.store_receipt(
-                {
-                    "receipt_id": "variant-fixture",
-                    "repo_id": cache_module.repo_id(self.repo),
-                    "context_id": identity[0],
-                    "consumer_id": identity[1] or None,
-                    "request_id": "variant-fixture",
-                    "output_digest": "e" * 64,
-                    "written_bytes": len(visible),
-                    "transport": "emitted",
-                    "acknowledgment": "unacknowledged",
-                    "emitted_at": time.time(),
-                },
-                rows,
-                now=time.time(),
+            record_receipt(
+                persistence_module,
+                cache_module.repo_id(self.repo),
+                receipt_id="variant-fixture",
+                context_id=identity[0],
+                consumer_id=identity[1] or None,
+                output_digest="e" * 64,
+                written_bytes=len(visible),
+                rows=rows,
+                command="read",
             )
             version = narrow_wire["items"][0]["version"]
             # A wider line width is different evidence: no suppression.
@@ -430,9 +425,9 @@ class EmissionRecordingTests(DeliveryHarness):
             result = read(ReadRequest(root=self.repo, specs=("pkg/mod.py:1-2",)))
             for failure in (
                 mock.patch.object(
-                    state_module, "store_receipt", side_effect=RuntimeError("locked")
+                    persistence_module, "store_receipt", side_effect=RuntimeError("locked")
                 ),
-                mock.patch.object(state_module, "store_receipt", return_value=False),
+                mock.patch.object(persistence_module, "store_receipt", return_value=False),
             ):
                 with failure:
                     with mock.patch("builtins.print"):
@@ -570,21 +565,16 @@ class EmissionRecordingTests(DeliveryHarness):
                 self.repo, "read", data, visible, "text"
             )
             identity = cache_module.suppression_identity(self.repo)
-            state_module.store_receipt(
-                {
-                    "receipt_id": "redacted-fixture",
-                    "repo_id": cache_module.repo_id(self.repo),
-                    "context_id": identity[0],
-                    "consumer_id": identity[1] or None,
-                    "request_id": "redacted-fixture",
-                    "output_digest": "a" * 64,
-                    "written_bytes": len(visible),
-                    "transport": "emitted",
-                    "acknowledgment": "unacknowledged",
-                    "emitted_at": time.time(),
-                },
-                [{**row, "consumer_id": identity[1]} for row in rows],
-                now=time.time(),
+            record_receipt(
+                persistence_module,
+                cache_module.repo_id(self.repo),
+                receipt_id="redacted-fixture",
+                context_id=identity[0],
+                consumer_id=identity[1] or None,
+                output_digest="a" * 64,
+                written_bytes=len(visible),
+                rows=rows,
+                command="read",
             )
             plain_probe = {
                 "items": [
@@ -685,21 +675,16 @@ class EmissionRecordingTests(DeliveryHarness):
                 self.repo, "read", data_wire, visible, "text"
             )
             identity = cache_module.suppression_identity(self.repo)
-            state_module.store_receipt(
-                {
-                    "receipt_id": "isolation-fixture",
-                    "repo_id": cache_module.repo_id(self.repo),
-                    "context_id": identity[0],
-                    "consumer_id": None,
-                    "request_id": "isolation-fixture",
-                    "output_digest": "d" * 64,
-                    "written_bytes": len(visible),
-                    "transport": "emitted",
-                    "acknowledgment": "unacknowledged",
-                    "emitted_at": time.time(),
-                },
-                [{**row, "consumer_id": identity[1]} for row in rows],
-                now=time.time(),
+            record_receipt(
+                persistence_module,
+                cache_module.repo_id(self.repo),
+                receipt_id="isolation-fixture",
+                context_id=identity[0],
+                consumer_id=identity[1],
+                output_digest="d" * 64,
+                written_bytes=len(visible),
+                rows=rows,
+                command="read",
             )
             probe = {
                 "items": [
@@ -728,11 +713,11 @@ class EmissionRecordingTests(DeliveryHarness):
 
     def test_legacy_entries_never_suppress(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=False):
-            path = state_module.database_path()
+            path = persistence_module.database_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             # Touch the store so migrations exist, then forge a legacy row in
             # the retired table directly.
-            state_module.receipt_fragment_hits(
+            persistence_module.receipt_fragment_hits(
                 "r", "c", "", "read", "read-range", ["k"], now=time.time()
             )
             reader = sqlite3.connect(path)
@@ -771,27 +756,25 @@ class EmissionRecordingTests(DeliveryHarness):
 
     def test_duplicate_receipt_insert_is_idempotent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=False):
-            receipt = {
-                "receipt_id": "dup-fixture",
-                "repo_id": cache_module.repo_id(self.repo),
-                "context_id": "session:delivery-test",
-                "consumer_id": "delivery-test",
-                "request_id": "dup-fixture",
-                "output_digest": "c" * 64,
-                "written_bytes": 12,
-                "transport": "emitted",
-                "acknowledgment": "unacknowledged",
-                "emitted_at": time.time(),
-            }
-            fragment = {
-                "command": "read",
-                "kind": "read-range",
-                "key": "dup-key",
-                "payload": {"options": "o", "range": {}},
-                "consumer_id": "delivery-test",
-            }
-            state_module.store_receipt(receipt, [fragment], now=time.time())
-            state_module.store_receipt(receipt, [fragment], now=time.time())
+            receipt = make_receipt(
+                persistence_module,
+                cache_module.repo_id(self.repo),
+                receipt_id="dup-fixture",
+                context_id="session:delivery-test",
+                consumer_id="delivery-test",
+                output_digest="c" * 64,
+                written_bytes=12,
+            )
+            fragment = make_fragment(
+                persistence_module,
+                "read",
+                "read-range",
+                "dup-key",
+                payload={"options": "o", "range": {}},
+                consumer_id="delivery-test",
+            )
+            persistence_module.store_receipt(receipt, [fragment], now=time.time())
+            persistence_module.store_receipt(receipt, [fragment], now=time.time())
             self.assertEqual(self.ledger_counts(), (1, 1))
 
 

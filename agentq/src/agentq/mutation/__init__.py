@@ -1,8 +1,31 @@
-"""Mutation contracts and safety models."""
+"""Mutation capability: scanning, immutable plans, and guarded application."""
 
 from __future__ import annotations
 
+from .apply import (
+    ApplyRequest,
+    ApplyResult,
+    CommitResult,
+    MutationApplyError,
+    PreparedFile,
+    apply,
+    apply_edits,
+    apply_reviewed_plan,
+    commit_prepared,
+    postcheck_remaining,
+    prepare_plan,
+)
+from .journal import (
+    JOURNAL_SCHEMA,
+    JournalRecord,
+    JournalStatus,
+    MutationLock,
+    journal_path,
+    pending_recovery,
+    write_journal,
+)
 from .models import (
+    MUTATION_OUTCOME_SCHEMA,
     MUTATION_PLAN_SCHEMA_V2,
     MUTATION_PLANNING_POLICY,
     ApplyPolicy,
@@ -15,17 +38,69 @@ from .models import (
     PlannedFile,
     plan_digest,
 )
+from .plan import (
+    PlanRequest,
+    build_plan,
+    load_plan,
+    seal_plan,
+    span_edits,
+    write_plan,
+)
+from .rendering import render_apply, render_scan
+from .scan import (
+    PlanReference,
+    ScanCount,
+    ScanMode,
+    ScanRequest,
+    ScanResult,
+    ScanSample,
+    scan,
+)
 
 __all__ = [
-    "ApplyPolicy",
-    "ByteEdit",
-    "ChangedFile",
-    "Engine",
+    "JOURNAL_SCHEMA",
+    "MUTATION_OUTCOME_SCHEMA",
     "MUTATION_PLANNING_POLICY",
     "MUTATION_PLAN_SCHEMA_V2",
+    "ApplyPolicy",
+    "ApplyRequest",
+    "ApplyResult",
+    "ByteEdit",
+    "ChangedFile",
+    "CommitResult",
+    "Engine",
+    "JournalRecord",
+    "JournalStatus",
+    "MutationApplyError",
+    "MutationLock",
     "MutationOutcome",
     "MutationPlan",
     "MutationStatus",
+    "PlanReference",
+    "PlanRequest",
     "PlannedFile",
+    "PreparedFile",
+    "ScanCount",
+    "ScanMode",
+    "ScanRequest",
+    "ScanResult",
+    "ScanSample",
+    "apply",
+    "apply_edits",
+    "apply_reviewed_plan",
+    "build_plan",
+    "commit_prepared",
+    "journal_path",
+    "load_plan",
+    "pending_recovery",
     "plan_digest",
+    "postcheck_remaining",
+    "prepare_plan",
+    "render_apply",
+    "render_scan",
+    "scan",
+    "seal_plan",
+    "span_edits",
+    "write_journal",
+    "write_plan",
 ]

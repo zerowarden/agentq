@@ -119,6 +119,7 @@ class StreamingRedactor:
         if not self._matches_begin(line):
             return self._redact_simple(line) + eol
         begin = PRIVATE_KEY_BEGIN_RE.search(line)
+        assert begin is not None
         self.private_key_blocks += 1
         self.redacted_lines += 1
         head = line[: begin.start()]

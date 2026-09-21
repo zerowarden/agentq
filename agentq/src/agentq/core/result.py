@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from .errors import ContractError
 from .evidence import (
@@ -20,6 +20,7 @@ from .evidence import (
     typed_from_wire,
 )
 from .validation import (
+    is_instance_of,
     optional_int,
     optional_str,
     reject_unknown_keys,
@@ -60,21 +61,21 @@ class ProviderResult(Generic[PayloadT]):
 
     def __post_init__(self) -> None:
         require_str(self.provider, "provider name")
-        if not isinstance(self.status, ProviderStatus):
+        if not is_instance_of(self.status, ProviderStatus):
             raise ContractError("provider status must be a ProviderStatus")
         optional_str(self.provider_version, "provider version")
         if self.provenance is not None and self.provenance not in PROVENANCES:
             raise ContractError(f"unsupported provider provenance: {self.provenance!r}")
         optional_int(self.candidate_count, "provider candidate count", minimum=0)
         optional_str(self.source_snapshot, "provider source snapshot")
-        if not isinstance(self.coverage, Coverage):
+        if not is_instance_of(self.coverage, Coverage):
             object.__setattr__(self, "coverage", typed_from_wire(self.coverage))
-        if not isinstance(self.evidence, tuple) or not all(
-            isinstance(item, EvidenceRecord) for item in self.evidence
+        if not is_instance_of(self.evidence, tuple) or not all(
+            is_instance_of(item, EvidenceRecord) for item in self.evidence
         ):
             raise ContractError("provider evidence must be a tuple of EvidenceRecord")
-        if not isinstance(self.diagnostics, tuple) or not all(
-            isinstance(item, Diagnostic) for item in self.diagnostics
+        if not is_instance_of(self.diagnostics, tuple) or not all(
+            is_instance_of(item, Diagnostic) for item in self.diagnostics
         ):
             raise ContractError("provider diagnostics must be a tuple of Diagnostic")
         if self.status is ProviderStatus.OK and self.payload is None:
@@ -122,7 +123,7 @@ class ProviderResult(Generic[PayloadT]):
         }
 
     @classmethod
-    def from_wire(cls, value: Any, *, what: str = "provider result") -> ProviderResult:
+    def from_wire(cls, value: Any, *, what: str = "provider result") -> ProviderResult[Any]:
         payload = require_mapping(value, what)
         reject_unknown_keys(
             payload,
@@ -147,12 +148,14 @@ class ProviderResult(Generic[PayloadT]):
             raise ContractError(
                 f"{what}.status is not a provider outcome: {status_text!r}"
             ) from exc
-        diagnostics = payload.get("diagnostics") or []
-        if not isinstance(diagnostics, list):
+        diagnostics_raw: Any = payload.get("diagnostics") or []
+        if not is_instance_of(diagnostics_raw, list):
             raise ContractError(f"{what}.diagnostics must be an array")
-        evidence_entries = payload.get("evidence") or []
-        if not isinstance(evidence_entries, list):
+        diagnostics = cast("list[Any]", diagnostics_raw)
+        evidence_raw: Any = payload.get("evidence") or []
+        if not is_instance_of(evidence_raw, list):
             raise ContractError(f"{what}.evidence must be an array")
+        evidence_entries = cast("list[Any]", evidence_raw)
         return cls(
             provider=require_str(payload.get("provider"), f"{what}.provider"),
             status=status,
@@ -178,28 +181,6 @@ class ProviderResult(Generic[PayloadT]):
         )
 
 
-def ok_result(
-    provider: str,
-    payload: Any,
-    *,
-    coverage: Any = None,
-    version: str | None = None,
-    provenance: str | None = None,
-) -> ProviderResult:
-    return ProviderResult(
-        provider=provider,
-        status=ProviderStatus.OK,
-        payload=payload,
-        provider_version=version,
-        provenance=provenance,
-        coverage=(
-            typed_from_wire(coverage)
-            if coverage is not None
-            else typed_from_wire("complete")
-        ),
-    )
-
-
 def empty_result(
     provider: str,
     *,
@@ -207,7 +188,7 @@ def empty_result(
     payload: Any = None,
     version: str | None = None,
     provenance: str | None = None,
-) -> ProviderResult:
+) -> ProviderResult[Any]:
     return ProviderResult(
         provider=provider,
         status=ProviderStatus.EMPTY,
@@ -227,7 +208,7 @@ def not_applicable_result(
     *,
     version: str | None = None,
     provenance: str | None = None,
-) -> ProviderResult:
+) -> ProviderResult[Any]:
     return ProviderResult(
         provider=provider,
         status=ProviderStatus.NOT_APPLICABLE,
@@ -242,7 +223,7 @@ def unavailable_result(
     *,
     version: str | None = None,
     provenance: str | None = None,
-) -> ProviderResult:
+) -> ProviderResult[Any]:
     coverage = typed_from_wire(
         {"status": "partial", "reason": ["provider_unavailable"]}
     )
@@ -264,7 +245,7 @@ def failed_result(
     *,
     version: str | None = None,
     provenance: str | None = None,
-) -> ProviderResult:
+) -> ProviderResult[Any]:
     coverage = typed_from_wire({"status": "partial", "reason": ["provider_error"]})
     return ProviderResult(
         provider=provider,

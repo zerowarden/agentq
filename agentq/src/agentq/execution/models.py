@@ -220,7 +220,7 @@ class ExecutionOutcome:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
 
-        def enum(name: str, kind):
+        def enum(name: str, kind: type[Any]) -> Any:
             text = require_str(payload.get(name), f"{what}.{name}")
             try:
                 return kind(text)

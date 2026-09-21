@@ -60,9 +60,11 @@ class ContinuationCliTests(AgentQIntegrationHarness):
         )
         self.assertIn("unknown or expired continuation cursor", other.stderr)
 
+        # A typed search follow-up has no workspace guard: it re-runs the
+        # stored query on the current worktree.
         self.change_a("\nexport const workspaceMoved = true\n")
-        moved = self.aq("continue", cursor, expect=2, extra_env=session)
-        self.assertIn("workspace changed", moved.stderr)
+        moved = self.aq("continue", cursor, extra_env=session)
+        self.assertIn("OldName", moved.stdout)
 
         compact = self.data(
             "search",
@@ -87,7 +89,7 @@ class ContinuationCliTests(AgentQIntegrationHarness):
     def test_continuation_cursors_expire(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq import continuations as continuations_module
-            from agentq import state as state_module
+            from agentq import persistence as persistence_module
 
         env = {
             **self.env,
@@ -95,26 +97,34 @@ class ContinuationCliTests(AgentQIntegrationHarness):
             "AGENTQ_STATE_DB": str(Path(self.temp.name) / "ttl.db"),
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            stored = continuations_module.store_block(
-                self.repo, {"command": "agentq files zz-none"}
-            )
-            self.assertIsNotNone(stored)
-            self.assertTrue(stored["expires_at"])
-            resolved = continuations_module.load_cursor(self.repo, stored["cursor"])
-            self.assertIsNotNone(resolved)
-            self.assertEqual(resolved.record.argv, ("agentq", "files", "zz-none"))
+            from agentq.core import SearchOptions
+            from agentq.requests import request_for
 
-            reader = sqlite3.connect(state_module.database_path())
+            record = continuations_module.QueryFollowUp(
+                request=request_for(
+                    self.repo, "search", SearchOptions(query="needle")
+                )
+            )
+            stored = continuations_module.store_block(self.repo, record.to_wire())
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertTrue(stored.expires_at)
+            resolved = continuations_module.load_cursor(self.repo, stored.cursor)
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            self.assertIsInstance(resolved.record, continuations_module.QueryFollowUp)
+
+            reader = sqlite3.connect(persistence_module.database_path())
             try:
                 reader.execute("UPDATE continuations SET expires_at = 1")
                 reader.commit()
             finally:
                 reader.close()
             self.assertIsNone(
-                continuations_module.load_cursor(self.repo, stored["cursor"])
+                continuations_module.load_cursor(self.repo, stored.cursor)
             )
 
-    def test_inspect_python_and_tsnav_continuations_carry_cursors(self) -> None:
+    def test_inspect_continuations_are_display_hints(self) -> None:
         session = {"AGENTQ_SESSION_ID": "cursor-nav"}
         (self.repo / "packages/a/src/cursor_nav.py").write_text(
             "def cursorNav(value):\n"
@@ -138,8 +148,8 @@ class ContinuationCliTests(AgentQIntegrationHarness):
             extra_env=session,
         )
         block = inspected["python"]["continuation"]
-        self.assertEqual(block["command"], f"agentq continue {block['cursor']}")
-        self.assertTrue(block["cursor"])
+        self.assertNotIn("cursor", block)
+        self.assertTrue(block["command"].startswith("agentq inspect "))
 
     def test_multi_file_inline_windows_and_continuation_recipe(self) -> None:
         first = self.repo / "packages/a/src/first_windows.py"
@@ -197,16 +207,11 @@ class ContinuationCliTests(AgentQIntegrationHarness):
         self.assertTrue(capped["truncated"])
         self.assertEqual(sum(len(item["lines"]) for item in capped["items"]), 7)
         self.assertGreaterEqual(capped["continuation"]["remaining_windows"], 1)
-        self.assertTrue(
-            capped["continuation"]["command"].startswith("agentq continue ")
-        )
-        self.assertTrue(capped["continuation"]["cursor"])
-        self.assertRegex(capped["continuation"]["cursor"], r"^[0-9a-f]+$")
-        self.assertIn("T", capped["continuation"]["expires_at"])
+        self.assertNotIn("cursor", capped["continuation"])
+        self.assertTrue(capped["continuation"]["command"].startswith("agentq read "))
         continuation = shlex.split(capped["continuation"]["command"])
-        continuation[0] = str(AGENTQ)
         continued = subprocess.run(
-            continuation,
+            [str(AGENTQ), *continuation[1:], "--repo", str(self.repo)],
             cwd=self.repo,
             env=self.env,
             text=True,
@@ -247,18 +252,9 @@ class ContinuationCliTests(AgentQIntegrationHarness):
         self.assertEqual(current["continuation"]["remaining_windows"], 11)
         self.assertEqual(current["continuation"]["shown_windows"], 11)
         while current.get("continuation"):
+            hint = shlex.split(current["continuation"]["command"])
             continued = subprocess.run(
-                [
-                    str(AGENTQ),
-                    "continue",
-                    current["continuation"]["cursor"],
-                    "--repo",
-                    str(self.repo),
-                    "--format",
-                    "json",
-                    "--budget",
-                    "1000000",
-                ],
+                [str(AGENTQ), *hint[1:], "--repo", str(self.repo)],
                 cwd=self.repo,
                 env=self.env,
                 text=True,

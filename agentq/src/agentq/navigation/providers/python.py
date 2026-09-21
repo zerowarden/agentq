@@ -16,6 +16,7 @@ from agentq.core import (
     SAMPLED,
     SYNTACTIC,
     Coverage,
+    RenderedText,
     budget_text_records,
     is_sensitive_path,
     normalize_scopes_for_wire,
@@ -177,6 +178,67 @@ def python_outline(request: OutlineRequest) -> OutlineResult:
     )
 
 
+def _matching_definitions(
+    relative: str, tree: ast.AST, symbol: str
+) -> tuple[OutlineSymbol, ...]:
+    """Definitions in one parsed file whose name equals the requested symbol."""
+    return tuple(
+        item for item in _definitions_from_tree(relative, tree) if item.name == symbol
+    )
+
+
+def _reference_kind(node: ast.AST, symbol: str) -> str | None:
+    """Classify one AST node as a name or attribute reference to the symbol."""
+    if isinstance(node, ast.Name) and node.id == symbol:
+        return "name"
+    if isinstance(node, ast.Attribute) and node.attr == symbol:
+        return "attribute"
+    return None
+
+
+def _collect_python_references(
+    tree: ast.AST,
+    symbol: str,
+    relative: str,
+    lines: list[str],
+    limit: int,
+    references: list[PythonReference],
+) -> int:
+    """Append retained lexical references; return the total number matched."""
+    total = 0
+    for node in ast.walk(tree):
+        kind = _reference_kind(node, symbol)
+        if not kind or not hasattr(node, "lineno"):
+            continue
+        total += 1
+        if len(references) >= limit:
+            continue
+        line = int(getattr(node, "lineno", 0))
+        preview = lines[line - 1] if 0 < line <= len(lines) else ""
+        references.append(
+            PythonReference(
+                path=relative,
+                line=line,
+                column=int(getattr(node, "col_offset", 0)) + 1,
+                kind=kind,
+                preview=compact_line(preview.strip(), 220),
+            )
+        )
+    return total
+
+
+def _overview_reasons(
+    *, candidates_truncated: bool, references_truncated: bool
+) -> list[str]:
+    """Limit reasons for a symbol overview, in candidates-then-references order."""
+    reasons: list[str] = []
+    if candidates_truncated:
+        reasons.append(RESULT_LIMIT)
+    if references_truncated:
+        reasons.append(REFERENCE_LIMIT)
+    return reasons
+
+
 def python_symbol_overview(
     root: Path,
     symbol: str,
@@ -200,46 +262,22 @@ def python_symbol_overview(
                     OutlineParseError(path=relative, error=error or "unparseable")
                 )
             continue
-        candidates.extend(
-            item
-            for item in _definitions_from_tree(relative, tree)
-            if item.name == symbol
-        )
+        candidates.extend(_matching_definitions(relative, tree, symbol))
         if not include_references:
             continue
-        for node in ast.walk(tree):
-            kind = None
-            if isinstance(node, ast.Name) and node.id == symbol:
-                kind = "name"
-            elif isinstance(node, ast.Attribute) and node.attr == symbol:
-                kind = "attribute"
-            if not kind or not hasattr(node, "lineno"):
-                continue
-            total += 1
-            if len(references) >= limit:
-                continue
-            line = int(node.lineno)
-            preview = lines[line - 1] if 0 < line <= len(lines) else ""
-            references.append(
-                PythonReference(
-                    path=relative,
-                    line=line,
-                    column=int(getattr(node, "col_offset", 0)) + 1,
-                    kind=kind,
-                    preview=compact_line(preview.strip(), 220),
-                )
-            )
+        total += _collect_python_references(
+            tree, symbol, relative, lines, limit, references
+        )
     references_truncated = total > len(references)
     candidates_truncated = len(candidates) > limit
     # references_requested=false is not a failed scan: references.total stays 0
     # and references.truncated stays False. A retained-sample limit on either
     # candidates or references still prevents a unique-selection claim, so the
     # coverage must be at most sampled. Parse failures dominate with partial.
-    reasons = []
-    if candidates_truncated:
-        reasons.append(RESULT_LIMIT)
-    if references_truncated:
-        reasons.append(REFERENCE_LIMIT)
+    reasons = _overview_reasons(
+        candidates_truncated=candidates_truncated,
+        references_truncated=references_truncated,
+    )
     overview = PythonOverview(
         symbol=symbol,
         candidates=tuple(candidates[:limit]),
@@ -295,7 +333,9 @@ def _python_continuation(overview: PythonOverview) -> PythonContinuation:
     )
 
 
-def render_python_overview(overview: PythonOverview, *, budget: int = 0) -> str:
+def render_python_overview(
+    overview: PythonOverview, *, budget: int = 0
+) -> RenderedText:
     definitions_sampled = len(overview.candidates) < overview.candidate_count
     if overview.references_omitted:
         reference_summary = "references not requested (--intent locate)"

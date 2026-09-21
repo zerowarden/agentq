@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
-_MISSING = object()
 _PREFERRED_LISTS = (
     "items",
     "results",
@@ -64,36 +63,38 @@ def _record_omission(omitted: dict[str, int], path: str, count: int = 1) -> None
 
 def _project(
     value: Any, path: str, budget: int, omitted: dict[str, int]
-) -> tuple[Any, int] | object:
+) -> tuple[Any, int] | None:
     if budget < 2:
         _record_omission(omitted, path)
-        return _MISSING
+        return None
     if isinstance(value, list):
-        projected: list[Any] = []
+        values = cast("list[Any]", value)
+        projected_items: list[Any] = []
         used = 2
-        encoded_items = [_encode(item) for item in value]
-        for index, (item, encoded) in enumerate(zip(value, encoded_items, strict=True)):
-            cost = len(encoded) + (1 if projected else 0)
+        encoded_items = [_encode(item) for item in values]
+        for index, (item, encoded) in enumerate(zip(values, encoded_items, strict=True)):
+            cost = len(encoded) + (1 if projected_items else 0)
             if used + cost > budget:
-                _record_omission(omitted, path, len(value) - index)
+                _record_omission(omitted, path, len(values) - index)
                 break
-            projected.append(item)
+            projected_items.append(item)
             used += cost
-        return projected, used
+        return projected_items, used
     if isinstance(value, dict):
+        mapping = cast("dict[str, Any]", value)
         projected: dict[str, Any] = {}
         used = 2
         ordinary = [
             key
-            for key, item in value.items()
+            for key, item in mapping.items()
             if not isinstance(item, list) and key != "_agentq"
         ]
         list_keys = [
-            key for key in _PREFERRED_LISTS if isinstance(value.get(key), list)
+            key for key in _PREFERRED_LISTS if isinstance(mapping.get(key), list)
         ]
         list_keys.extend(
             key
-            for key, item in value.items()
+            for key, item in mapping.items()
             if isinstance(item, list) and key not in list_keys
         )
         for key in [*ordinary, *list_keys]:
@@ -101,16 +102,16 @@ def _project(
             fixed_cost = len(key_text) + 1 + (1 if projected else 0)
             child_path = _pointer(path, key)
             child = _project(
-                value[key], child_path, budget - used - fixed_cost, omitted
+                mapping[key], child_path, budget - used - fixed_cost, omitted
             )
-            if child is _MISSING:
+            if child is None:
                 continue
             child_value, child_size = child
             if used + fixed_cost + child_size > budget:
                 _record_omission(
                     omitted,
                     child_path,
-                    len(value[key]) if isinstance(value[key], list) else 1,
+                    len(mapping[key]) if isinstance(mapping[key], list) else 1,
                 )
                 continue
             projected[str(key)] = child_value
@@ -120,7 +121,7 @@ def _project(
     if len(encoded) <= budget:
         return value, len(encoded)
     _record_omission(omitted, path)
-    return _MISSING
+    return None
 
 
 def _bounded_omissions(omitted: dict[str, int], limit: int = 10) -> dict[str, int]:
@@ -142,8 +143,9 @@ def project_json(data: dict[str, Any], budget: int) -> tuple[str, bool]:
     for _ in range(2):
         omitted = {}
         result = _project(data, "", payload_budget, omitted)
+        candidate = result[0] if result is not None else None
         projected = (
-            result[0] if result is not _MISSING and isinstance(result[0], dict) else {}
+            cast("dict[str, Any]", candidate) if isinstance(candidate, dict) else {}
         )
         projected["_agentq"] = {
             "truncated": True,
@@ -170,6 +172,84 @@ def project_json(data: dict[str, Any], budget: int) -> tuple[str, bool]:
     return visible, True
 
 
+def _omission_marker(omission: str, count: int) -> str:
+    return omission.replace("{count}", str(max(1, count)))
+
+
+def _fit_prefix(
+    prefix: str, budget: int, separator: str, total_count: int, omission: str
+) -> tuple[list[tuple[str, bool]], int, bool]:
+    kept: list[tuple[str, bool]] = []
+    used = 0
+    if not prefix:
+        return kept, used, False
+    if len(prefix) <= budget:
+        return [(prefix, False)], len(prefix), False
+    for line in prefix.splitlines():
+        cost = len(line) + (len(separator) if kept else 0)
+        marker_cost = len(_omission_marker(omission, total_count + 1)) + len(separator)
+        if used + cost + marker_cost > budget:
+            break
+        kept.append((line, False))
+        used += cost
+    return kept, used, True
+
+
+def _fit_records(
+    records: Iterable[str],
+    kept: list[tuple[str, bool]],
+    used: int,
+    total_count: int,
+    budget: int,
+    separator: str,
+    omission: str,
+) -> tuple[list[tuple[str, bool]], int, int]:
+    emitted = 0
+    for raw_record in records:
+        record = raw_record.rstrip()
+        if not record:
+            continue
+        remaining_after = total_count - emitted - 1
+        cost = len(record) + (len(separator) if kept else 0)
+        reserve = (
+            len(separator) + len(_omission_marker(omission, remaining_after))
+            if remaining_after
+            else 0
+        )
+        if used + cost + reserve > budget:
+            break
+        kept.append((record, True))
+        used += cost
+        emitted += 1
+    return kept, used, emitted
+
+
+def _apply_omission_marker(
+    kept: list[tuple[str, bool]],
+    used: int,
+    omitted_count: int,
+    prefix_truncated: bool,
+    budget: int,
+    separator: str,
+    omission: str,
+) -> list[tuple[str, bool]]:
+    if not (omitted_count or prefix_truncated):
+        return kept
+    omitted_count += int(prefix_truncated)
+    omission_marker = _omission_marker(omission, omitted_count)
+    marker_cost = len(omission_marker) + (len(separator) if kept else 0)
+    while kept and used + marker_cost > budget:
+        removed, is_record = kept.pop()
+        used -= len(removed) + (len(separator) if kept else 0)
+        if is_record:
+            omitted_count += 1
+        omission_marker = _omission_marker(omission, omitted_count)
+        marker_cost = len(omission_marker) + (len(separator) if kept else 0)
+    if marker_cost <= budget:
+        kept.append((omission_marker, False))
+    return kept
+
+
 def budget_text_records(
     prefix: str,
     records: Iterable[str],
@@ -182,9 +262,6 @@ def budget_text_records(
     prefix = prefix.rstrip()
     full_chars: int | None = None
 
-    def marker(count: int) -> str:
-        return omission.replace("{count}", str(max(1, count)))
-
     if total_count is None or budget <= 0:
         materialized = [record.rstrip() for record in records if record.rstrip()]
         total_count = len(materialized)
@@ -196,54 +273,17 @@ def budget_text_records(
     else:
         total_count = max(0, total_count)
 
-    kept: list[tuple[str, bool]] = []
-    used = 0
-    prefix_truncated = False
-    if prefix:
-        if len(prefix) <= budget:
-            kept.append((prefix, False))
-            used = len(prefix)
-        else:
-            prefix_truncated = True
-            for line in prefix.splitlines():
-                cost = len(line) + (len(separator) if kept else 0)
-                marker_cost = len(marker(total_count + 1)) + len(separator)
-                if used + cost + marker_cost > budget:
-                    break
-                kept.append((line, False))
-                used += cost
-
-    emitted = 0
-    for raw_record in records:
-        record = raw_record.rstrip()
-        if not record:
-            continue
-        remaining_after = total_count - emitted - 1
-        cost = len(record) + (len(separator) if kept else 0)
-        reserve = (
-            len(separator) + len(marker(remaining_after)) if remaining_after else 0
-        )
-        if used + cost + reserve > budget:
-            break
-        kept.append((record, True))
-        used += cost
-        emitted += 1
-
+    kept, used, prefix_truncated = _fit_prefix(
+        prefix, budget, separator, total_count, omission
+    )
+    kept, used, emitted = _fit_records(
+        records, kept, used, total_count, budget, separator, omission
+    )
     omitted_count = max(0, total_count - emitted)
     truncated = bool(omitted_count or prefix_truncated)
-    if truncated:
-        omitted_count += int(prefix_truncated)
-        omission_marker = marker(omitted_count)
-        marker_cost = len(omission_marker) + (len(separator) if kept else 0)
-        while kept and used + marker_cost > budget:
-            removed, is_record = kept.pop()
-            used -= len(removed) + (len(separator) if kept else 0)
-            if is_record:
-                omitted_count += 1
-            omission_marker = marker(omitted_count)
-            marker_cost = len(omission_marker) + (len(separator) if kept else 0)
-        if marker_cost <= budget:
-            kept.append((omission_marker, False))
+    kept = _apply_omission_marker(
+        kept, used, omitted_count, prefix_truncated, budget, separator, omission
+    )
     visible = separator.join(item for item, _ in kept)
     return (
         rendered_text(visible, prebudget_chars=full_chars, truncated=truncated),

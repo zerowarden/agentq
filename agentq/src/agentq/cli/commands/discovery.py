@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from agentq.continuations import attach_continuation_cursors
 from agentq.core import AgentQError
 from agentq.discovery import (
     FilesRequest,
@@ -27,7 +28,7 @@ from agentq.discovery import (
 )
 from agentq.requests import search_options_from_args
 
-from ..emit import _attach_continuation_cursors, emit, emit_cached
+from ..emit import emit, emit_cached
 from ..registry import Outcome
 
 
@@ -44,7 +45,12 @@ def _run_task(args: argparse.Namespace, root: Path) -> Outcome:
 
 
 def _run_stats(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.emission import finalize_output, request_identity
+    from agentq.delivery import (
+        DeliveryContext,
+        RenderedOutput,
+        finalize_output,
+        request_identity,
+    )
     from agentq.telemetry import (
         archive_hot_events,
         install_persistence,
@@ -107,12 +113,14 @@ def _run_stats(args: argparse.Namespace, root: Path) -> Outcome:
     )
     return finalize_output(
         data,
-        output="",
-        prebudget_chars=0,
-        truncated=False,
-        request_id=request_identity("stats", str(args.repo), args.format, args.budget),
-        repo_id=None,
-        record_receipt=False,
+        rendered=RenderedOutput(visible=""),
+        context=DeliveryContext(
+            request_id=request_identity(
+                "stats", str(args.repo), args.format, args.budget
+            ),
+            repo_id=None,
+            record_receipt=False,
+        ),
     )
 
 
@@ -290,7 +298,7 @@ def _run_read(args: argparse.Namespace, root: Path) -> Outcome:
         )
     )
     wire = result.to_wire()
-    _attach_continuation_cursors(root, wire)
+    attach_continuation_cursors(root, wire)
     result = result.with_wire_continuations(wire)
     return emit(args, wire, render_read, root=root, result=result)
 

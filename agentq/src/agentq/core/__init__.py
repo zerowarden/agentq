@@ -63,6 +63,7 @@ from .request import (
     OperationRequest,
     RequestContext,
     SearchOptions,
+    new_operation_request,
 )
 from .result import (
     ProviderResult,
@@ -87,6 +88,7 @@ from .runtime import (
 from .validation import (
     canonical_digest,
     canonical_json,
+    is_instance_of,
     optional_int,
     optional_number,
     optional_str,
@@ -150,11 +152,13 @@ __all__ = [
     "is_sensitive_path",
     "merge_coverage",
     "merge_typed",
+    "new_operation_request",
     "normalize_scopes_for_wire",
     "not_applicable_result",
     "optional_int",
     "optional_number",
     "optional_str",
+    "is_instance_of",
     "project_json",
     "reject_unknown_keys",
     "relpath",

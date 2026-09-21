@@ -166,14 +166,29 @@ def _private_temp_log(root: Path, label: str) -> Path:
     return Path(name)
 
 
-def _cleanup_logs(directory: Path) -> None:
+def cleanup_logs(
+    directory: Path,
+    *,
+    quota_bytes: int = _LOG_QUOTA_BYTES,
+    ttl_seconds: int = _LOG_TTL_SECONDS,
+    active_grace_seconds: int = _LOG_ACTIVE_GRACE_SECONDS,
+) -> None:
     """Enforce the log TTL and total-size quota; best-effort and concurrency-safe."""
-    survivors, total = _expire_logs(directory, time.time())
-    _enforce_quota(survivors, total)
+    survivors, total = _expire_logs(
+        directory,
+        time.time(),
+        ttl_seconds=ttl_seconds,
+        active_grace_seconds=active_grace_seconds,
+    )
+    _enforce_quota(survivors, total, quota_bytes=quota_bytes)
 
 
 def _expire_logs(
-    directory: Path, now: float
+    directory: Path,
+    now: float,
+    *,
+    ttl_seconds: int,
+    active_grace_seconds: int,
 ) -> tuple[list[tuple[float, int, str]], int]:
     """Delete expired logs and return the survivors with their total size."""
     try:
@@ -191,10 +206,10 @@ def _expire_logs(
             metadata = entry.stat()
         except OSError:
             continue
-        if now - metadata.st_mtime < _LOG_ACTIVE_GRACE_SECONDS:
+        if now - metadata.st_mtime < active_grace_seconds:
             total += metadata.st_size  # never reap a log that may be in flight
             continue
-        if metadata.st_mtime < now - _LOG_TTL_SECONDS:
+        if metadata.st_mtime < now - ttl_seconds:
             try:
                 os.unlink(entry.path)
             except OSError:
@@ -205,11 +220,13 @@ def _expire_logs(
     return survivors, total
 
 
-def _enforce_quota(survivors: list[tuple[float, int, str]], total: int) -> None:
-    if total <= _LOG_QUOTA_BYTES:
+def _enforce_quota(
+    survivors: list[tuple[float, int, str]], total: int, *, quota_bytes: int
+) -> None:
+    if total <= quota_bytes:
         return
     for _, size, path in sorted(survivors):
-        if total <= _LOG_QUOTA_BYTES:
+        if total <= quota_bytes:
             break
         try:
             os.unlink(path)
@@ -227,7 +244,7 @@ def _working_directory(root: Path, cwd: str | None) -> Path:
     return working
 
 
-def _environment(request: RunRequest, working: Path) -> dict[str, str]:
+def _environment(request: RunRequest) -> dict[str, str]:
     overrides = dict(_PROFILE_ENV[request.profile])
     if request.isolated_cache:
         runtime_cache = cache_dir(request.root) / "xdg"
@@ -313,7 +330,7 @@ def _failure_diagnostics(outcome: ExecutionOutcome, command: tuple[str, ...]) ->
 def run(request: RunRequest) -> RunResult:
     """Run argv without a shell and stream only redacted text to a private local log."""
     working = _working_directory(request.root, request.cwd)
-    env_overrides = _environment(request, working)
+    env_overrides = _environment(request)
     final_log = _private_temp_log(request.root, request.label)
     log_handle = final_log.open("w", encoding="utf-8", errors="replace")
     try:
@@ -368,7 +385,7 @@ def run(request: RunRequest) -> RunResult:
     if not retained:
         final_log.unlink(missing_ok=True)
     try:
-        _cleanup_logs(cache_dir(request.root))
+        cleanup_logs(cache_dir(request.root))
     except (OSError, AgentQError):
         pass
 
@@ -399,7 +416,7 @@ def run(request: RunRequest) -> RunResult:
     )
 
 
-def render_run(result: RunResult) -> str:
+def render_run(result: RunResult, *, budget: int = 0) -> str:
     status = (
         "TIMEOUT"
         if result.timed_out

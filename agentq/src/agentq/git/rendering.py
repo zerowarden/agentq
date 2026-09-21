@@ -17,9 +17,9 @@ from .models import (
 )
 
 
-def render_status(result: StatusResult) -> str:
+def render_status(result: StatusResult, *, budget: int = 0) -> str:
     upstream = (
-        f" → {result.upstream} (+{result.ahead}/-{result.behind})"
+        f" -> {result.upstream} (+{result.ahead}/-{result.behind})"
         if result.upstream
         else ""
     )
@@ -40,7 +40,7 @@ def render_status(result: StatusResult) -> str:
     return "\n".join(lines)
 
 
-def render_history(result: HistoryResult) -> str:
+def render_history(result: HistoryResult, *, budget: int = 0) -> str:
     lines = [f"recent commits: {result.shown}"]
     lines += [
         f"  {commit.commit} {commit.date} {commit.author}: {commit.subject}"
@@ -49,7 +49,7 @@ def render_history(result: HistoryResult) -> str:
     return "\n".join(lines)
 
 
-def render_structural(result: StructuralResult) -> str:
+def render_structural(result: StructuralResult, *, budget: int = 0) -> str:
     lines = [f"structural diff: {result.path} ({result.engine})"] + list(result.lines)
     if result.truncated:
         lines.append(
@@ -79,7 +79,7 @@ def _follow_up_command(follow_up: DiffFollowUp | None) -> str | None:
 
 
 def _hunk_render_record(hunk: DiffHunk) -> str:
-    symbol = f" · {hunk.symbol}" if hunk.symbol else ""
+    symbol = f" * {hunk.symbol}" if hunk.symbol else ""
     risks = f"; risks={','.join(hunk.risk_flags)}" if hunk.risk_flags else ""
     record = (
         f"  {hunk.path}:{hunk.new_start or '?'} {hunk.header}{symbol} "
@@ -120,7 +120,7 @@ def _diff_summary_lines(result: DiffResult) -> list[str]:
         lines.append("File list truncated; request a path-scoped diff.")
     if result.source_unstable:
         lines.append(
-            "Diff source changed while collecting; this snapshot is partial — rerun the diff."
+            "Diff source changed while collecting; this snapshot is partial - rerun the diff."
         )
     if not result.diff_check_ok:
         lines.append("\nwhitespace/errors:")
@@ -131,13 +131,13 @@ def _diff_summary_lines(result: DiffResult) -> list[str]:
 def _patch_records(result: DiffResult) -> tuple[list[str], str]:
     records = _patch_render_blocks(result.patch or "") or ["(no textual patch)"]
     omission = (
-        "… {count} complete diff records omitted by render budget; "
+        "... {count} complete diff records omitted by render budget; "
         "narrow with agentq git-diff --hunks"
     )
     command = _follow_up_command(result.continuation)
     if command:
         omission = (
-            f"… {{count}} complete patch blocks omitted by render budget; "
+            f"... {{count}} complete patch blocks omitted by render budget; "
             f"continue: {command}"
         )
     if result.patch_truncated:
@@ -161,7 +161,7 @@ def render_diff(result: DiffResult, *, budget: int = 0) -> str:
         return _repeat_notice(result)
     lines = _diff_summary_lines(result)
     omission = (
-        "… {count} complete diff records omitted by render budget; "
+        "... {count} complete diff records omitted by render budget; "
         "narrow with agentq git-diff --hunks"
     )
     records: list[str] = []

@@ -18,11 +18,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from .errors import ContractError
 from .validation import (
     canonical_digest,
+    is_instance_of,
     optional_str,
     reject_unknown_keys,
     require_int,
@@ -95,7 +96,7 @@ class Coverage:
                 f"unsupported coverage count quality: {self.count_quality!r}"
             )
         for cause in self.reasons:
-            if not isinstance(cause, str):
+            if not is_instance_of(cause, str):
                 raise ContractError("coverage reasons must be strings")
         ordered = tuple(dict.fromkeys(self.reasons))
         if ordered != self.reasons:
@@ -248,18 +249,18 @@ class EvidenceRecord:
     kind: str
     source: SourceRef = field(default_factory=SourceRef)
     source_version: str | None = None
-    payload: Mapping[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, Any] = field(default_factory=dict[str, Any])
     provenance: str = LEXICAL
     variant: str = "full"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.evidence_id, str) or not self.evidence_id:
+        if not is_instance_of(self.evidence_id, str) or not self.evidence_id:
             raise ContractError("evidence id must be a non-empty string")
-        if not isinstance(self.kind, str) or not self.kind:
+        if not is_instance_of(self.kind, str) or not self.kind:
             raise ContractError("evidence kind must be a non-empty string")
-        if not isinstance(self.source, SourceRef):
+        if not is_instance_of(self.source, SourceRef):
             raise ContractError("evidence source must be a SourceRef")
-        if not isinstance(self.payload, Mapping):
+        if not is_instance_of(self.payload, Mapping):
             raise ContractError("evidence payload must be a mapping")
         if self.provenance not in _PROVENANCE_RANK:
             raise ContractError(f"unsupported evidence provenance: {self.provenance!r}")
@@ -341,7 +342,11 @@ class EvidenceRecord:
                 ),
             )
         raw_payload = payload.get("payload")
-        record_payload = raw_payload if isinstance(raw_payload, Mapping) else {}
+        record_payload: Mapping[str, Any] = (
+            cast("Mapping[str, Any]", raw_payload)
+            if isinstance(raw_payload, Mapping)
+            else {}
+        )
         return cls(
             evidence_id=require_str(payload.get("evidence_id"), f"{what}.evidence_id"),
             kind=require_str(payload.get("kind"), f"{what}.kind"),
@@ -394,24 +399,28 @@ def typed_from_wire(value: Any) -> Coverage:
         return value
     if not isinstance(value, dict):
         raise ContractError("coverage must be an object, a status string, or null")
-    status = value.get("status", UNKNOWN)
+    mapping = cast("dict[str, Any]", value)
+    status = mapping.get("status", UNKNOWN)
     if not isinstance(status, str) or status not in _COVERAGE_RANK:
         status = UNKNOWN
-    reasons = value.get("reason") or []
-    if not isinstance(reasons, list):
+    reasons_raw: Any = mapping.get("reason") or []
+    if not is_instance_of(reasons_raw, list):
         raise ContractError("coverage reason must be an array")
-    count_quality = value.get("count_quality")
+    reasons = cast("list[Any]", reasons_raw)
+    count_quality = mapping.get("count_quality")
+    domain = mapping.get("domain")
+    scope = mapping.get("scope")
     return Coverage(
         status=status,
         reasons=tuple(str(cause) for cause in reasons),
-        domain=value.get("domain") if isinstance(value.get("domain"), str) else None,
-        scope=value.get("scope") if isinstance(value.get("scope"), str) else None,
+        domain=domain if isinstance(domain, str) else None,
+        scope=scope if isinstance(scope, str) else None,
         count_quality=(
             count_quality
             if isinstance(count_quality, str) and count_quality in _COUNT_QUALITY
             else UNKNOWN_COUNT
         ),
-        **{name: _validate_count(value.get(name), name) for name in _COUNT_FIELDS},
+        **{name: _validate_count(mapping.get(name), name) for name in _COUNT_FIELDS},
     )
 
 

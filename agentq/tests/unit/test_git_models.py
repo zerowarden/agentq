@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agentq.continuations import (
-    GIT_DIFF_GUARD_KIND,
-    QueryFollowUp,
-    QueryRefinement,
-    SourceGuard,
-)
+from agentq.continuations import GIT_DIFF_GUARD_KIND, QueryFollowUp, SourceGuard
 from agentq.core import (
     COMPLETE,
     Budget,
@@ -27,10 +22,11 @@ def _follow_up(command: str) -> DiffFollowUp:
             request_id="r1",
             repo_id="repo",
             worktree_id="wt",
-            options=DiffSelection(staged=True, paths=("src",), view="patch"),
+            options=DiffSelection(
+                staged=True, paths=("src/a.py",), view="patch", max_lines=300
+            ),
             budget=Budget(output_chars=900),
         ),
-        refinement=QueryRefinement(paths=("src/a.py",), view="patch", max_lines=300),
         guard=SourceGuard(
             kind=GIT_DIFF_GUARD_KIND, fingerprint="a" * 64, paths=("src",)
         ),

@@ -22,7 +22,7 @@ from unittest import mock
 
 AGENTQ = Path(sys.executable).with_name("agentq")
 
-from agentq import context_cache as cache_module  # noqa: E402
+from agentq.delivery import suppression as cache_module  # noqa: E402
 
 
 class ManifestHarness(unittest.TestCase):

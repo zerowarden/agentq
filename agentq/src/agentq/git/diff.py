@@ -14,11 +14,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from agentq.context_cache import diff_cache_key, diff_repeat_advice
 from agentq.continuations import (
     GIT_DIFF_GUARD_KIND,
     QueryFollowUp,
-    QueryRefinement,
     SourceGuard,
     display_command,
     fingerprint_id,
@@ -38,7 +36,7 @@ from agentq.core import (
     session_id,
     with_failure,
 )
-from agentq.delivery import compact_line
+from agentq.delivery import compact_line, diff_cache_key, diff_repeat_advice
 from agentq.execution import Completed, ExecutionSpec, StopReason, StreamMode
 from agentq.redaction import redact_text
 from agentq.requests import request_for
@@ -298,7 +296,7 @@ def _changed_path_metadata(root: Path, raw: str) -> list[list[Any]]:
 
 
 def validate_diff_guard(
-    root: Path, request: OperationRequest, guard: SourceGuard
+    root: Path, request: OperationRequest[Any], guard: SourceGuard
 ) -> None:
     """Fail explicitly when a follow-up's mutable source snapshot is stale."""
     selection = request.options
@@ -372,7 +370,7 @@ def _stream_diff(
     git_args: Sequence[str],
     consume: Callable[[str], bool],
 ) -> bool:
-    from agentq.execution.supervisor import (
+    from agentq.execution import (
         STREAM_RECORD_LIMIT_BYTES,
         is_spawn_failure,
         raise_if_cancelled,
@@ -383,7 +381,7 @@ def _stream_diff(
     stopped = False
     stderr_chunks: list[str] = []
 
-    def handle(event) -> bool:
+    def handle(event: Any) -> bool:
         nonlocal stopped
         if not consume(event.text.rstrip("\r\n")):
             stopped = True
@@ -714,11 +712,12 @@ def _follow_up_paths(item: DiffFile | None) -> tuple[str, ...]:
 
 
 def _follow_up(
-    request: OperationRequest,
+    root: Path,
+    selection: DiffSelection,
     resolved: _ResolvedDiff,
+    request: DiffRequest,
     *,
     fingerprint: str | None,
-    paths: tuple[str, ...],
     reason: str,
 ) -> DiffFollowUp:
     guard = (
@@ -731,8 +730,15 @@ def _follow_up(
         else None
     )
     record = QueryFollowUp(
-        request=request,
-        refinement=QueryRefinement(paths=paths, view="patch", max_lines=300),
+        request=request_for(
+            root,
+            "git-diff",
+            selection,
+            output_chars=request.budget,
+            output_format=request.output_format,
+            repeat=request.repeat,
+            context=RequestContext(session_id=session_id()),
+        ),
         guard=guard,
         reason=(reason,),
     )
@@ -740,8 +746,9 @@ def _follow_up(
 
 
 def _attach_diff_follow_ups(
+    root: Path,
     result: DiffResult,
-    request: OperationRequest,
+    request: DiffRequest,
     resolved: _ResolvedDiff,
     *,
     fingerprint: str | None,
@@ -749,7 +756,7 @@ def _attach_diff_follow_ups(
     """Attach typed hunk/patch follow-ups that preserve this comparison.
 
     Each follow-up refines presentation only (patch view, selected paths, a
-    larger line cap) and keeps the original request as its source of truth. A
+    larger line cap) and stores the refined request as its source of truth. A
     mutable-source guard is attached when the comparison depends on the index
     or worktree, so a stale snapshot fails explicitly instead of recomputing a
     different diff.
@@ -762,10 +769,11 @@ def _attach_diff_follow_ups(
         return replace(
             result,
             continuation=_follow_up(
-                request,
+                root,
+                replace(resolved.selection, paths=paths, view="patch", max_lines=300),
                 resolved,
+                request,
                 fingerprint=fingerprint,
-                paths=paths,
                 reason="render-budget",
             ),
         )
@@ -784,30 +792,19 @@ def _attach_diff_follow_ups(
             replace(
                 hunk,
                 follow_up=_follow_up(
-                    request,
+                    root,
+                    replace(
+                        resolved.selection, paths=paths, view="patch", max_lines=300
+                    ),
                     resolved,
+                    request,
                     fingerprint=fingerprint,
-                    paths=paths,
                     reason="hunk-follow-up",
                 ),
             )
         )
         changed = True
     return replace(result, hunks=tuple(updated)) if changed else result
-
-
-def _follow_up_request(
-    root: Path, resolved: _ResolvedDiff, request: DiffRequest
-) -> OperationRequest:
-    return request_for(
-        root,
-        "git-diff",
-        resolved.selection,
-        output_chars=request.budget,
-        output_format=request.output_format,
-        repeat=request.repeat,
-        context=RequestContext(session_id=session_id()),
-    )
 
 
 def _collect_files(
@@ -950,10 +947,7 @@ def diff(request: DiffRequest) -> DiffResult:
     result = _with_source_stability(result, before, after)
     if selection.view in {"patch", "hunks"} and not result.source_unstable:
         result = _attach_diff_follow_ups(
-            result,
-            _follow_up_request(root, resolved, request),
-            resolved,
-            fingerprint=after,
+            root, result, request, resolved, fingerprint=after
         )
     result = replace(result, repeat=request.repeat)
     # Collection records nothing: the emission layer stores this result digest

@@ -1,7 +1,7 @@
 """One reviewed-plan application pipeline and one worktree committer.
 
 Fresh and loaded plans are validated, materialized, and committed by this
-module; engine code only produces exact plans. Writes are journaled and
+module; planning only produces exact plans. Writes are journaled and
 serialized by a repository-scoped agentq lock. A failed or cancelled commit
 restores only the files whose current bytes still match the postimage written
 by this invocation, so a newer external edit is never overwritten. The lock
@@ -11,7 +11,6 @@ is not an atomic filesystem transaction.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -19,37 +18,141 @@ import re
 import stat
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from agentq.core import (
     AgentQError,
     ContractError,
-    context_cache_dir,
     is_sensitive_path,
     resolve_repo_path,
+    resolve_repo_scopes,
     scope_match,
-    secure_dir,
 )
 from agentq.core import repo_id as runtime_repo_id
-from agentq.mutation import (
+from agentq.mutation.models import (
     ApplyPolicy,
-    ByteEdit,
     ChangedFile,
     Engine,
     MutationOutcome,
     MutationPlan,
     MutationStatus,
     PlannedFile,
+    apply_edits,
+)
+from agentq.mutation.plan import (
+    PlanRequest,
+    build_plan,
+    load_plan,
+    policy_excluded_matches,
+    reject_conflicting_overrides,
+)
+from agentq.mutation.scan import ScanMode
+
+from .journal import (
+    JournalRecord,
+    JournalStatus,
+    MutationLock,
+    journal_path,
+    pending_recovery,
+    unlink,
+    write_journal,
 )
 
-JOURNAL_SCHEMA = "agentq.mutation-journal/v1"
-JOURNAL_IN_PROGRESS = "in_progress"
-JOURNAL_ROLLED_BACK = "rolled_back"
-JOURNAL_ROLLBACK_PARTIAL = "rollback_partial"
-_RECOVERY_STATUSES = frozenset({JOURNAL_IN_PROGRESS, JOURNAL_ROLLBACK_PARTIAL})
-_LOCK_TIMEOUT_SECONDS = 10.0
+__all__ = [
+    "ApplyRequest",
+    "ApplyResult",
+    "CommitResult",
+    "MutationApplyError",
+    "PreparedFile",
+    "apply",
+    "apply_edits",
+    "apply_reviewed_plan",
+    "commit_prepared",
+    "postcheck_remaining",
+    "prepare_plan",
+]
+
+
+@dataclass(frozen=True)
+class ApplyRequest:
+    """One codemod-apply invocation: fresh plan or loaded reviewed plan."""
+
+    root: Path
+    apply: bool
+    pattern: str | None = None
+    rewrite: str | None = None
+    scopes: tuple[str, ...] = ()
+    mode: ScanMode | None = None
+    language: str | None = None
+    expect_count: int | None = None
+    max_files: int = 100
+    include_sensitive: bool = False
+    plan_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode is not None and not isinstance(self.mode, ScanMode):
+            raise AgentQError(f"unsupported codemod mode: {self.mode}")
+        if self.max_files < 1:
+            raise AgentQError("codemod max files must be >= 1")
+        if self.expect_count is not None and self.expect_count < 0:
+            raise AgentQError("expected match count must be >= 0")
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """One apply invocation: plan identity, policy decision, and outcome."""
+
+    plan: MutationPlan
+    reviewed_plan: bool
+    dry_run: bool
+    file_count: int
+    match_count: int
+    outcome: MutationOutcome | None = None
+
+    @property
+    def applied(self) -> bool:
+        return self.outcome is not None and self.outcome.applied
+
+    @property
+    def message(self) -> str:
+        if self.outcome is not None:
+            return self.outcome.message
+        return _dry_run_message(self.reviewed_plan)
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.dry_run:
+            return {
+                "plan_id": self.plan.plan_id,
+                "engine": self.plan.engine,
+                "mode": self.plan.engine,
+                "pattern": self.plan.pattern,
+                "rewrite": self.plan.rewrite,
+                "scopes": list(self.plan.scopes),
+                "matches": self.match_count,
+                "files": self.file_count,
+                "counts": [],
+                "samples": [],
+                "applied": False,
+                "reviewed_plan": self.reviewed_plan,
+                "message": self.message,
+            }
+        if self.outcome is None:  # pragma: no cover - construction invariant
+            raise ContractError("an applied result requires a mutation outcome")
+        wire = self.outcome.to_wire()
+        wire["files"] = self.file_count
+        wire["scopes"] = list(self.plan.scopes)
+        if self.file_count == 0:
+            wire.update(
+                {
+                    "pattern": self.plan.pattern,
+                    "rewrite": self.plan.rewrite,
+                    "counts": [],
+                    "samples": [],
+                }
+            )
+        return wire
 
 
 @dataclass(frozen=True)
@@ -62,7 +165,6 @@ class PreparedFile:
     postimage: bytes
     mode: int
     matches: int
-    edits: tuple[ByteEdit, ...]
 
     @property
     def changed(self) -> bool:
@@ -86,110 +188,15 @@ class MutationApplyError(AgentQError):
         self.result = result
 
 
+@dataclass(frozen=True)
+class RepoStat:
+    path: Path
+    mode: int
+    size: int
+
+
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def mutation_dir() -> Path:
-    return secure_dir(context_cache_dir() / "mutation")
-
-
-def lock_path(root: Path) -> Path:
-    return mutation_dir() / f"{runtime_repo_id(root)}.lock"
-
-
-def journal_path(root: Path) -> Path:
-    return mutation_dir() / f"{runtime_repo_id(root)}.journal.json"
-
-
-def read_journal(root: Path) -> dict[str, Any] | None:
-    path = journal_path(root)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def pending_recovery(root: Path) -> dict[str, Any] | None:
-    """Return an unresolved journal (interrupted or partial rollback), if any."""
-    payload = read_journal(root)
-    if payload is None or payload.get("status") not in _RECOVERY_STATUSES:
-        return None
-    payload["journal"] = str(journal_path(root))
-    return payload
-
-
-def _write_journal(path: Path, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=".journal-", suffix=".tmp", dir=str(path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(data)
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, path)
-    except BaseException:
-        _unlink(Path(tmp_name))
-        raise
-
-
-def _unlink(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-class MutationLock:
-    """Repository-scoped advisory lock for agentq mutation processes."""
-
-    def __init__(self, root: Path, *, timeout: float = _LOCK_TIMEOUT_SECONDS) -> None:
-        self._path = lock_path(root)
-        self._timeout = timeout
-        self._handle: IO[bytes] | None = None
-
-    def __enter__(self) -> MutationLock:
-        fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
-        deadline = time.monotonic() + self._timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._handle = os.fdopen(fd, "rb")
-                return self
-            except OSError:
-                if time.monotonic() >= deadline:
-                    os.close(fd)
-                    raise AgentQError(
-                        "another agentq mutation is in progress for this worktree"
-                    ) from None
-                time.sleep(0.05)
-
-    def __exit__(self, *exc_info: object) -> None:
-        if self._handle is None:
-            return
-        try:
-            fcntl.flock(self._handle, fcntl.LOCK_UN)
-        finally:
-            self._handle.close()
-            self._handle = None
-
-
-def apply_edits(original: bytes, edits: tuple[ByteEdit, ...]) -> bytes:
-    """Materialize the planned postimage from ordered byte edits."""
-    assembled = bytearray()
-    cursor = 0
-    for edit in edits:
-        if edit.start < cursor or edit.end > len(original):
-            raise AgentQError(
-                "planned byte edits are out of range or overlap the preimage"
-            )
-        assembled += original[cursor : edit.start]
-        assembled += edit.replacement.encode("utf-8")
-        cursor = edit.end
-    assembled += original[cursor:]
-    return bytes(assembled)
 
 
 def _reject_symlink_chain(root: Path, rel: str) -> None:
@@ -202,13 +209,6 @@ def _reject_symlink_chain(root: Path, rel: str) -> None:
         if current.parent == current:
             return
         current = current.parent
-
-
-@dataclass(frozen=True)
-class RepoStat:
-    path: Path
-    mode: int
-    size: int
 
 
 def _resolve_target(root: Path, rel: str, scopes: tuple[str, ...]) -> RepoStat:
@@ -301,7 +301,6 @@ def _prepare_file(
         postimage=postimage,
         mode=target.mode,
         matches=entry.matches,
-        edits=entry.edits,
     )
 
 
@@ -321,11 +320,7 @@ def prepare_plan(
     _validate_plan_bounds(plan, policy)
     denied = _policy_excluded(plan, policy)
     if denied:
-        raise AgentQError(
-            "refusing codemod apply: planned files are excluded by policy ("
-            + ", ".join(denied)
-            + "); regenerate the plan or pass --include-sensitive"
-        )
+        raise _policy_exclusion_error(tuple(denied))
     return tuple(_prepare_file(root, plan, entry, policy) for entry in plan.files)
 
 
@@ -340,7 +335,7 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
         os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
-        _unlink(tmp)
+        unlink(tmp)
         raise
 
 
@@ -393,52 +388,51 @@ def commit_prepared(
         if recovery is not None:
             raise AgentQError(
                 "an interrupted agentq mutation requires recovery before another apply: "
-                f"{recovery['journal']}"
+                f"{recovery.journal}"
             )
         path = journal_path(root)
-        state: dict[str, Any] = {
-            "schema": JOURNAL_SCHEMA,
-            "repo_id": runtime_repo_id(root),
-            "plan_id": plan_id,
-            "status": JOURNAL_IN_PROGRESS,
-            "started_at": time.time(),
-            "planned": [item.path for item in targets],
-            "written": [],
-            "restored": [],
-            "failed_restores": [],
-        }
-        _write_journal(path, state)
+        state = JournalRecord(
+            status=JournalStatus.IN_PROGRESS,
+            repo_id=runtime_repo_id(root),
+            plan_id=plan_id,
+            started_at=time.time(),
+            planned=tuple(item.path for item in targets),
+        )
+        write_journal(path, state)
         written: list[PreparedFile] = []
         try:
             for item in targets:
                 _commit_one(item)
                 written.append(item)
-                state["written"] = [entry.path for entry in written]
-                _write_journal(path, state)
+                state = replace(
+                    state, written=tuple(entry.path for entry in written)
+                )
+                write_journal(path, state)
         except BaseException as exc:
             restored, failed = _restore_writes(written)
             result = _failure_result(path, restored, failed)
-            state.update(
-                {
-                    "status": (
-                        JOURNAL_ROLLBACK_PARTIAL if failed else JOURNAL_ROLLED_BACK
-                    ),
-                    "restored": restored,
-                    "failed_restores": failed,
-                    "finished_at": time.time(),
-                }
+            state = replace(
+                state,
+                status=(
+                    JournalStatus.ROLLBACK_PARTIAL
+                    if failed
+                    else JournalStatus.ROLLED_BACK
+                ),
+                restored=tuple(restored),
+                failed_restores=tuple(failed),
+                finished_at=time.time(),
             )
             if failed:
-                _write_journal(path, state)
+                write_journal(path, state)
             else:
-                _unlink(path)
+                unlink(path)
             if isinstance(exc, KeyboardInterrupt):
                 raise
             message = f"codemod apply failed and rolled back: {exc}"
             if failed:
                 message += f"; manual recovery required for: {', '.join(failed)}"
             raise MutationApplyError(message, result) from exc
-        _unlink(path)
+        unlink(path)
         return CommitResult(
             status=MutationStatus.APPLIED,
             changed=tuple(
@@ -504,4 +498,121 @@ def apply_reviewed_plan(
             f"{'reviewed' if reviewed_plan else 'freshly generated'} plan "
             f"{plan.plan_id}: {changed_paths}"
         ),
+    )
+
+
+def _dry_run_message(reviewed_plan: bool) -> str:
+    if reviewed_plan:
+        return "dry run from reviewed plan; pass --apply to mutate files"
+    return (
+        "dry run only; pass --apply to mutate files "
+        "(this applies a freshly generated plan, not a previously reviewed plan)"
+    )
+
+
+def _empty_outcome(plan: MutationPlan, *, reviewed_plan: bool) -> MutationOutcome:
+    return MutationOutcome(
+        status=MutationStatus.NOOP,
+        engine=plan.engine,
+        plan_id=plan.plan_id,
+        reviewed_plan=reviewed_plan,
+        match_count=0,
+        remaining_matches=0,
+        message=(
+            "reviewed plan contains no files; no mutation performed"
+            if reviewed_plan
+            else "no matches in the requested scope; no mutation performed"
+        ),
+    )
+
+
+def _policy_exclusion_error(excluded: tuple[str, ...]) -> AgentQError:
+    return AgentQError(
+        "refusing codemod apply: planned files are excluded by policy ("
+        + ", ".join(excluded)
+        + "); regenerate the plan or pass --include-sensitive"
+    )
+
+
+def apply(request: ApplyRequest) -> ApplyResult:
+    """Build or load one plan, apply the policy, and report the honest outcome."""
+    if request.plan_path is not None:
+        plan = load_plan(request.plan_path)
+        reject_conflicting_overrides(
+            plan,
+            pattern=request.pattern,
+            rewrite=request.rewrite,
+            mode=request.mode,
+            language=request.language,
+        )
+        reviewed_plan = True
+        scopes_relative = list(plan.scopes)
+    else:
+        mode = request.mode or ScanMode.FIXED
+        if mode is ScanMode.AST and not request.language:
+            raise AgentQError("--lang is required for AST codemods")
+        if request.pattern is None:
+            raise AgentQError("a codemod pattern is required (or use --plan)")
+        scopes_relative = [
+            scope.path.relative
+            for scope in resolve_repo_scopes(request.root, list(request.scopes))
+        ]
+        plan = build_plan(
+            PlanRequest(
+                root=request.root,
+                pattern=request.pattern,
+                rewrite=request.rewrite,
+                mode=mode,
+                language=request.language,
+                scopes=tuple(scopes_relative),
+                include_sensitive=request.include_sensitive,
+            )
+        )
+        reviewed_plan = False
+
+    policy = ApplyPolicy(
+        consent=request.apply,
+        max_files=request.max_files,
+        expect_count=request.expect_count,
+        include_sensitive=request.include_sensitive,
+    )
+    match_count = sum(item.matches for item in plan.files)
+    file_count = len(plan.files)
+    if not policy.consent:
+        return ApplyResult(
+            plan=plan,
+            reviewed_plan=reviewed_plan,
+            dry_run=True,
+            file_count=file_count,
+            match_count=match_count,
+        )
+    if file_count == 0:
+        if not reviewed_plan:
+            skipped = policy_excluded_matches(
+                request.root,
+                request.pattern or "",
+                request.mode or ScanMode.FIXED,
+                scopes_relative,
+            )
+            if skipped:
+                raise _policy_exclusion_error(skipped)
+        outcome = _empty_outcome(plan, reviewed_plan=reviewed_plan)
+        return ApplyResult(
+            plan=plan,
+            reviewed_plan=reviewed_plan,
+            dry_run=False,
+            file_count=0,
+            match_count=0,
+            outcome=outcome,
+        )
+    outcome = apply_reviewed_plan(
+        request.root, plan, policy, reviewed_plan=reviewed_plan
+    )
+    return ApplyResult(
+        plan=plan,
+        reviewed_plan=reviewed_plan,
+        dry_run=False,
+        file_count=file_count,
+        match_count=match_count,
+        outcome=outcome,
     )

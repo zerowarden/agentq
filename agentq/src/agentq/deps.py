@@ -268,7 +268,7 @@ def dependencies_data(
     return data
 
 
-def render_dependencies(data: dict[str, Any]) -> str:
+def render_dependencies(data: dict[str, Any], *, budget: int = 0) -> str:
     lines = [
         f"workspace dependencies: {data['nodes']} packages, {data['edges']} local edges {data['ecosystems']}",
         f"evidence: {data['evidence_quality']}",

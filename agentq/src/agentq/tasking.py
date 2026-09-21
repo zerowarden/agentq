@@ -9,7 +9,7 @@ from typing import Any
 from agentq.core import AgentQError, repo_id
 from agentq.execution import run_cmd
 
-from .state import delete_task, load_task, store_task
+from .persistence import delete_task, load_task, store_task
 from .workspace import changed_files
 
 _ACTION_ALIASES = {
@@ -78,13 +78,12 @@ def task_changes(root: Path) -> dict[str, Any]:
         raise AgentQError(
             "no active task; use 'agentq task begin' before requesting task-scoped changes"
         )
-    baseline = state.get("baseline") if isinstance(state.get("baseline"), dict) else {}
-    baseline_dirty = (
-        baseline.get("dirty") if isinstance(baseline.get("dirty"), dict) else {}
-    )
-    baseline_head = (
-        baseline.get("head") if isinstance(baseline.get("head"), str) else None
-    )
+    raw_baseline = state.get("baseline")
+    baseline = raw_baseline if isinstance(raw_baseline, dict) else {}
+    raw_dirty = baseline.get("dirty")
+    baseline_dirty = raw_dirty if isinstance(raw_dirty, dict) else {}
+    raw_head = baseline.get("head")
+    baseline_head = raw_head if isinstance(raw_head, str) else None
 
     worktree = set(changed_files(root).files)
     committed: set[str] = set()
@@ -231,7 +230,7 @@ _TASK_SIMPLE_RENDERINGS = {
 }
 
 
-def render_task(data: dict[str, Any]) -> str:
+def render_task(data: dict[str, Any], *, budget: int = 0) -> str:
     action = data.get("action")
     if action == "changes":
         return _render_task_changes(data)

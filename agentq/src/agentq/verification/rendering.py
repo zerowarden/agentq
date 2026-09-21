@@ -7,7 +7,7 @@ import shlex
 from .models import VerificationPlan, VerificationRun
 
 
-def render_plan(plan: VerificationPlan) -> str:
+def render_plan(plan: VerificationPlan, *, budget: int = 0) -> str:
     lines = [
         f"changed files: {len(plan.changed_files)}"
         f"{'+' if plan.changed_truncated else ''}",
@@ -59,7 +59,7 @@ def render_plan(plan: VerificationPlan) -> str:
     return "\n".join(lines)
 
 
-def render_verification(result: VerificationRun) -> str:
+def render_verification(result: VerificationRun, *, budget: int = 0) -> str:
     lines = _verification_header(result)
     if result.dry_run:
         return "\n".join([*lines, *_dry_run_lines(result)])

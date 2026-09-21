@@ -145,7 +145,7 @@ def _fallback_benchmark(
     }
 
 
-def render_benchmark(data: dict[str, Any]) -> str:
+def render_benchmark(data: dict[str, Any], *, budget: int = 0) -> str:
     lines = [
         f"benchmark engine: {data['engine']}; warmup={data['warmup']}; runs={data['runs']}"
     ]

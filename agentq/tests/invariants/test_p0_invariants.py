@@ -8,8 +8,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentq import codemod, mutation_apply
 from agentq.core import AgentQError, evidence, resolve_repo_path, resolve_repo_scopes
+from agentq.mutation import (
+    ApplyRequest,
+    ApplyResult,
+    MutationApplyError,
+    MutationPlan,
+    PlanRequest,
+    ScanMode,
+    ScanRequest,
+    ScanResult,
+    apply,
+    build_plan,
+    scan,
+    write_plan,
+)
 from agentq.redaction import StreamingRedactor, redact_text
 
 AGENTQ = str(Path(sys.executable).with_name("agentq"))
@@ -96,49 +109,45 @@ class RegexEquivalenceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def _scan(self, pattern: str, mode: ScanMode) -> ScanResult:
+        return scan(
+            ScanRequest(self.repo, pattern, scopes=(".",), mode=mode)
+        )
+
+    def _apply(self, pattern: str, rewrite: str) -> ApplyResult:
+        return apply(
+            ApplyRequest(
+                self.repo,
+                apply=True,
+                pattern=pattern,
+                rewrite=rewrite,
+                scopes=(".",),
+                mode=ScanMode.REGEX,
+            )
+        )
+
     def test_invalid_regex_rejected_before_plan(self) -> None:
-        with self.assertRaises(codemod.AgentQError):
-            codemod.scan_data(self.repo, r"\p{L}+", mode="regex", scopes=["."])
+        with self.assertRaises(AgentQError):
+            self._scan(r"\p{L}+", ScanMode.REGEX)
 
     def test_scan_apply_match_sets_equal(self) -> None:
-        scan = codemod.scan_data(self.repo, "foo", mode="regex", scopes=["."])
-        self.assertEqual(scan["matches"], 6)
-        result = codemod.apply_data(
-            self.repo,
-            "foo",
-            "QUX",
-            mode="regex",
-            scopes=["."],
-            apply=True,
-        )
-        self.assertEqual(result["matches"], 6)
-        self.assertEqual(result["remaining_matches"], 0)
+        scanned = self._scan("foo", ScanMode.REGEX)
+        self.assertEqual(scanned.matches, 6)
+        result = self._apply("foo", "QUX")
+        self.assertEqual(result.match_count, 6)
+        self.assertEqual(result.outcome.remaining_matches, 0)
         self.assertEqual((self.repo / "a.txt").read_text(), "QUX bar QUX\nbaz QUX\n")
 
     def test_backreference_replacement(self) -> None:
         (self.repo / "c.txt").write_text("a1 b2 c3\n")
-        codemod.apply_data(
-            self.repo,
-            r"(\w)(\d)",
-            r"\2\1",
-            mode="regex",
-            scopes=["."],
-            apply=True,
-        )
+        self._apply(r"(\w)(\d)", r"\2\1")
         self.assertEqual((self.repo / "c.txt").read_text(), "1a 2b 3c\n")
 
     def test_zero_width_and_unicode_patterns(self) -> None:
         # A pattern accepted by Python re but not necessarily by ripgrep's default
         # regex engine must still scan/apply identically.
         (self.repo / "d.txt").write_text("abc123\n")
-        codemod.apply_data(
-            self.repo,
-            r"(?<=a)\w+",
-            "X",
-            mode="regex",
-            scopes=["."],
-            apply=True,
-        )
+        self._apply(r"(?<=a)\w+", "X")
         self.assertIn("aX", (self.repo / "d.txt").read_text())
 
 
@@ -153,42 +162,42 @@ class CodemodPlanTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def _build(self, *, pattern: str, rewrite: str | None, mode: str) -> MutationPlan:
+        return build_plan(
+            PlanRequest(
+                root=self.repo,
+                pattern=pattern,
+                rewrite=rewrite,
+                mode=ScanMode(mode),
+                scopes=(".",),
+            )
+        )
+
+    def _apply_from_plan(self, plan_file: Path) -> ApplyResult:
+        return apply(
+            ApplyRequest(root=self.repo, apply=True, plan_path=str(plan_file))
+        )
+
     def test_plan_id_deterministic(self) -> None:
-        p1 = codemod.build_codemod_plan(
-            self.repo, "foo", "X", "regex", None, ["."], False
-        )
-        p2 = codemod.build_codemod_plan(
-            self.repo, "foo", "X", "regex", None, ["."], False
-        )
-        self.assertEqual(p1["plan_id"], p2["plan_id"])
+        p1 = self._build(pattern="foo", rewrite="X", mode="regex")
+        p2 = self._build(pattern="foo", rewrite="X", mode="regex")
+        self.assertEqual(p1.plan_id, p2.plan_id)
 
     def test_stale_plan_rejected(self) -> None:
-        plan = codemod.build_codemod_plan(
-            self.repo, "foo", "X", "fixed", None, ["."], False
-        )
+        plan = self._build(pattern="foo", rewrite="X", mode="fixed")
         plan_file = Path(self.temp.name) / "plan.json"
-        codemod._write_plan(str(plan_file), plan)
+        write_plan(str(plan_file), plan)
         # Mutate a file out of band so the preimage no longer matches.
         (self.repo / "a.txt").write_text("CHANGED\n")
-        with self.assertRaises(codemod.AgentQError):
-            codemod.apply_data(
-                self.repo,
-                None,
-                None,
-                scopes=["."],
-                mode=None,
-                apply=True,
-                plan=str(plan_file),
-            )
+        with self.assertRaises(AgentQError):
+            self._apply_from_plan(plan_file)
         self.assertEqual((self.repo / "a.txt").read_text(), "CHANGED\n")
         self.assertEqual((self.repo / "b.txt").read_text(), "foo\n")
 
     def test_rollback_on_failure(self) -> None:
-        plan = codemod.build_codemod_plan(
-            self.repo, "foo", "X", "fixed", None, ["."], False
-        )
+        plan = self._build(pattern="foo", rewrite="X", mode="fixed")
         plan_file = Path(self.temp.name) / "rollback-plan.json"
-        codemod._write_plan(str(plan_file), plan)
+        write_plan(str(plan_file), plan)
         original_a = (self.repo / "a.txt").read_text()
         original_b = (self.repo / "b.txt").read_text()
         calls = {"n": 0}
@@ -202,17 +211,9 @@ class CodemodPlanTests(unittest.TestCase):
                     raise OSError("simulated write failure")
             real_replace(src, dst)
 
-        with mock.patch("agentq.mutation_apply.os.replace", flaky_replace):
-            with self.assertRaises(mutation_apply.MutationApplyError) as caught:
-                codemod.apply_data(
-                    self.repo,
-                    None,
-                    None,
-                    scopes=["."],
-                    mode=None,
-                    apply=True,
-                    plan=str(plan_file),
-                )
+        with mock.patch("agentq.mutation.apply.os.replace", flaky_replace):
+            with self.assertRaises(MutationApplyError) as caught:
+                self._apply_from_plan(plan_file)
         self.assertEqual(caught.exception.result.status.value, "rolled_back")
         self.assertEqual(caught.exception.result.restored, ("a.txt",))
         # First file was replaced, then the failure triggered rollback of it.
@@ -220,21 +221,11 @@ class CodemodPlanTests(unittest.TestCase):
         self.assertEqual((self.repo / "b.txt").read_text(), original_b)
 
     def test_apply_from_plan_succeeds(self) -> None:
-        plan = codemod.build_codemod_plan(
-            self.repo, "foo", "Z", "regex", None, ["."], False
-        )
+        plan = self._build(pattern="foo", rewrite="Z", mode="regex")
         plan_file = Path(self.temp.name) / "success-plan.json"
-        codemod._write_plan(str(plan_file), plan)
-        result = codemod.apply_data(
-            self.repo,
-            None,
-            None,
-            scopes=["."],
-            mode=None,
-            apply=True,
-            plan=str(plan_file),
-        )
-        self.assertTrue(result["applied"])
+        write_plan(str(plan_file), plan)
+        result = self._apply_from_plan(plan_file)
+        self.assertTrue(result.applied)
         self.assertEqual((self.repo / "a.txt").read_text(), "Z\nZ\n")
 
 
@@ -299,28 +290,26 @@ class SensitiveExclusionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_sensitive_excluded_by_default(self) -> None:
-        codemod.apply_data(
-            self.repo,
-            "secret123",
-            "REDACTED",
-            mode="fixed",
-            scopes=["."],
-            apply=True,
+    def _apply(self, *, include_sensitive: bool) -> ApplyResult:
+        return apply(
+            ApplyRequest(
+                root=self.repo,
+                apply=True,
+                pattern="secret123",
+                rewrite="REDACTED",
+                scopes=(".",),
+                mode=ScanMode.FIXED,
+                include_sensitive=include_sensitive,
+            )
         )
+
+    def test_sensitive_excluded_by_default(self) -> None:
+        self._apply(include_sensitive=False)
         self.assertEqual((self.repo / "main.txt").read_text(), "REDACTED\n")
         self.assertEqual((self.repo / ".env").read_text(), "password=secret123\n")
 
     def test_sensitive_included_with_flag(self) -> None:
-        codemod.apply_data(
-            self.repo,
-            "secret123",
-            "REDACTED",
-            mode="fixed",
-            scopes=["."],
-            apply=True,
-            include_sensitive=True,
-        )
+        self._apply(include_sensitive=True)
         self.assertEqual((self.repo / ".env").read_text(), "password=REDACTED\n")
 
 

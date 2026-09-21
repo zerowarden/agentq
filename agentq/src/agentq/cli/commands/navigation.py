@@ -6,9 +6,10 @@ import argparse
 import re
 from pathlib import Path
 
+from agentq.continuations import QueryFollowUp, attach_continuation_cursors
 from agentq.core import AgentQError
 
-from ..emit import _attach_continuation_cursors, emit, emit_cached
+from ..emit import emit, emit_cached
 from ..parser import build_parser
 from ..registry import Outcome
 
@@ -61,7 +62,7 @@ def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
         )
     )
     data = nav.to_wire()
-    _attach_continuation_cursors(root, data)
+    attach_continuation_cursors(root, data)
     return emit(args, data, render_ts_nav, result=nav.with_wire_continuation(data))
 
 
@@ -103,13 +104,15 @@ def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
     return execute(nested, root)
 
 
-def _validate_follow_up_source(root: Path, record) -> None:
+def _validate_follow_up_source(root: Path, record: QueryFollowUp) -> None:
     """Reject a follow-up whose guarded mutable source has changed."""
     from agentq.git import validate_diff_guard
 
+    guard = record.guard
+    assert guard is not None
     if record.request.operation != "git-diff":
-        raise AgentQError(f"unsupported continuation guard: {record.guard.kind!r}")
-    validate_diff_guard(root, record.request, record.guard)
+        raise AgentQError(f"unsupported continuation guard: {guard.kind!r}")
+    validate_diff_guard(root, record.request, guard)
 
 
 def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:

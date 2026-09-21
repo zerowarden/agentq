@@ -420,11 +420,14 @@ class InspectCliTests(AgentQIntegrationHarness):
         )
         self.assertEqual(sampled.returncode, 0, msg=sampled.stderr)
         self.assertIn("[sampled]", sampled.stdout)
-        self.assertEqual(sampled.stdout.count("continue: agentq continue"), 1)
+        self.assertEqual(sampled.stdout.count("continue: agentq inspect"), 1)
         continuation = shlex.split(sampled.stdout.split("continue: ", 1)[1].strip())
-        continuation[0] = str(AGENTQ)
         completed = subprocess.run(
-            continuation, cwd=self.repo, env=self.env, text=True, capture_output=True
+            [str(AGENTQ), *continuation[1:], "--repo", str(self.repo)],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertIn("[complete]", completed.stdout)

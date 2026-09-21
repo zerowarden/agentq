@@ -1,5 +1,5 @@
 .cache/
-__pycache__/
+**/*/__pycache__/
 .venv/
 .ruff_cache/
 *.egg-info/

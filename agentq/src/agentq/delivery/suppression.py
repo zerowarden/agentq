@@ -1,8 +1,18 @@
+"""Repeat and exposure suppression semantics.
+
+Suppression answers two questions for one invocation: which previously
+delivered bytes must not be delivered again, and which delivered fragments a
+later read may safely acknowledge. Both are pure functions of the delivery
+ledger and the invocation identity; callers own the decision to suppress.
+"""
+
 from __future__ import annotations
 
 import json
 import os
 import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,15 +25,10 @@ from agentq.core import (
     session_id,
     stable_id,
 )
-from agentq.delivery import EvidenceFragment, read_item_header, read_line_text
-from agentq.execution import run_cmd
+from agentq.persistence import receipt_fragment_hits, receipt_fragment_payloads
 
-from .state import (
-    receipt_fragment_hits,
-    receipt_fragment_payloads,
-)
-from .tasking import current_task_id
-from .workspace import changed_files
+from .models import EvidenceFragment
+from .rendering import read_item_header, read_line_text
 
 
 def context_cache_enabled() -> bool:
@@ -42,6 +47,8 @@ def _context(root: Path) -> tuple[str, str] | None:
     suppression stays disabled rather than falling back to a repository-global
     pseudo-session.
     """
+    from agentq.tasking import current_task_id
+
     task = current_task_id(root)
     if task:
         return f"task:{task}", "task"
@@ -200,15 +207,14 @@ def _read_options_key(data: dict[str, Any]) -> str:
 
 
 def _prior_ranges(
-    payloads: list[dict[str, Any]], options_key: str
+    payloads: Sequence[Mapping[str, Any]], options_key: str
 ) -> dict[tuple[str, str, bool], list[tuple[int, int]]]:
     prior: dict[tuple[str, str, bool], list[tuple[int, int]]] = {}
     for payload in payloads:
         if payload.get("options") != options_key:
             continue
-        range_value = (
-            payload.get("range") if isinstance(payload.get("range"), dict) else {}
-        )
+        raw_range = payload.get("range")
+        range_value: Mapping[str, Any] = raw_range if isinstance(raw_range, dict) else {}
         file_id, version, start, end = (
             range_value.get("file"),
             range_value.get("version"),
@@ -302,6 +308,9 @@ _workspace_memo: dict[str, str] = {}
 
 
 def workspace_identity(root: Path) -> str:
+    from agentq.execution import run_cmd
+    from agentq.workspace import changed_files
+
     cached = _workspace_memo.get(str(root))
     if cached is not None:
         return cached
@@ -335,6 +344,40 @@ def operation_repeat_advice(
 ) -> dict[str, Any] | None:
     hits, scope = _lookup(root, command, "operation", [key])
     return {"scope": scope, "fingerprint": key[:20]} if key in hits else None
+
+
+@dataclass(frozen=True)
+class CachedOperation:
+    """The digest to acknowledge on delivery, and the scope suppressing a repeat."""
+
+    key: str | None = None
+    suppressed_scope: str | None = None
+
+
+def begin_cached_operation(
+    root: Path,
+    command: str,
+    options: dict[str, Any],
+    *,
+    budget: int,
+    output_format: str,
+    repeat: bool,
+) -> CachedOperation:
+    """Decide whether a repeatable operation is suppressed before it runs.
+
+    Workspace identity runs Git and stats the worktree, so it is skipped
+    entirely when repeat suppression cannot apply (feature disabled or no
+    session identity).
+    """
+    if not suppression_active(root):
+        return CachedOperation()
+    key = operation_cache_key(
+        root, command, {**options, "budget": budget, "format": output_format}
+    )
+    advice = operation_repeat_advice(root, command, key)
+    if advice and not repeat:
+        return CachedOperation(key=key, suppressed_scope=str(advice["scope"]))
+    return CachedOperation(key=key)
 
 
 def _iter_read_results(

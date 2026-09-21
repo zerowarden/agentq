@@ -108,7 +108,7 @@ class RunCliTests(AgentQIntegrationHarness):
 
     def test_run_log_cleanup_enforces_ttl_and_quota(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.execution.run import _cleanup_logs
+            from agentq.execution import cleanup_logs
 
         log_dir = Path(self.temp.name) / "logs"
         log_dir.mkdir()
@@ -126,8 +126,7 @@ class RunCliTests(AgentQIntegrationHarness):
         fresh.write_text("w" * 10, encoding="utf-8")
         os.utime(fresh, (now - 280,) * 2)
 
-        with mock.patch("agentq.execution.run._LOG_QUOTA_BYTES", 1500):
-            _cleanup_logs(log_dir)
+        cleanup_logs(log_dir, quota_bytes=1500)
 
         self.assertFalse(expired.exists())
         self.assertFalse(oldest.exists())

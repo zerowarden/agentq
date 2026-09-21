@@ -104,7 +104,7 @@ def _evidence_identity(
     parent: dict[str, Any] | None,
     ancestors: tuple[str, ...],
     path_hint: str,
-) -> Hashable | None:
+) -> tuple[Hashable, ...] | None:
     parent = parent or {}
     local_path = parent.get("path") or parent.get("file") or path_hint
     line = parent.get("line")

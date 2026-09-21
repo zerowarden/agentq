@@ -11,6 +11,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import tomllib
 
@@ -54,7 +55,7 @@ def load_verify_config(root: Path) -> VerifyConfig:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise AgentQError(f"invalid .agentq.toml: {exc}") from exc
     verify_raw = data.get("verify")
-    verify: dict = verify_raw if isinstance(verify_raw, dict) else {}
+    verify: dict[str, Any] = verify_raw if isinstance(verify_raw, dict) else {}
     return VerifyConfig(
         providers=_provider_selection(verify),
         commands=_configured_commands(verify),
@@ -64,7 +65,7 @@ def load_verify_config(root: Path) -> VerifyConfig:
     )
 
 
-def _provider_selection(verify: dict) -> tuple[str, ...] | None:
+def _provider_selection(verify: dict[str, Any]) -> tuple[str, ...] | None:
     providers = verify.get("providers")
     if providers is None:
         return None
@@ -83,7 +84,7 @@ def _provider_selection(verify: dict) -> tuple[str, ...] | None:
     return tuple(providers)
 
 
-def _configured_commands(verify: dict) -> tuple[tuple[str, ...], ...]:
+def _configured_commands(verify: dict[str, Any]) -> tuple[tuple[str, ...], ...]:
     commands_raw = verify.get("commands")
     if commands_raw is None:
         return ()
@@ -104,7 +105,7 @@ def _configured_commands(verify: dict) -> tuple[tuple[str, ...], ...]:
     return tuple(commands)
 
 
-def _pattern_list(verify: dict, field: str) -> tuple[str, ...]:
+def _pattern_list(verify: dict[str, Any], field: str) -> tuple[str, ...]:
     value = verify.get(field)
     if value is None:
         return ()
@@ -117,7 +118,7 @@ def _pattern_list(verify: dict, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _ownership(data: dict) -> tuple[tuple[str, str], ...]:
+def _ownership(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     ownership_raw = data.get("ownership")
     if ownership_raw is None:
         return ()

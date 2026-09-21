@@ -1947,20 +1947,6 @@ verified-changed
 
 should be removed as an exact alias of `verify-changed`.
 
-## Do Not Automatically Remove
-
-These require explicit evidence:
-
-```text
-verify-changed
-verify-task
-task action aliases
---offline
---stat
-legacy telemetry schemas
-legacy continuation representation
-```
-
 ## Completion Gate
 
 - every removal has a documented reason
@@ -2019,55 +2005,6 @@ The desired final state is no product-code complexity exemptions unless there is
 
 ---
 
-# Phase 21 — Final Architecture Documentation
-
-## Objective
-
-Make the repository self-explanatory to future agents.
-
-Create:
-
-```text
-ARCHITECTURE.md
-```
-
-Keep it concise and structural.
-
-It should explain:
-
-1. dependency direction
-2. capability map
-3. request → operation → result flow
-4. delivery flow
-5. persistence ownership
-6. telemetry observation flow
-7. navigation provider extension point
-8. verification provider extension point
-9. P0 invariants
-10. where the CLI adapter begins/ends
-11. which components are expected to change when the future model-facing API is introduced
-
-Do not produce an enormous documentation mirror of the source code.
-
-## Completion Gate
-
-A new coding agent should be able to answer:
-
-```text
-Where is search implemented?
-Where is search rendered?
-Where are continuations stored?
-Where are delivery receipts stored?
-Where do I add a language navigation provider?
-Where do I add a verification provider?
-What code is allowed to import the CLI?
-Where are the mutation safety invariants tested?
-```
-
-without repository-wide wandering.
-
----
-
 # 10. Phase Dependency Graph
 
 The recommended order is not arbitrary.
@@ -2114,8 +2051,6 @@ The recommended order is not arbitrary.
 19 Final removals
     ↓
 20 Static-analysis tightening
-    ↓
-21 Architecture documentation
 ```
 
 Important dependency rationale:

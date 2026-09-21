@@ -6,6 +6,7 @@ import posixpath
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from agentq.core import relpath
 from agentq.workspace import (
@@ -41,7 +42,7 @@ class CargoVerificationProvider:
             read_toml(root / "Cargo.toml") if (root / "Cargo.toml").is_file() else {}
         )
         workspace_raw = workspace_obj.get("workspace")
-        workspace_section: dict = (
+        workspace_section: dict[str, Any] = (
             workspace_raw if isinstance(workspace_raw, dict) else {}
         )
         patterns = [
@@ -49,12 +50,12 @@ class CargoVerificationProvider:
             for item in workspace_section.get("members") or []
             if isinstance(item, str)
         ]
-        manifests: dict[str, dict] = {}
+        manifests: dict[str, dict[str, Any]] = {}
         for manifest in manifest_units(root, repo_files, "Cargo.toml"):
             key = manifest.key
             obj = read_toml(manifest.path)
             package_raw = obj.get("package")
-            package: dict | None = (
+            package: dict[str, Any] | None = (
                 package_raw if isinstance(package_raw, dict) else None
             )
             if package is None:
@@ -79,7 +80,7 @@ class CargoVerificationProvider:
             local: set[str] = set()
             for section in ("dependencies", "dev-dependencies"):
                 table_raw = obj.get(section)
-                table: dict = table_raw if isinstance(table_raw, dict) else {}
+                table: dict[str, Any] = table_raw if isinstance(table_raw, dict) else {}
                 for _dep_name, spec in table.items():
                     if isinstance(spec, dict) and isinstance(spec.get("path"), str):
                         target_key = posixpath.normpath(
@@ -134,11 +135,11 @@ class CargoVerificationProvider:
             read_toml(root / "Cargo.toml") if (root / "Cargo.toml").is_file() else {}
         )
         workspace_raw = workspace_obj.get("workspace")
-        workspace_section: dict = (
+        workspace_section: dict[str, Any] = (
             workspace_raw if isinstance(workspace_raw, dict) else {}
         )
         workspace_lints_raw = workspace_section.get("lints")
-        workspace_lints: dict = (
+        workspace_lints: dict[str, Any] = (
             workspace_lints_raw if isinstance(workspace_lints_raw, dict) else {}
         )
 
@@ -227,10 +228,10 @@ class CargoVerificationProvider:
         return "dependent"
 
     @staticmethod
-    def _clippy_configured(unit_dir: Path, workspace_lints: dict) -> bool:
+    def _clippy_configured(unit_dir: Path, workspace_lints: dict[str, Any]) -> bool:
         crate_obj = read_toml(unit_dir / "Cargo.toml")
         crate_lints_raw = crate_obj.get("lints")
-        crate_lints: dict = (
+        crate_lints: dict[str, Any] = (
             crate_lints_raw if isinstance(crate_lints_raw, dict) else {}
         )
         return bool(crate_lints.get("clippy") or workspace_lints.get("clippy"))

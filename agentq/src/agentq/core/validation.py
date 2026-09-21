@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from .errors import ContractError
 
@@ -36,10 +36,17 @@ def canonical_digest(payload: Any, *, length: int | None = None) -> str:
     return digest if length is None else digest[:length]
 
 
-def require_mapping(value: Any, what: str) -> Mapping[str, Any]:
+def require_mapping(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError(f"{what} must be a JSON object")
-    return value
+    return cast("dict[str, Any]", value)
+
+
+def is_instance_of(
+    value: Any, expected: type[Any] | tuple[type[Any], ...]
+) -> bool:
+    """Runtime type guard for values crossing a dynamic boundary."""
+    return isinstance(value, expected)
 
 
 def require_str(value: Any, what: str, *, allow_empty: bool = False) -> str:
@@ -97,12 +104,6 @@ def optional_number(
     if value is None:
         return None
     return require_number(value, what, minimum=minimum)
-
-
-def require_list(value: Any, what: str) -> list[Any]:
-    if not isinstance(value, list):
-        raise ContractError(f"{what} must be a JSON array")
-    return value
 
 
 def require_sha256(value: Any, what: str) -> str:

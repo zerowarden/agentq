@@ -22,34 +22,103 @@ def render_noop(data: dict, *args, **kwargs) -> str:
     return ""
 
 
-def seed_delivery_receipt(cache_module, state_module, root, command, key, kind):
+def make_receipt(
+    persistence_module,
+    repo_id: str,
+    *,
+    receipt_id: str,
+    context_id: str,
+    consumer_id: str | None = None,
+    output_digest: str = "0" * 64,
+    written_bytes: int = 0,
+    emitted_at: float | None = None,
+):
+    """Build one typed receipt record for ledger fixtures."""
+    return persistence_module.ReceiptRecord(
+        receipt_id=receipt_id,
+        repo_id=repo_id,
+        context_id=context_id,
+        request_id=receipt_id,
+        output_digest=output_digest,
+        written_bytes=written_bytes,
+        transport="emitted",
+        acknowledgment="unacknowledged",
+        consumer_id=consumer_id,
+        emitted_at=time.time() if emitted_at is None else emitted_at,
+    )
+
+
+def make_fragment(
+    persistence_module,
+    command: str,
+    kind: str,
+    key: str,
+    *,
+    payload=None,
+    consumer_id: str = "",
+):
+    """Build one typed evidence-fragment record for ledger fixtures."""
+    return persistence_module.FragmentRecord(
+        command=command, kind=kind, key=key, payload=payload, consumer_id=consumer_id
+    )
+
+
+def record_receipt(
+    persistence_module,
+    repo_id: str,
+    *,
+    receipt_id: str,
+    context_id: str,
+    consumer_id: str | None,
+    output_digest: str,
+    written_bytes: int,
+    rows,
+    command: str,
+    emitted_at: float | None = None,
+) -> bool:
+    """Persist one receipt with the ledger rows produced by collection."""
+    return persistence_module.store_receipt(
+        make_receipt(
+            persistence_module,
+            repo_id,
+            receipt_id=receipt_id,
+            context_id=context_id,
+            consumer_id=consumer_id,
+            output_digest=output_digest,
+            written_bytes=written_bytes,
+            emitted_at=emitted_at,
+        ),
+        [
+            make_fragment(
+                persistence_module,
+                command,
+                str(row["kind"]),
+                str(row["key"]),
+                payload=row.get("payload"),
+                consumer_id=str(row.get("consumer_id") or consumer_id or ""),
+            )
+            for row in rows
+        ],
+        now=time.time(),
+    )
+
+
+def seed_delivery_receipt(cache_module, persistence_module, root, command, key, kind):
     """Forge one already-emitted receipt fragment for suppression tests."""
     identity = cache_module.suppression_identity(root)
     if identity is None:
         raise AssertionError("no suppression identity for receipt fixture")
     context, consumer = identity
-    state_module.store_receipt(
-        {
-            "receipt_id": key,
-            "repo_id": cache_module.repo_id(root),
-            "context_id": context,
-            "consumer_id": consumer or None,
-            "request_id": key,
-            "output_digest": key,
-            "written_bytes": 0,
-            "transport": "emitted",
-            "acknowledgment": "unacknowledged",
-            "emitted_at": time.time(),
-        },
-        [
-            {
-                "command": command,
-                "kind": kind,
-                "key": key,
-                "payload": None,
-                "consumer_id": consumer,
-            }
-        ],
+    persistence_module.store_receipt(
+        make_receipt(
+            persistence_module,
+            cache_module.repo_id(root),
+            receipt_id=key,
+            context_id=context,
+            consumer_id=consumer or None,
+            output_digest=key,
+        ),
+        [make_fragment(persistence_module, command, kind, key, consumer_id=consumer)],
         now=time.time(),
     )
 
