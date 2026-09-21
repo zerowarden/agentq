@@ -532,8 +532,16 @@ def build_receipt(
     acknowledgment_status: AcknowledgmentStatus = AcknowledgmentStatus.UNACKNOWLEDGED,
     context_id: str | None = None,
     consumer_id: str | None = None,
+    output_digest: str | None = None,
+    written_bytes: int | None = None,
 ) -> DeliveryReceipt:
-    digest = render.digest()
+    """Build the receipt for one rendered result.
+
+    ``output_digest``/``written_bytes`` override the render's own measurement
+    when the sink bytes differ (for example, an added trailing newline), so the
+    receipt always describes what was actually written.
+    """
+    digest = output_digest or render.digest()
     return DeliveryReceipt(
         receipt_id=receipt_identity(request_id, digest, consumer_id),
         request_id=request_id,
@@ -541,7 +549,9 @@ def build_receipt(
         context_id=context_id,
         consumer_id=consumer_id,
         output_digest=digest,
-        written_bytes=render.rendered_bytes,
+        written_bytes=(
+            written_bytes if written_bytes is not None else render.rendered_bytes
+        ),
         fragments=render.fragments,
         transport_status=transport_status,
         acknowledgment_status=acknowledgment_status,

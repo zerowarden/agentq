@@ -260,7 +260,7 @@ def _run_read(args: argparse.Namespace, root: Path) -> Outcome:
         output_format=args.format,
     )
     _attach_continuation_cursors(root, data)
-    return emit(args, data, render_read)
+    return emit(args, data, render_read, root=root)
 
 
 def _run_repo_map(args: argparse.Namespace, root: Path) -> Outcome:

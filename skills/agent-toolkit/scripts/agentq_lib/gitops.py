@@ -18,7 +18,7 @@ from .common import (
     redact_text,
     run_cmd,
 )
-from .context_cache import diff_cache_key, diff_repeat_advice, remember_diff
+from .context_cache import diff_cache_key, diff_repeat_advice
 from .evidence import (
     LEXICAL,
     RESULT_LIMIT,
@@ -676,7 +676,6 @@ def diff_data(
         data.update(
             {"hunks": index, "hunk_stats": hunk_stats, "hunks_truncated": truncated}
         )
-    remember_diff(root, cache_key)
     data["repeat"] = repeat
     data["coverage"] = merge_coverage(
         data.get("coverage"),
@@ -684,6 +683,13 @@ def diff_data(
             bool(data.get("patch_truncated")), bool(data.get("hunks_truncated"))
         ),
     )
+    # Collection records nothing: the emission layer stores this result digest
+    # only after the final bytes are written and flushed without render
+    # truncation. The digest covers the full collected result, so an identical
+    # repeat renders identical bytes.
+    data.setdefault("_agentq_internal", {})["delivery"] = {
+        "result": {"key": cache_key}
+    }
     return data
 
 

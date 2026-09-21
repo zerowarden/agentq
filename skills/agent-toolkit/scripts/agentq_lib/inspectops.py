@@ -83,8 +83,9 @@ def _edit_bundle(
     target: str,
     *,
     navigation: dict[str, Any],
-    candidate: dict[str, Any],
+    candidate: dict[str, Any] | None,
     max_lines: int,
+    repeat: bool = False,
 ) -> dict[str, Any]:
     bundle: dict[str, Any] = {"navigation": navigation}
     # Confine the candidate before it becomes a read target; an external
@@ -104,7 +105,7 @@ def _edit_bundle(
                 max_lines=max_lines,
                 max_chars=260,
                 include_sensitive=False,
-                repeat=False,
+                repeat=repeat,
                 cache_command="inspect",
                 budget=0,
                 output_format="text",
@@ -260,6 +261,7 @@ def inspect_data(
                 navigation=ts,
                 candidate=_ts_candidate(ts),
                 max_lines=max_lines,
+                repeat=repeat,
             )
         if py_candidates:
             return _finish_symbol_result(
@@ -271,6 +273,7 @@ def inspect_data(
                 navigation=python,
                 candidate=py_candidates[0],
                 max_lines=max_lines,
+                repeat=repeat,
             )
 
         lexical = (
@@ -358,6 +361,7 @@ def _finish_symbol_result(
     navigation: dict[str, Any],
     candidate: dict[str, Any] | None,
     max_lines: int,
+    repeat: bool = False,
 ) -> dict[str, Any]:
     _with_metadata(result, intent=intent, providers=providers)
     if intent == "edit" and candidate:
@@ -367,6 +371,7 @@ def _finish_symbol_result(
             navigation=navigation,
             candidate=candidate,
             max_lines=max_lines,
+            repeat=repeat,
         )
         result["kind"] = "edit"
         result["edit"] = bundle

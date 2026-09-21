@@ -997,6 +997,10 @@ def record_event(
     output_view: str = "default",
     output_attribution: dict[str, int] | None = None,
     repeat_requested: bool = False,
+    receipt_id: str | None = None,
+    receipt_status: str | None = None,
+    delivered_fragments: int = 0,
+    receipt_error: str | None = None,
 ) -> None:
     """Append privacy-minimized local telemetry. Never raises into agent work."""
     if not telemetry_enabled() or command == "stats":
@@ -1076,6 +1080,10 @@ def record_event(
             "output_attribution": attribution if attributed else empty_attribution(),
             "output_attributed": attributed,
             "repeat_requested": bool(repeat_requested),
+            "receipt_id": receipt_id,
+            "receipt_status": receipt_status,
+            "delivered_fragments": max(0, int(delivered_fragments)),
+            "receipt_error": receipt_error[:120] if receipt_error else None,
             "metrics": metrics,
         }
         compatibility_alias = _compatibility_alias(canonical, invocation)
@@ -1107,6 +1115,10 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         normalized.setdefault("output_attribution", empty_attribution())
         normalized.setdefault("output_attributed", False)
         normalized.setdefault("repeat_requested", False)
+        normalized.setdefault("receipt_id", None)
+        normalized.setdefault("receipt_status", None)
+        normalized.setdefault("delivered_fragments", 0)
+        normalized.setdefault("receipt_error", None)
         normalized.setdefault(
             "render_budget_truncated", bool(normalized.get("truncated"))
         )

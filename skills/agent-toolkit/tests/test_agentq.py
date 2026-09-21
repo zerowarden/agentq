@@ -24,6 +24,38 @@ def render_noop(data: dict, *args, **kwargs) -> str:
     return ""
 
 
+def seed_delivery_receipt(cache_module, state_module, root, command, key, kind):
+    """Forge one already-emitted receipt fragment for suppression tests."""
+    identity = cache_module.suppression_identity(root)
+    if identity is None:
+        raise AssertionError("no suppression identity for receipt fixture")
+    context, consumer = identity
+    state_module.store_receipt(
+        {
+            "receipt_id": key,
+            "repo_id": cache_module.repo_id(root),
+            "context_id": context,
+            "consumer_id": consumer or None,
+            "request_id": key,
+            "output_digest": key,
+            "written_bytes": 0,
+            "transport": "emitted",
+            "acknowledgment": "unacknowledged",
+            "emitted_at": time.time(),
+        },
+        [
+            {
+                "command": command,
+                "kind": kind,
+                "key": key,
+                "payload": None,
+                "consumer_id": consumer,
+            }
+        ],
+        now=time.time(),
+    )
+
+
 class AgentQIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="agentq-test-")
@@ -1210,6 +1242,9 @@ class AgentQIntegrationTest(unittest.TestCase):
             "1000000",
             "--repeat",
         )
+        # A budget this small still renders evidence plus a recovery command in
+        # text; the JSON projection would reduce to a non-progressing page,
+        # which the emission layer now refuses with an explicit budget error.
         self.aq(
             "read",
             "packages/a/src/capped.py:1-100",
@@ -1218,6 +1253,8 @@ class AgentQIntegrationTest(unittest.TestCase):
             "--budget",
             "300",
             "--repeat",
+            "--format",
+            "text",
         )
 
         events = [
@@ -2010,8 +2047,10 @@ class AgentQIntegrationTest(unittest.TestCase):
     ) -> None:
         self.data("task", "begin")
         self.data("search", "OldName", "--budget", "256")
-        self.data("search", "OldName", "--budget", "2048")
-        self.data("search", "OldName", "--budget", "2048")
+        # The repeated search must fit its budget: a truncated render earns no
+        # whole-operation receipt, so only a fully emitted repeat suppresses.
+        self.data("search", "OldName", "--budget", "5000")
+        self.data("search", "OldName", "--budget", "5000")
         self.data("read", "packages/a/src/index.ts:1-3")
         self.data("read", "packages/a/src/index.ts:2-4")
         self.data("run", "--", "python3", "-c", "raise SystemExit(3)", expect=3)
@@ -2975,25 +3014,40 @@ class AgentQIntegrationTest(unittest.TestCase):
             operation_key = cache_module.operation_cache_key(
                 self.repo, "search", {"query": secret}
             )
-            cache_module.remember_operation(self.repo, "search", operation_key)
-            for index in range(160):
-                cache_module.remember_operation(
+            seed_delivery_receipt(
+                cache_module,
+                state_module,
+                self.repo,
+                "search",
+                operation_key,
+                "operation",
+            )
+            for index in range(1100):
+                seed_delivery_receipt(
+                    cache_module,
+                    state_module,
                     self.repo,
                     "search",
                     __import__("hashlib").sha256(f"key-{index}".encode()).hexdigest(),
+                    "operation",
                 )
             db_path = state_module.database_path()
             self.assertTrue(db_path.is_file())
             self.assertNotIn(secret.encode("utf-8"), db_path.read_bytes())
             reader = sqlite3.connect(db_path)
             try:
-                stored = reader.execute(
-                    "SELECT COUNT(*) FROM context_entries WHERE repo_id = ?",
+                stored_fragments = reader.execute(
+                    "SELECT COUNT(*) FROM receipt_fragments WHERE repo_id = ?",
+                    (cache_module.repo_id(self.repo),),
+                ).fetchone()[0]
+                stored_receipts = reader.execute(
+                    "SELECT COUNT(*) FROM receipts WHERE repo_id = ?",
                     (cache_module.repo_id(self.repo),),
                 ).fetchone()[0]
             finally:
                 reader.close()
-            self.assertLessEqual(stored, 128)
+            self.assertLessEqual(stored_fragments, 1024)
+            self.assertLessEqual(stored_receipts, 256)
 
             binary = self.repo / "packages/a/src/asset.bin"
             binary.write_bytes(b"\x00old")
@@ -3011,6 +3065,20 @@ class AgentQIntegrationTest(unittest.TestCase):
             self.change_a("\nexport const cachedDiff = true\n")
             first = gitops_module.diff_data(self.repo, patch=True, budget=100000)
             self.assertTrue(first["patch"])
+            # Collector-only calls record nothing: a bare repeat re-collects.
+            with mock.patch.object(
+                gitops_module,
+                "_stream_bounded_patch",
+                side_effect=AssertionError("diff rendered again"),
+            ):
+                with self.assertRaises(AssertionError):
+                    gitops_module.diff_data(self.repo, patch=True, budget=100000)
+            # Recording the emission (what the CLI does after write+flush)
+            # suppresses the identical repeat without re-streaming the body.
+            diff_key = first["_agentq_internal"]["delivery"]["result"]["key"]
+            seed_delivery_receipt(
+                cache_module, state_module, self.repo, "git-diff", diff_key, "result"
+            )
             with mock.patch.object(
                 gitops_module,
                 "_stream_bounded_patch",
@@ -3367,10 +3435,12 @@ class AgentQIntegrationTest(unittest.TestCase):
             restored = tasking_module._read_state(self.repo)
             self.assertIsNotNone(restored)
             self.assertEqual(restored["task_id"], "legacy123")
-            hits, scope = cache_module._lookup(self.repo, "search", ["a" * 64])
-        self.assertEqual(hits, {"a" * 64})
-        self.assertEqual(scope, "task")
-        self.assertFalse(legacy_context.exists())
+            # Legacy context entries record that an operation ran, not what
+            # final output contained: they are no longer imported and can
+            # never suppress new results. The file is left untouched.
+            hits, _ = cache_module._lookup(self.repo, "search", "operation", ["a" * 64])
+        self.assertEqual(hits, set())
+        self.assertTrue(legacy_context.exists())
         self.assertFalse(legacy_task.exists())
         self.assertTrue(malformed.exists())
 
@@ -3411,11 +3481,12 @@ class AgentQIntegrationTest(unittest.TestCase):
             reader = sqlite3.connect(state_module.database_path())
             try:
                 stored = reader.execute(
-                    "SELECT COUNT(*) FROM context_entries WHERE repo_id = ? AND context_id = ? AND command = ?",
+                    "SELECT COUNT(*) FROM receipt_fragments WHERE repo_id = ? AND context_id = ? AND command = ? AND kind = ?",
                     (
                         cache_module.repo_id(self.repo),
                         f"session:{cache_module.session_id()}",
                         "search",
+                        "operation",
                     ),
                 ).fetchone()[0]
             finally:

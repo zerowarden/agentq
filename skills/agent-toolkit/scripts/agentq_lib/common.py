@@ -204,6 +204,17 @@ def compact_line(text: str, max_chars: int = 240) -> str:
     return text[: max(0, max_chars - 15)] + " …[truncated]"
 
 
+def read_item_header(path: str, start: int, end: int, total_lines: int | None) -> str:
+    """The one read-window header every renderer and delivery manifest shares."""
+    total = total_lines if total_lines is not None else "?"
+    return f"--- {path}:{start}-{end} ({total} lines total) ---"
+
+
+def read_line_text(marker: str, number: int, width: int, text: str) -> str:
+    """The one rendered source-line format renderers and manifests share."""
+    return f"{marker} {number:>{width}} │ {text}"
+
+
 def truncate_line(text: str, max_chars: int = 240) -> str:
     """Truncate a line that is already redacted (no re-redaction).
 

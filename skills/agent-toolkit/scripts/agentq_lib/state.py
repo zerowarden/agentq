@@ -6,16 +6,18 @@ import re
 import secrets
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .common import AgentQError
 from .runtime import context_cache_dir, secure_dir, telemetry_hot_dir
 
-# Storage policy for context entries; owned here so reads, writes, pruning,
-# and legacy imports all share one definition.
-CONTEXT_TTL_SECONDS = 6 * 60 * 60
-CONTEXT_ENTRY_LIMIT = 128
+# Storage policy for delivery receipts; owned here so reads, writes, and
+# pruning all share one definition.
+RECEIPT_TTL_SECONDS = 6 * 60 * 60
+RECEIPT_ENTRY_LIMIT = 1024
+RECEIPT_LIMIT = 256
 CONTINUATION_TTL_SECONDS = 60 * 60
 _BUSY_TIMEOUT_MS = 5000
 _REPO_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -62,6 +64,43 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         )
         """,
             "CREATE INDEX IF NOT EXISTS continuations_expiry ON continuations (expires_at)",
+        ),
+    ),
+    (
+        3,
+        (
+            """
+        CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id TEXT PRIMARY KEY,
+            repo_id TEXT NOT NULL,
+            context_id TEXT NOT NULL,
+            consumer_id TEXT,
+            request_id TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            written_bytes INTEGER NOT NULL,
+            transport TEXT NOT NULL,
+            acknowledgment TEXT NOT NULL,
+            emitted_at REAL NOT NULL,
+            expires_at REAL NOT NULL
+        )
+        """,
+            "CREATE INDEX IF NOT EXISTS receipts_expiry ON receipts (expires_at)",
+            """
+        CREATE TABLE IF NOT EXISTS receipt_fragments (
+            repo_id TEXT NOT NULL,
+            context_id TEXT NOT NULL,
+            consumer_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            fragment_key TEXT NOT NULL,
+            payload TEXT,
+            receipt_id TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            PRIMARY KEY (repo_id, context_id, consumer_id, command, kind, fragment_key)
+        )
+        """,
+            "CREATE INDEX IF NOT EXISTS receipt_fragments_expiry ON receipt_fragments (expires_at)",
         ),
     ),
 )
@@ -127,69 +166,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _import_legacy_json(conn: sqlite3.Connection) -> None:
-    """Import legacy per-repo JSON state once, then remove it.
+    """Import legacy task state once; never import legacy context entries.
 
-    Malformed legacy files are never merged; they are left in place untouched.
+    Legacy context entries record that an operation ran, not what final output
+    contained, so they must not suppress new results. Their files are left in
+    place untouched. Malformed legacy files are never merged either.
     """
     global _legacy_imported
     if _legacy_imported:
         return
     _legacy_imported = True
-    _import_legacy_context(conn)
     _import_legacy_tasks(conn)
-
-
-def _import_legacy_context(conn: sqlite3.Connection) -> None:
-    for path in _legacy_files(context_cache_dir()):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict) or payload.get("schema") != 1:
-            continue
-        entries = payload.get("entries")
-        if not isinstance(entries, list):
-            continue
-        rows = [
-            (
-                path.stem,
-                str(item["context"]),
-                str(item["command"]),
-                str(item["key"]),
-                _legacy_entry_payload(item),
-                float(item["time"]),
-                float(item["time"]) + CONTEXT_TTL_SECONDS,
-            )
-            for item in entries
-            if isinstance(item, dict)
-            and all(
-                isinstance(item.get(field), str)
-                for field in ("context", "command", "key")
-            )
-            and isinstance(item.get("time"), (int, float))
-        ]
-        try:
-            with conn:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO context_entries "
-                    "(repo_id, context_id, command, evidence_key, payload, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    rows,
-                )
-        except sqlite3.Error:
-            continue
-        _unlink(path)
-
-
-def _legacy_entry_payload(item: dict[str, Any]) -> str | None:
-    options, range_value = item.get("options"), item.get("range")
-    if options is None or not isinstance(range_value, dict):
-        return None
-    return json.dumps(
-        {"options": options, "range": range_value},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
 
 
 def _import_legacy_tasks(conn: sqlite3.Connection) -> None:
@@ -232,9 +219,128 @@ def _unlink(path: Path) -> None:
         pass
 
 
-def context_hits(
-    repo_id: str, context_id: str, command: str, keys: list[str], *, now: float
+def _receipt_timestamp(value: Any, now: float) -> float:
+    """Epoch seconds for a receipt timestamp, accepting ISO 8601 or numbers."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return now
+    return now
+
+
+def store_receipt(
+    receipt: dict[str, Any],
+    fragments: list[dict[str, Any]],
+    *,
+    now: float,
+) -> bool:
+    """Persist one delivery receipt and its evidence fragments atomically.
+
+    Upserts are idempotent: re-storing the same receipt or fragment refreshes
+    its expiry without duplicating rows. A corrupt, locked, or unavailable
+    ledger disables suppression for the invocation instead of failing the
+    caller — the error is reported as ``False`` so evidence is redelivered
+    rather than lost.
+    """
+    expires_at = now + RECEIPT_TTL_SECONDS
+    emitted_at = _receipt_timestamp(receipt.get("emitted_at"), now)
+    receipt_row = (
+        str(receipt["receipt_id"]),
+        str(receipt["repo_id"]),
+        str(receipt["context_id"]),
+        receipt.get("consumer_id"),
+        str(receipt["request_id"]),
+        str(receipt["output_digest"]),
+        int(receipt["written_bytes"]),
+        str(receipt["transport"]),
+        str(receipt["acknowledgment"]),
+        emitted_at,
+        expires_at,
+    )
+    fragment_rows = [
+        (
+            str(receipt["repo_id"]),
+            str(receipt["context_id"]),
+            str(row.get("consumer_id") or receipt.get("consumer_id") or ""),
+            str(row["command"]),
+            str(row["kind"]),
+            str(row["key"]),
+            (
+                json.dumps(row["payload"], ensure_ascii=False, separators=(",", ":"))
+                if row.get("payload") is not None
+                else None
+            ),
+            str(receipt["receipt_id"]),
+            now,
+            expires_at,
+        )
+        for row in fragments
+        if isinstance(row.get("command"), str)
+        and isinstance(row.get("kind"), str)
+        and isinstance(row.get("key"), str)
+    ]
+    try:
+        with connection() as conn:
+            conn.execute("DELETE FROM receipts WHERE expires_at < ?", (now,))
+            conn.execute("DELETE FROM receipt_fragments WHERE expires_at < ?", (now,))
+            conn.execute(
+                "INSERT INTO receipts "
+                "(receipt_id, repo_id, context_id, consumer_id, request_id, "
+                "output_digest, written_bytes, transport, acknowledgment, "
+                "emitted_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(receipt_id) DO UPDATE SET expires_at=excluded.expires_at",
+                receipt_row,
+            )
+            conn.executemany(
+                "INSERT INTO receipt_fragments "
+                "(repo_id, context_id, consumer_id, command, kind, fragment_key, "
+                "payload, receipt_id, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(repo_id, context_id, consumer_id, command, kind, fragment_key) "
+                "DO UPDATE SET payload=excluded.payload, receipt_id=excluded.receipt_id, "
+                "expires_at=excluded.expires_at",
+                fragment_rows,
+            )
+            conn.execute(
+                "DELETE FROM receipt_fragments WHERE repo_id = ? AND rowid NOT IN "
+                "(SELECT rowid FROM receipt_fragments WHERE repo_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                (
+                    str(receipt["repo_id"]),
+                    str(receipt["repo_id"]),
+                    RECEIPT_ENTRY_LIMIT,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM receipts WHERE repo_id = ? AND rowid NOT IN "
+                "(SELECT rowid FROM receipts WHERE repo_id = ? "
+                "ORDER BY emitted_at DESC, rowid DESC LIMIT ?)",
+                (
+                    str(receipt["repo_id"]),
+                    str(receipt["repo_id"]),
+                    RECEIPT_LIMIT,
+                ),
+            )
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def receipt_fragment_hits(
+    repo_id: str,
+    context_id: str,
+    consumer_id: str,
+    command: str,
+    kind: str,
+    keys: list[str],
+    *,
+    now: float,
 ) -> set[str]:
+    """Fragment keys already delivered for this repository, context, and consumer."""
     if not keys:
         return set()
     placeholders = ",".join("?" * len(keys))
@@ -242,10 +348,11 @@ def context_hits(
         rows = (
             connection()
             .execute(
-                f"SELECT evidence_key FROM context_entries "
-                f"WHERE repo_id = ? AND context_id = ? AND command = ? AND expires_at > ? "
-                f"AND evidence_key IN ({placeholders})",
-                (repo_id, context_id, command, now, *keys),
+                f"SELECT fragment_key FROM receipt_fragments "
+                f"WHERE repo_id = ? AND context_id = ? AND consumer_id = ? "
+                f"AND command = ? AND kind = ? AND expires_at > ? "
+                f"AND fragment_key IN ({placeholders})",
+                (repo_id, context_id, consumer_id, command, kind, now, *keys),
             )
             .fetchall()
         )
@@ -254,16 +361,23 @@ def context_hits(
     return {str(row[0]) for row in rows}
 
 
-def context_payloads(
-    repo_id: str, context_id: str, command: str, *, now: float
+def receipt_fragment_payloads(
+    repo_id: str,
+    context_id: str,
+    consumer_id: str,
+    command: str,
+    *,
+    now: float,
 ) -> list[dict[str, Any]]:
+    """Delivered fragment payloads for this repository, context, and consumer."""
     try:
         rows = (
             connection()
             .execute(
-                "SELECT payload FROM context_entries "
-                "WHERE repo_id = ? AND context_id = ? AND command = ? AND expires_at > ?",
-                (repo_id, context_id, command, now),
+                "SELECT payload FROM receipt_fragments "
+                "WHERE repo_id = ? AND context_id = ? AND consumer_id = ? "
+                "AND command = ? AND expires_at > ?",
+                (repo_id, context_id, consumer_id, command, now),
             )
             .fetchall()
         )
@@ -280,54 +394,6 @@ def context_payloads(
         if isinstance(value, dict):
             payloads.append(value)
     return payloads
-
-
-def remember_context(
-    repo_id: str,
-    context_id: str,
-    command: str,
-    rows: list[dict[str, Any]],
-    *,
-    now: float,
-) -> None:
-    """Record evidence keys (with optional payloads) for one context in a single transaction."""
-    if not rows:
-        return
-    expires_at = now + CONTEXT_TTL_SECONDS
-    values = [
-        (
-            repo_id,
-            context_id,
-            command,
-            row["evidence_key"],
-            (
-                json.dumps(row["payload"], ensure_ascii=False, separators=(",", ":"))
-                if row.get("payload") is not None
-                else None
-            ),
-            now,
-            expires_at,
-        )
-        for row in rows
-        if isinstance(row.get("evidence_key"), str)
-    ]
-    try:
-        with connection() as conn:
-            conn.execute("DELETE FROM context_entries WHERE expires_at < ?", (now,))
-            conn.executemany(
-                "INSERT OR REPLACE INTO context_entries "
-                "(repo_id, context_id, command, evidence_key, payload, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-            conn.execute(
-                "DELETE FROM context_entries WHERE repo_id = ? AND rowid NOT IN "
-                "(SELECT rowid FROM context_entries WHERE repo_id = ? "
-                "ORDER BY created_at DESC, rowid DESC LIMIT ?)",
-                (repo_id, repo_id, CONTEXT_ENTRY_LIMIT),
-            )
-    except sqlite3.Error:
-        pass
 
 
 def load_task(repo_id: str) -> dict[str, Any] | None:

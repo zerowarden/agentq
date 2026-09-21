@@ -23,13 +23,15 @@ from .common import (
     language_for,
     list_repo_files,
     parse_json_lines,
+    read_item_header,
+    read_line_text,
     redact_text,
     relpath,
     run_cmd,
     safe_int,
     scope_match,
 )
-from .context_cache import read_repeat_advice, remember_read
+from .context_cache import read_repeat_advice
 from .evidence import (
     COMPLETE,
     LEXICAL,
@@ -1442,6 +1444,7 @@ def _plan_read_overlap(
                 "version": request["version"],
                 "start": start,
                 "end": end,
+                "redaction": request.get("redaction"),
             }
             for request, start, end in planned
         ],
@@ -1779,15 +1782,24 @@ def read_data(
                     high = middle - 1
             selected_cap = best
             data = build_data(selected_cap)
+            if best == 0:
+                # The budget fits zero evidence lines: say so explicitly with
+                # a recovery budget instead of suggesting the same dead end.
+                # Collection records nothing; only final emission earns a receipt.
+                required = max(
+                    budget * 2, rendered_size(build_data(source_line_cap)) + 256
+                )
+                data["continuation"] = _read_continuation(
+                    planned,
+                    max_lines=max_lines,
+                    max_chars=max_chars,
+                    budget=required,
+                    include_sensitive=include_sensitive,
+                    allow_outside=allow_outside,
+                    repeat=repeat,
+                    output_format=output_format,
+                )
 
-    emitted = [
-        item
-        for item in data["items"]
-        if isinstance(item, dict) and item.get("lines") and not item.get("suppressed")
-    ]
-    remember_read(
-        root, {"items": emitted, "max_chars": max_chars}, command=cache_command
-    )
     return data
 
 
@@ -1817,7 +1829,9 @@ def render_read(data: dict[str, Any], *, budget: int = 0) -> str:
             continue
         width = len(str(item["end"]))
         lines = [
-            f"--- {item['path']}:{item['start']}-{item['end']} ({item['total_lines']} lines total) ---"
+            read_item_header(
+                item["path"], item["start"], item["end"], item.get("total_lines")
+            )
         ]
         redaction_note = _redaction_note(item.get("redaction"))
         if redaction_note:
@@ -1826,7 +1840,7 @@ def render_read(data: dict[str, Any], *, budget: int = 0) -> str:
             lines.append("[already returned; use --repeat to show]")
         for entry in item["lines"]:
             marker = ">" if entry.get("anchor") else " "
-            lines.append(f"{marker} {entry['line']:>{width}} │ {entry['text']}")
+            lines.append(read_line_text(marker, entry["line"], width, entry["text"]))
         if item.get("truncated"):
             cause = (
                 "render budget" if data.get("render_budget_truncated") else "source cap"

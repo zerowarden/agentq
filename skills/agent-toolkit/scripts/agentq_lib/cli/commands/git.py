@@ -64,7 +64,7 @@ def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
         )
     if args.task_scope:
         attach_task_scope(data, scoped, requested=True)
-    return emit(args, data, render_diff)
+    return emit(args, data, render_diff, root=root)
 
 
 def _run_git_history(args: argparse.Namespace, root: Path) -> Outcome:

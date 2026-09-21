@@ -43,12 +43,17 @@ class _OutcomeFacts:
     source_cap_truncated: bool
     output_view: str
     output_attribution: Mapping[str, int] | None
+    receipt_id: str | None
+    receipt_status: str | None
+    delivered_fragments: int
+    receipt_error: str | None
 
 
 def _outcome_facts(outcome: Outcome) -> _OutcomeFacts:
     match outcome:
         case DispatchResult():
             render = outcome.render
+            receipt = outcome.receipt
             return _OutcomeFacts(
                 exit_code=outcome.exit_code,
                 data=(
@@ -62,6 +67,14 @@ def _outcome_facts(outcome: Outcome) -> _OutcomeFacts:
                 source_cap_truncated=outcome.source_cap_truncated,
                 output_view=outcome.output_view,
                 output_attribution=outcome.output_attribution,
+                receipt_id=receipt.receipt_id if receipt is not None else None,
+                receipt_status=(
+                    receipt.transport_status.value if receipt is not None else None
+                ),
+                delivered_fragments=(
+                    len(receipt.fragments) if receipt is not None else 0
+                ),
+                receipt_error=outcome.receipt_error,
             )
         case int():
             return _OutcomeFacts(
@@ -73,6 +86,10 @@ def _outcome_facts(outcome: Outcome) -> _OutcomeFacts:
                 source_cap_truncated=False,
                 output_view="default",
                 output_attribution=None,
+                receipt_id=None,
+                receipt_status=None,
+                delivered_fragments=0,
+                receipt_error=None,
             )
         case _:
             raise AgentQError(f"unsupported command outcome: {type(outcome).__name__}")
@@ -254,6 +271,10 @@ def main() -> int:
                 output_view=facts.output_view,
                 output_attribution=facts.output_attribution,
                 repeat_requested=bool(getattr(args, "repeat", False)),
+                receipt_id=facts.receipt_id,
+                receipt_status=facts.receipt_status,
+                delivered_fragments=facts.delivered_fragments,
+                receipt_error=facts.receipt_error,
             )
         return facts.exit_code
     except AgentQCancelled as exc:

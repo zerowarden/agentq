@@ -15,10 +15,9 @@ from typing import Any
 
 from .contracts._base import ContractError, canonical_digest
 from .contracts.result import (
-    AcknowledgmentStatus,
     DeliveryReceipt,
+    EvidenceFragment,
     RenderResult,
-    TransportStatus,
     build_receipt,
 )
 from .evidence import Coverage, typed_from_wire
@@ -37,6 +36,7 @@ class DispatchResult:
     output_attribution: Mapping[str, Any] | None = None
     render_budget_truncated: bool = False
     source_cap_truncated: bool = False
+    receipt_error: str | None = None
 
 
 def coverage_from_data(data: Mapping[str, Any]) -> Coverage:
@@ -79,15 +79,27 @@ def finalize_output(
     telemetry_data: Mapping[str, Any] | None = None,
     record_receipt: bool = True,
     emitted_at: str | None = None,
+    fragments: tuple[EvidenceFragment, ...] = (),
+    encoding: str = "utf-8",
+    written_bytes: int | None = None,
+    output_digest: str | None = None,
 ) -> DispatchResult:
-    """Build the render result and, after successful output, its receipt."""
+    """Build the render result and, after successful output, its receipt.
+
+    Only call this after the final bytes were written and flushed: a write or
+    flush failure produces no receipt at all. ``written_bytes`` and
+    ``output_digest`` describe the actual bytes on the sink (including newline
+    bytes in the caller's encoding), never just the pre-flush string.
+    """
     vocabulary = coverage_from_data(data)
     render = RenderResult(
         final_output=output,
+        fragments=tuple(fragments),
         prebudget_chars=max(len(output), max(0, prebudget_chars)),
         visible_coverage=vocabulary,
         truncated=truncated,
         terminal_reason=None,
+        encoding=encoding,
     )
     receipt = None
     if record_receipt and repo_id:
@@ -95,11 +107,11 @@ def finalize_output(
             render,
             request_id=request_id,
             repo_id=repo_id,
-            emitted_at=emitted_at or datetime.now(timezone.utc).isoformat(),
-            transport_status=TransportStatus.EMITTED,
-            acknowledgment_status=AcknowledgmentStatus.UNACKNOWLEDGED,
             context_id=context_id,
             consumer_id=consumer_id,
+            output_digest=output_digest,
+            written_bytes=written_bytes,
+            emitted_at=emitted_at or datetime.now(timezone.utc).isoformat(),
         )
     return DispatchResult(
         data=data,
