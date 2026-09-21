@@ -15,14 +15,26 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from agentq.core import repo_id
+from agentq.continuations import QueryFollowUp, QueryRefinement
+from agentq.core import (
+    Budget,
+    DiffSelection,
+    OperationRequest,
+    repo_id,
+)
 from agentq.discovery import (
     ReadResult,
     SearchResult,
     render_read,
     render_search,
 )
-from agentq.gitops import render_diff
+from agentq.git import (
+    DiffFile,
+    DiffFollowUp,
+    DiffHunk,
+    DiffResult,
+    render_diff,
+)
 from agentq.telemetry import (
     SCHEMA,
     _append_jsonl_many_unlocked,
@@ -227,40 +239,61 @@ def _fixture_case(
     return archive.stat().st_size, {"event_count": written == count}
 
 
+def _follow_up_record() -> QueryFollowUp:
+    return QueryFollowUp(
+        request=OperationRequest(
+            operation="git-diff",
+            request_id="scale-benchmark",
+            repo_id="scale-benchmark",
+            worktree_id="scale-benchmark",
+            options=DiffSelection(paths=("src/large.py",), view="patch"),
+            budget=Budget(output_chars=12_000),
+        ),
+        refinement=QueryRefinement(paths=("src/large.py",), view="patch", max_lines=300),
+        reason=("hunk-follow-up",),
+    )
+
+
 def _diff_case(count: int, budget: int) -> tuple[int, dict[str, Any]]:
-    hunks = [
-        {
-            "path": "src/large.py",
-            "new_start": index + 1,
-            "header": f"@@ -{index + 1},1 +{index + 1},1 @@",
-            "symbol": f"fixture_{index}",
-            "risk_flags": [],
-            "added": 1,
-            "deleted": 1,
-            "follow_up": f"agentq read src/large.py:{index + 1}-{index + 1}",
-        }
+    record = _follow_up_record()
+    hunks = tuple(
+        DiffHunk(
+            path="src/large.py",
+            old_start=index + 1,
+            new_start=index + 1,
+            header=f"@@ -{index + 1},1 +{index + 1},1 @@",
+            symbol=f"fixture_{index}",
+            added=1,
+            deleted=1,
+            follow_up=DiffFollowUp(
+                record=record,
+                command=f"agentq read src/large.py:{index + 1}-{index + 1}",
+            ),
+        )
         for index in range(count)
-    ]
+    )
     rendered = render_diff(
-        {
-            "scope": "worktree",
-            "total_files": 1,
-            "total_added": count,
-            "total_deleted": count,
-            "diff_check_ok": True,
-            "diff_check": [],
-            "files": [
-                {
-                    "status": "M",
-                    "path": "src/large.py",
-                    "added": count,
-                    "deleted": count,
-                    "role": "source",
-                }
-            ],
-            "hunks": hunks,
-            "hunks_truncated": False,
-        },
+        DiffResult(
+            repo_root=".",
+            scope="worktree",
+            total_files=1,
+            total_added=count,
+            total_deleted=count,
+            files=(
+                DiffFile(
+                    path="src/large.py",
+                    status="M",
+                    role="source",
+                    added=count,
+                    deleted=count,
+                ),
+            ),
+            files_truncated=False,
+            diff_check_ok=True,
+            diff_check=(),
+            hunks=hunks,
+            hunks_truncated=False,
+        ),
         budget=budget,
     )
     headers = sum(line.startswith("  src/large.py:") for line in rendered.splitlines())

@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from agentq.execution import (
+from .models import (
     CaptureStatus,
     CleanupStatus,
     ExecutionOutcome,
@@ -156,8 +156,8 @@ def is_spawn_failure(stop_reason: StopReason) -> bool:
 def raise_if_cancelled(outcome: ExecutionOutcome) -> None:
     """Abort a caller whose supervised child was cancelled by a signal.
 
-    ``run_compact`` deliberately keeps the outcome so the wrapper can still emit
-    its JSON result with the cancellation shell code. Adapters that cannot
+    ``execution.run`` deliberately keeps the outcome so the wrapper can still
+    emit its JSON result with the cancellation shell code. Adapters that cannot
     represent a cancelled result raise instead, preserving the 130/143 mapping
     through the CLI error path.
     """

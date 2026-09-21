@@ -21,7 +21,7 @@ from agentq.execution import (
     StreamMode,
     WrapperStatus,
 )
-from agentq.process import (
+from agentq.execution.supervisor import (
     CancellationToken,
     cli_exit_code,
     set_active_cancellation,
@@ -326,7 +326,7 @@ class AdapterCancellationTests(SupervisorTestCase):
                 self.assertEqual(caught.exception.signum, signum)
 
     def test_streaming_cancellation_raises_with_shell_code(self) -> None:
-        from agentq import gitops
+        from agentq.git.diff import _stream_diff
 
         shim_dir = self._git_shim()
         for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
@@ -339,7 +339,7 @@ class AdapterCancellationTests(SupervisorTestCase):
                         os.environ, {"PATH": f"{shim_dir}:{os.environ['PATH']}"}
                     ):
                         with self.assertRaises(AgentQCancelled) as caught:
-                            gitops._stream_diff(
+                            _stream_diff(
                                 self.root, ["diff", "--patch"], lambda line: True
                             )
                 finally:
@@ -349,8 +349,7 @@ class AdapterCancellationTests(SupervisorTestCase):
 
 class RunCompactFailureTests(SupervisorTestCase):
     def test_capture_failure_is_a_wrapper_error_with_detail(self) -> None:
-        from agentq import process as process_module
-        from agentq.runops import run_compact
+        from agentq.execution import RunRequest, run
 
         detail = "stdout record exceeded 8388608 bytes"
         outcome = ExecutionOutcome(
@@ -360,12 +359,12 @@ class RunCompactFailureTests(SupervisorTestCase):
             capture_status=CaptureStatus.FAILED,
             error_detail=detail,
         )
-        with mock.patch.object(process_module, "supervise", return_value=outcome):
-            data = run_compact(self.root, ["echo", "hi"])
-        self.assertEqual(data["exit_code"], 70)
-        self.assertEqual(data["diagnostics"], [detail])
-        self.assertIsNone(data["log"])
-        self.assertEqual(data["execution"]["error_detail"], detail)
+        with mock.patch("agentq.execution.run.supervise", return_value=outcome):
+            result = run(RunRequest(root=self.root, command=("echo", "hi")))
+        self.assertEqual(result.exit_code, 70)
+        self.assertEqual(result.diagnostics, (detail,))
+        self.assertIsNone(result.log)
+        self.assertEqual(result.execution.error_detail, detail)
 
 
 class ExitPolicyTests(unittest.TestCase):

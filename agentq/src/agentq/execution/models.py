@@ -1,4 +1,4 @@
-"""Typed execution and verification contracts.
+"""Typed execution contracts.
 
 Wrapper status, stop reason, child outcome and CLI exit code are separate
 facts. ``ExecutionSpec`` defaults never execute a shell; the supervisor owns
@@ -7,14 +7,12 @@ spawn/cleanup policy, callers own exit-code interpretation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 from agentq.core import (
     ContractError,
-    Coverage,
-    canonical_digest,
     optional_int,
     optional_number,
     optional_str,
@@ -23,13 +21,9 @@ from agentq.core import (
     require_int,
     require_mapping,
     require_str,
-    require_unique_strings,
-    typed_from_wire,
 )
 
 EXECUTION_SCHEMA = "agentq.execution/v1"
-VERIFICATION_PLAN_SCHEMA = "agentq.verification-plan/v1"
-CHECK_RESULT_SCHEMA = "agentq.check-result/v1"
 
 
 class WrapperStatus(str, Enum):
@@ -292,195 +286,3 @@ class ExecutionOutcome:
                 payload.get("limit_reached", False), f"{what}.limit_reached"
             ),
         )
-
-
-@dataclass(frozen=True)
-class CheckSpec:
-    check_id: str
-    kind: CheckKind
-    command: tuple[str, ...]
-    cwd: str | None = None
-    package: str | None = None
-    target: str | None = None
-    required: bool = True
-    timeout_seconds: float | None = None
-
-    def __post_init__(self) -> None:
-        require_str(self.check_id, "check id")
-        if not isinstance(self.kind, CheckKind):
-            raise ContractError("check kind must be a CheckKind")
-        if (
-            not isinstance(self.command, tuple)
-            or not self.command
-            or not all(isinstance(item, str) and item for item in self.command)
-        ):
-            raise ContractError("check command must be a non-empty tuple of strings")
-        optional_str(self.cwd, "check cwd")
-        optional_str(self.package, "check package")
-        optional_str(self.target, "check target")
-        require_bool(self.required, "check required")
-        optional_number(self.timeout_seconds, "check timeout", minimum=0)
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "check_id": self.check_id,
-            "kind": self.kind.value,
-            "command": list(self.command),
-            "cwd": self.cwd,
-            "package": self.package,
-            "target": self.target,
-            "required": self.required,
-            "timeout_seconds": self.timeout_seconds,
-        }
-
-
-@dataclass(frozen=True)
-class VerificationPlan:
-    """One complete, deduplicated verification plan."""
-
-    plan_id: str
-    checks: tuple[CheckSpec, ...]
-    mode: str | None = None
-    schema: str = VERIFICATION_PLAN_SCHEMA
-
-    def __post_init__(self) -> None:
-        require_str(self.plan_id, "verification plan id")
-        if not isinstance(self.checks, tuple) or not all(
-            isinstance(item, CheckSpec) for item in self.checks
-        ):
-            raise ContractError("verification plan checks must be a tuple of CheckSpec")
-        require_unique_strings(
-            [item.check_id for item in self.checks], "verification plan checks"
-        )
-        optional_str(self.mode, "verification plan mode")
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "schema": self.schema,
-            "plan_id": self.plan_id,
-            "mode": self.mode,
-            "checks": [item.to_wire() for item in self.checks],
-        }
-
-    @classmethod
-    def from_wire(
-        cls, value: Any, *, what: str = "verification plan"
-    ) -> VerificationPlan:
-        payload = require_mapping(value, what)
-        reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
-        checks = payload.get("checks")
-        if not isinstance(checks, list):
-            raise ContractError(f"{what}.checks must be an array")
-        decoded = []
-        for index, entry in enumerate(checks):
-            item = require_mapping(entry, f"{what}.checks[{index}]")
-            reject_unknown_keys(
-                item, tuple(CheckSpec.__dataclass_fields__), f"{what}.checks[{index}]"
-            )
-            command = item.get("command")
-            if not isinstance(command, list):
-                raise ContractError(f"{what}.checks[{index}].command must be an array")
-            kind_text = require_str(item.get("kind"), f"{what}.checks[{index}].kind")
-            try:
-                kind = CheckKind(kind_text)
-            except ValueError as exc:
-                raise ContractError(
-                    f"{what}.checks[{index}].kind is invalid: {kind_text!r}"
-                ) from exc
-            decoded.append(
-                CheckSpec(
-                    check_id=require_str(
-                        item.get("check_id"), f"{what}.checks[{index}].check_id"
-                    ),
-                    kind=kind,
-                    command=tuple(str(part) for part in command),
-                    cwd=optional_str(item.get("cwd"), f"{what}.checks[{index}].cwd"),
-                    package=optional_str(
-                        item.get("package"), f"{what}.checks[{index}].package"
-                    ),
-                    target=optional_str(
-                        item.get("target"), f"{what}.checks[{index}].target"
-                    ),
-                    required=require_bool(
-                        item.get("required", True), f"{what}.checks[{index}].required"
-                    ),
-                    timeout_seconds=optional_number(
-                        item.get("timeout_seconds"),
-                        f"{what}.checks[{index}].timeout_seconds",
-                        minimum=0,
-                    ),
-                )
-            )
-        return cls(
-            schema=require_str(
-                payload.get("schema", VERIFICATION_PLAN_SCHEMA), f"{what}.schema"
-            ),
-            plan_id=require_str(payload.get("plan_id"), f"{what}.plan_id"),
-            checks=tuple(decoded),
-            mode=optional_str(payload.get("mode"), f"{what}.mode"),
-        )
-
-
-@dataclass(frozen=True)
-class CheckResult:
-    check_id: str
-    status: CheckStatus
-    child_returncode: int | None = None
-    child_signal: int | None = None
-    stop_reason: StopReason | None = None
-    duration_ms: int = 0
-    output_summary: str | None = None
-    coverage: Coverage = field(default_factory=Coverage)
-    schema: str = CHECK_RESULT_SCHEMA
-
-    def __post_init__(self) -> None:
-        require_str(self.check_id, "check result id")
-        if not isinstance(self.status, CheckStatus):
-            raise ContractError("check result status must be a CheckStatus")
-        optional_int(
-            self.child_returncode,
-            "check result child return code",
-            minimum=-255,
-            maximum=255,
-        )
-        optional_int(
-            self.child_signal, "check result child signal", minimum=1, maximum=255
-        )
-        if self.stop_reason is not None and not isinstance(
-            self.stop_reason, StopReason
-        ):
-            raise ContractError("check result stop reason must be a StopReason")
-        require_int(self.duration_ms, "check result duration", minimum=0)
-        optional_str(self.output_summary, "check result summary")
-        if not isinstance(self.coverage, Coverage):
-            object.__setattr__(self, "coverage", typed_from_wire(self.coverage))
-        if self.status is CheckStatus.PASSED and self.child_returncode not in (None, 0):
-            raise ContractError(
-                "a passed check cannot have a nonzero child return code"
-            )
-        if (
-            self.status is CheckStatus.FAILED
-            and self.child_returncode in (None, 0)
-            and self.stop_reason is None
-        ):
-            raise ContractError("a failed check must record a failure cause")
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "schema": self.schema,
-            "check_id": self.check_id,
-            "status": self.status.value,
-            "child_returncode": self.child_returncode,
-            "child_signal": self.child_signal,
-            "stop_reason": self.stop_reason.value if self.stop_reason else None,
-            "duration_ms": self.duration_ms,
-            "output_summary": self.output_summary,
-            "coverage": self.coverage.to_wire(),
-        }
-
-
-def verification_plan_id(checks: tuple[CheckSpec, ...], mode: str | None = None) -> str:
-    """Deterministic identity for a complete check plan."""
-    return canonical_digest(
-        {"mode": mode, "checks": [item.to_wire() for item in checks]}
-    )

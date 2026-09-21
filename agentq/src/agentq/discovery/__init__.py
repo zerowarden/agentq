@@ -7,7 +7,6 @@ from .files import (
     DEFAULT_SKIP_PARTS,
     SENSITIVE_RG_EXCLUDES,
     SENSITIVE_RG_REINCLUDES,
-    FileEntry,
     FilesRequest,
     FilesResult,
     add_rg_excludes,
@@ -17,6 +16,7 @@ from .files import (
     repo_root,
     validated_scopes,
 )
+from .models import FileEntry, PackageManifest
 from .outline import (
     OutlineParseError,
     OutlineRequest,
@@ -87,6 +87,7 @@ __all__ = [
     "OutlineRequest",
     "OutlineResult",
     "OutlineSymbol",
+    "PackageManifest",
     "ReadContinuation",
     "ReadItem",
     "ReadLine",

@@ -340,22 +340,33 @@ class DiffFollowUpHarness(unittest.TestCase):
         self.assertIn("not allowed with", rejected.stderr)
 
     def test_unstable_source_is_partial_and_offers_no_cursor(self) -> None:
-        from agentq import gitops
-
-        original = gitops._stream_diff
+        from agentq.core import DiffSelection
+        from agentq.git import DiffRequest
+        from agentq.git import diff as git_diff
+        from agentq.git.diff import _stream_diff as original_stream
 
         def racing_stream(root, git_args, consume):
-            stopped = original(root, git_args, consume)
+            stopped = original_stream(root, git_args, consume)
             self.replace("app.py", "app line 20", "RACED")
             return stopped
 
         with mock.patch.dict(os.environ, self.env, clear=False):
-            with mock.patch.object(gitops, "_stream_diff", side_effect=racing_stream):
-                data = gitops.diff_data(self.repo, hunks=True, repeat=True)
+            with mock.patch(
+                "agentq.git.diff._stream_diff", side_effect=racing_stream
+            ):
+                result = git_diff(
+                    DiffRequest(
+                        root=self.repo,
+                        selection=DiffSelection(view="hunks"),
+                        repeat=True,
+                    )
+                )
 
-        self.assertTrue(data["source_unstable"])
-        self.assertIn("source_unstable", data["coverage"]["reason"])
-        self.assertTrue(all("follow_up" not in hunk for hunk in data["hunks"]))
+        self.assertTrue(result.source_unstable)
+        self.assertIsNotNone(result.coverage)
+        assert result.coverage is not None
+        self.assertIn("source_unstable", result.coverage.reasons)
+        self.assertTrue(all(hunk.follow_up is None for hunk in result.hunks or ()))
 
 
 class ArtifactStorageTests(unittest.TestCase):
@@ -409,12 +420,17 @@ class ArtifactStorageTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False):
             from agentq import continuations
             from agentq.core import DiffSelection
+            from agentq.git import DiffFollowUp
             from agentq.requests import request_for
 
             request = request_for(
                 self.base, "git-diff", DiffSelection(staged=True, view="hunks")
             )
-            block = continuations.query_follow_up_block(request)
+            follow_up = continuations.QueryFollowUp(request=request)
+            block = DiffFollowUp(
+                record=follow_up,
+                command=continuations.display_command(follow_up) or "",
+            ).to_block()
             continuations.attach_cursor(self.base, block)
 
         self.assertNotIn("cursor", block)

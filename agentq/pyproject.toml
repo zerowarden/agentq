@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-agentq = ["ts_nav.mjs"]
+"agentq.navigation.providers" = ["ts_nav.mjs"]
 
 [dependency-groups]
 dev = [
@@ -62,11 +62,10 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "src/agentq/audit.py" = ["C901", "PLR0912"]
 "src/agentq/codemod.py" = ["C901"]
-"src/agentq/gitops.py" = ["C901", "PLR0911"]
 "src/agentq/impact.py" = ["C901", "PLR0912"]
-"src/agentq/inspectops.py" = ["C901", "PLR0911"]
-"src/agentq/pythonnav.py" = ["C901", "PLR0912"]
-"src/agentq/runops.py" = ["C901", "PLR0912"]
+"src/agentq/navigation/inspect.py" = ["C901", "PLR0911"]
+"src/agentq/navigation/providers/python.py" = ["C901", "PLR0912"]
+"src/agentq/navigation/providers/typescript.py" = ["C901", "PLR0912"]
 "src/agentq/discovery/outline.py" = ["C901", "PLR0912"]
 "src/agentq/discovery/read.py" = ["C901", "PLR0912"]
 "src/agentq/discovery/rendering.py" = ["C901"]
@@ -74,10 +73,6 @@ select = [
 "src/agentq/discovery/search.py" = ["C901", "PLR0912"]
 "src/agentq/core/budget.py" = ["C901", "PLR0912"]
 "src/agentq/telemetry/__init__.py" = ["C901", "PLR0911", "PLR0912"]
-"src/agentq/testplan.py" = ["C901", "PLR0912"]
-"src/agentq/tsnav.py" = ["C901", "PLR0912"]
-"src/agentq/verification.py" = ["C901", "PLR0912"]
-"src/agentq/verifychanged.py" = ["C901", "PLR0912"]
 
 [tool.black]
 target-version = ["py310"]
@@ -96,11 +91,13 @@ include = [
     "src/agentq/core/validation.py",
     "src/agentq/delivery",
     "src/agentq/execution",
+    "src/agentq/git",
     "src/agentq/mutation",
     "src/agentq/telemetry/models.py",
+    "src/agentq/verification",
+    "src/agentq/workspace",
     "src/agentq/continuations.py",
     "src/agentq/emission.py",
-    "src/agentq/process.py",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

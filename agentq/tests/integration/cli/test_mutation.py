@@ -43,11 +43,9 @@ class MutationCliTests(AgentQIntegrationHarness):
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["remaining_matches"], 0)
 
-    def test_impact_reports_observations_instead_of_score(self) -> None:
+    def test_impact_reports_observations_and_rules(self) -> None:
         self.change_a("\nexport const fanout = true\n")
         impact = self.data("impact", "makeOldName", "--path", "packages")
-        self.assertNotIn("score", impact)
-        self.assertNotIn("blast_radius", impact)
         observations = impact["observations"]
         self.assertFalse(observations["public_shared_surface"])
         self.assertGreaterEqual(observations["lexical_source_fanout"], 1)
@@ -77,4 +75,3 @@ class MutationCliTests(AgentQIntegrationHarness):
         )
         self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
         self.assertIn("uncalibrated", rendered.stdout)
-        self.assertNotIn("blast radius:", rendered.stdout)

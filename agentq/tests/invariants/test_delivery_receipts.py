@@ -113,14 +113,20 @@ class DeliveryHarness(unittest.TestCase):
 
 class CollectorWritesNothingTests(DeliveryHarness):
     def test_collector_only_and_nested_calls_write_no_receipts(self) -> None:
-        from agentq import gitops as gitops_module
-        from agentq import inspectops as inspectops_module
+        from agentq.core import DiffSelection
         from agentq.discovery import ReadRequest, read
+        from agentq.git import DiffRequest
+        from agentq.git import diff as git_diff
+        from agentq.navigation import InspectRequest, inspect
 
         with mock.patch.dict(os.environ, self.env, clear=False):
             read(ReadRequest(root=self.repo, specs=("pkg/mod.py:1-3",)))
-            gitops_module.diff_data(self.repo)
-            inspectops_module.inspect_data(self.repo, "target", ["pkg"], lang="python")
+            git_diff(DiffRequest(root=self.repo, selection=DiffSelection()))
+            inspect(
+                InspectRequest(
+                    root=self.repo, target="target", paths=("pkg",), lang="python"
+                )
+            )
             self.assertEqual(self.ledger_counts(), (0, 0))
 
     def test_no_identity_records_nothing(self) -> None:

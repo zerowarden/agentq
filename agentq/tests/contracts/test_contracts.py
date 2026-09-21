@@ -35,17 +35,11 @@ from agentq.delivery import (
     build_receipt,
 )
 from agentq.execution import (
-    CheckKind,
-    CheckResult,
-    CheckSpec,
-    CheckStatus,
     ExecutionOutcome,
     ExecutionSpec,
     StopReason,
     StreamMode,
-    VerificationPlan,
     WrapperStatus,
-    verification_plan_id,
 )
 from agentq.mutation import (
     MUTATION_PLAN_SCHEMA_V2,
@@ -59,6 +53,14 @@ from agentq.mutation import (
     plan_digest,
 )
 from agentq.telemetry import TelemetryEvent
+from agentq.verification import (
+    CheckKind,
+    CheckResult,
+    CheckSpec,
+    CheckStatus,
+    VerificationPlan,
+    verification_plan_id,
+)
 
 
 def sample_plan(**overrides) -> dict:
@@ -329,12 +331,18 @@ class ContinuationWireTests(unittest.TestCase):
                 continuations.LegacyArgv.from_command(command)
 
     def test_producer_blocks_strip_display_fields(self) -> None:
-        block = continuations.query_follow_up_block(
-            self._request(),
+        from agentq.git import DiffFollowUp
+
+        follow_up = continuations.QueryFollowUp(
+            request=self._request(),
             refinement=continuations.QueryRefinement(view="patch"),
             reason=("render-budget",),
-            omitted={"matches": 4},
         )
+        block = DiffFollowUp(
+            record=follow_up,
+            command=continuations.display_command(follow_up) or "",
+            omitted={"matches": 4},
+        ).to_block()
         self.assertIn("command", block)
         self.assertIn("omitted", block)
         record = continuations.parse_block(block)
@@ -605,10 +613,13 @@ class VerificationContractTests(unittest.TestCase):
             CheckSpec(check_id="b", kind=CheckKind.LINT, command=("ruff", "check")),
         )
 
-    def test_plan_deduplicates_ids_and_round_trips(self) -> None:
+    def test_plan_identity_is_deterministic_and_ids_are_unique(self) -> None:
         checks = self._checks()
         plan = VerificationPlan(plan_id=verification_plan_id(checks), checks=checks)
-        self.assertEqual(VerificationPlan.from_wire(plan.to_wire()), plan)
+        self.assertEqual(plan.plan_id, verification_plan_id(checks))
+        wire = plan.to_wire()
+        self.assertEqual(wire["steps"][0]["kind"], "test")
+        self.assertEqual(wire["steps"][0]["argv"], ["pytest", "-q"])
         with self.assertRaises(ContractError):
             VerificationPlan(plan_id="x", checks=(checks[0], checks[0]))
 
@@ -823,11 +834,11 @@ class RequestNormalizationTests(unittest.TestCase):
 class NavigationBoundaryTests(unittest.TestCase):
     def test_provider_without_payload_is_unavailable_not_complete(self) -> None:
         from agentq import navigation
+        from agentq.navigation.resolution import _query
 
         class SilentProvider:
             name = "silent"
             provenance = evidence.SEMANTIC
-            candidates_key = "candidates"
 
             def supports(self, request) -> bool:
                 return True
@@ -838,62 +849,61 @@ class NavigationBoundaryTests(unittest.TestCase):
             def overview(self, request):
                 return None
 
-            def result_errors(self, result) -> list[str]:
-                return []
-
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = navigation._query(SilentProvider(), request, include_references=True)
+        result = _query(SilentProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.UNAVAILABLE)
         self.assertFalse(result.coverage.is_complete())
         self.assertEqual(result.payload, None)
 
     def test_explicit_empty_scan_can_be_complete_empty(self) -> None:
         from agentq import navigation
+        from agentq.navigation.resolution import _query
 
         class EmptyProvider:
             name = "python"
             provenance = evidence.SYNTACTIC
-            candidates_key = "candidates"
 
             def supports(self, request) -> bool:
                 return True
 
             def locate(self, request):
-                return {"candidates": [], "coverage": evidence.complete()}
+                return navigation.TypeScriptNav(
+                    action="locate",
+                    resolution_mode="symbol",
+                    coverage=evidence.complete(),
+                )
 
             def overview(self, request):
                 return self.locate(request)
 
-            def result_errors(self, result) -> list[str]:
-                return []
-
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = navigation._query(EmptyProvider(), request, include_references=True)
+        result = _query(EmptyProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.EMPTY)
         self.assertTrue(result.coverage.is_complete())
 
     def test_missing_coverage_is_unknown_not_complete(self) -> None:
         from agentq import navigation
+        from agentq.navigation.resolution import _query
 
         class BareProvider:
             name = "python"
             provenance = evidence.SYNTACTIC
-            candidates_key = "candidates"
 
             def supports(self, request) -> bool:
                 return True
 
             def locate(self, request):
-                return {"candidates": [{"file": "a.py", "line": 1}]}
+                return navigation.TypeScriptNav(
+                    action="locate",
+                    resolution_mode="symbol",
+                    candidate_count=1,
+                )
 
             def overview(self, request):
                 return self.locate(request)
 
-            def result_errors(self, result) -> list[str]:
-                return []
-
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = navigation._query(BareProvider(), request, include_references=True)
+        result = _query(BareProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.OK)
         self.assertFalse(result.coverage.is_complete())
 
@@ -909,35 +919,34 @@ class NavigationBoundaryTests(unittest.TestCase):
 
     def test_provider_metadata_comes_from_the_provider(self) -> None:
         from agentq import navigation
+        from agentq.navigation.resolution import _query
 
         class CustomProvider:
             name = "custom-provider"
             provenance = evidence.SEMANTIC
-            candidates_key = "results"
 
             def supports(self, request) -> bool:
                 return True
 
             def locate(self, request):
-                return {
-                    "results": [{"file": "a.py", "line": 1}],
-                    "coverage": evidence.complete(),
-                }
+                return navigation.TypeScriptNav(
+                    action="locate",
+                    resolution_mode="symbol",
+                    candidate_count=1,
+                    coverage=evidence.complete(),
+                )
 
             def overview(self, request):
                 return self.locate(request)
 
-            def result_errors(self, result) -> list[str]:
-                return []
-
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = navigation._query(CustomProvider(), request, include_references=True)
+        result = _query(CustomProvider(), request, include_references=True)
         self.assertEqual(result.status, ProviderStatus.OK)
         self.assertEqual(result.provenance, evidence.SEMANTIC)
         self.assertEqual(result.candidate_count, 1)
         metadata = navigation.SymbolResolution(outcomes=[result]).entries()[0]
-        self.assertEqual(metadata["provenance"], evidence.SEMANTIC)
-        self.assertEqual(metadata["candidate_count"], 1)
+        self.assertEqual(metadata.provenance, evidence.SEMANTIC)
+        self.assertEqual(metadata.candidate_count, 1)
 
     def test_not_applicable_provider_is_neutral_in_composition(self) -> None:
         from agentq import navigation
@@ -948,13 +957,18 @@ class NavigationBoundaryTests(unittest.TestCase):
         applicable = ProviderResult(
             provider="python",
             status=ProviderStatus.OK,
-            payload={"candidates": [{"file": "a.py", "line": 1}]},
+            payload=navigation.TypeScriptNav(
+                action="locate",
+                resolution_mode="symbol",
+                candidate_count=1,
+                coverage=evidence.typed_coverage(evidence.COMPLETE),
+            ),
             provenance=evidence.SYNTACTIC,
             candidate_count=1,
             coverage=evidence.typed_coverage(evidence.COMPLETE),
         )
         resolution = navigation.SymbolResolution(outcomes=[not_applicable, applicable])
-        self.assertEqual(resolution.coverage()["status"], evidence.COMPLETE)
+        self.assertEqual(resolution.coverage().status, evidence.COMPLETE)
 
 
 if __name__ == "__main__":

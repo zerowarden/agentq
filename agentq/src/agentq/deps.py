@@ -13,16 +13,9 @@ from agentq.tooling import find_executable
 
 from .workspace import discover_workspace
 
-DEPENDENCY_FIELDS = (
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-    "optionalDependencies",
-)
-
 
 def _node_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    packages = discover_workspace(root)
+    packages = discover_workspace(root).packages
     by_name = {pkg.name: pkg for pkg in packages.values()}
     nodes = [
         {
@@ -30,7 +23,7 @@ def _node_graph(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
             "ecosystem": "node",
             "name": pkg.name,
             "path": "package.json" if pkg.path == "." else f"{pkg.path}/package.json",
-            "private": bool(pkg.manifest.get("private")),
+            "private": pkg.private,
         }
         for pkg in packages.values()
     ]

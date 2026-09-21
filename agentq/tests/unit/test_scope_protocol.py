@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentq import tsnav
 from agentq.core import AgentQError, normalize_scopes_for_wire, resolve_repo_path
+from agentq.navigation.providers import typescript as tsnav_module
 from agentq.tooling import find_executable
 
 
@@ -77,7 +77,7 @@ class ScopeWireNormalizationTests(unittest.TestCase):
             self.assertEqual(normalize_scopes_for_wire(root, ["sp ace"]), ["sp ace"])
             self.assertEqual(normalize_scopes_for_wire(root, ["ünicode"]), ["ünicode"])
             # Sibling prefix must not conflate src with src-old.
-            from agentq.pythonnav import _collect_python_files
+            from agentq.navigation.providers.python import _collect_python_files
 
             scoped, wire = _collect_python_files(root, ["src"])
             self.assertEqual(wire, ["src"])
@@ -181,8 +181,6 @@ class ScopeWireNormalizationTests(unittest.TestCase):
     def test_ts_bridge_sends_relative_wire_not_absolute(self) -> None:
         temp, root = make_repo()
         try:
-            from agentq import tsnav as tsnav_module
-
             captured: dict = {}
             fake_result = type("FakeResult", (), {"stdout": json.dumps({"ok": True})})()
 
@@ -194,8 +192,16 @@ class ScopeWireNormalizationTests(unittest.TestCase):
                 with mock.patch.object(
                     tsnav_module, "find_executable", return_value="/usr/bin/node"
                 ):
+                    from agentq.navigation import TypeScriptNavRequest
+
                     tsnav_module._symbol_ts_nav(
-                        root, "locate", "Foo", [str(root / "src")], 10, None
+                        TypeScriptNavRequest(
+                            root=root,
+                            action="locate",
+                            symbol="Foo",
+                            paths=(str(root / "src"),),
+                            limit=10,
+                        )
                     )
             scopes_json = captured["argv"][6]
             self.assertEqual(json.loads(scopes_json), ["src"])
@@ -207,7 +213,7 @@ class ScopeWireNormalizationTests(unittest.TestCase):
         node = find_executable("node")
         if not node:
             self.skipTest("node is not installed")
-        script = Path(tsnav.__file__).with_name("ts_nav.mjs")
+        script = Path(tsnav_module.__file__).with_name("ts_nav.mjs")
         for bad in ("/abs", "../escape", "src/", "", "a\\b", "a/./b"):
             payload = json.dumps([bad])
             proc = subprocess.run(

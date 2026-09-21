@@ -102,8 +102,10 @@ class SuppressionCliTests(AgentQIntegrationHarness):
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq import context_cache as cache_module
-            from agentq import gitops as gitops_module
             from agentq import state as state_module
+            from agentq.core import DiffSelection
+            from agentq.git import DiffRequest
+            from agentq.git import diff as git_diff
 
         with mock.patch.dict(
             os.environ, {**self.env, "AGENTQ_SESSION_ID": "cache-bounds"}
@@ -152,47 +154,51 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             self.git("add", str(binary.relative_to(self.repo)))
             self.git("commit", "-qm", "add binary fixture")
             binary.write_bytes(b"\x00new")
-            with mock.patch.object(
-                gitops_module,
-                "_stream_diff",
+
+            def collect(selection: DiffSelection):
+                return git_diff(
+                    DiffRequest(root=self.repo, selection=selection, budget=100000)
+                )
+
+            with mock.patch(
+                "agentq.git.diff._stream_diff",
                 side_effect=AssertionError("diff body streamed"),
             ):
-                summary = gitops_module.diff_data(self.repo, budget=100000)
-            self.assertEqual(summary["total_files"], 1)
+                summary = collect(DiffSelection())
+            self.assertEqual(summary.total_files, 1)
 
             self.change_a("\nexport const cachedDiff = true\n")
-            first = gitops_module.diff_data(self.repo, patch=True, budget=100000)
-            self.assertTrue(first["patch"])
+            first = collect(DiffSelection(view="patch"))
+            self.assertTrue(first.patch)
             # Collector-only calls record nothing: a bare repeat re-collects.
-            with mock.patch.object(
-                gitops_module,
-                "_stream_bounded_patch",
+            with mock.patch(
+                "agentq.git.diff._stream_bounded_patch",
                 side_effect=AssertionError("diff rendered again"),
             ):
                 with self.assertRaises(AssertionError):
-                    gitops_module.diff_data(self.repo, patch=True, budget=100000)
+                    collect(DiffSelection(view="patch"))
             # Recording the emission (what the CLI does after write+flush)
             # suppresses the identical repeat without re-streaming the body.
-            diff_key = first["_agentq_internal"]["delivery"]["result"]["key"]
+            diff_key = first.delivery_result_key
+            assert diff_key is not None
             seed_delivery_receipt(
                 cache_module, state_module, self.repo, "git-diff", diff_key, "result"
             )
-            with mock.patch.object(
-                gitops_module,
-                "_stream_bounded_patch",
+            with mock.patch(
+                "agentq.git.diff._stream_bounded_patch",
                 side_effect=AssertionError("diff rendered again"),
             ):
-                repeated = gitops_module.diff_data(self.repo, patch=True, budget=100000)
-            self.assertTrue(repeated["repeat_suppressed"])
+                repeated = collect(DiffSelection(view="patch"))
+            self.assertTrue(repeated.repeat_suppressed)
 
             source = self.repo / "packages/a/src/index.ts"
             source.write_text(
                 source.read_text(encoding="utf-8").replace("cachedDiff", "editedDiff"),
                 encoding="utf-8",
             )
-            changed = gitops_module.diff_data(self.repo, patch=True, budget=100000)
-            self.assertFalse(changed.get("repeat_suppressed", False))
-            self.assertIn("editedDiff", changed["patch"])
+            changed = collect(DiffSelection(view="patch"))
+            self.assertFalse(changed.repeat_suppressed)
+            self.assertIn("editedDiff", changed.patch or "")
 
     def test_repeated_unchanged_read_is_suppressed_inside_task(self) -> None:
         self.data("task", "begin")

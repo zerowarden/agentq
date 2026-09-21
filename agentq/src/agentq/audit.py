@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +11,21 @@ from agentq.core import (
     HEURISTIC,
     RESULT_LIMIT,
     SAMPLED,
+    DiffSelection,
     classify_path,
     is_sensitive_path,
 )
 from agentq.core import complete as complete_coverage
 from agentq.core import coverage as coverage_block
-
-from .gitops import _parse_diff_header_paths, diff_data, status_data
+from agentq.git import (
+    DiffFile,
+    DiffRequest,
+    DiffResult,
+    StatusRequest,
+    diff,
+    parse_diff_header_paths,
+    status,
+)
 
 RULES: list[tuple[str, str, re.Pattern[str], str]] = [
     (
@@ -84,7 +94,7 @@ LOCK_NAMES = {
 
 
 def _added_lines(
-    patch: str, files: list[dict[str, Any]] | None = None
+    patch: str, files: Sequence[DiffFile] | None = None
 ) -> list[tuple[str, int | None, str]]:
     current = ""
     file_index = 0
@@ -93,12 +103,8 @@ def _added_lines(
     for line in patch.splitlines():
         if line.startswith("diff --git "):
             item = files[file_index] if files and file_index < len(files) else None
-            parsed = _parse_diff_header_paths(line)
-            current = (
-                str(item["path"])
-                if item and isinstance(item.get("path"), str)
-                else parsed[1] if parsed else ""
-            )
+            parsed = parse_diff_header_paths(line)
+            current = item.path if item is not None else (parsed[1] if parsed else "")
             file_index += 1
             new_line = None
         elif line.startswith("@@"):
@@ -124,43 +130,44 @@ def audit_data(
     task_scope: bool = False,
     max_findings: int = 100,
 ) -> dict[str, Any]:
-    status = status_data(root, limit=200)
+    status_result = status(StatusRequest(root=root, limit=200))
     if task_scope and not paths:
-        diff = {
-            "scope": "active-task",
-            "total_files": 0,
-            "total_added": 0,
-            "total_deleted": 0,
-            "files": [],
-            "diff_check_ok": True,
-            "diff_check": [],
-            "patch": "",
-        }
+        diff_result = DiffResult.empty(
+            repo_root=str(root), scope="active-task", view="patch"
+        )
     else:
-        diff = diff_data(
-            root,
-            staged=staged,
-            base=base,
-            paths=paths,
-            patch=True,
-            context=1,
-            max_files=200,
-            max_hunks=500,
-            max_lines=100_000,
+        diff_result = diff(
+            DiffRequest(
+                root=root,
+                selection=DiffSelection(
+                    staged=staged,
+                    base=base,
+                    paths=tuple(paths or ()),
+                    view="patch",
+                    context=1,
+                    max_files=200,
+                    max_hunks=500,
+                    max_lines=100_000,
+                ),
+            )
         )
         if task_scope:
-            diff["scope"] = "active-task"
+            diff_result = replace(diff_result, scope="active-task")
     if paths is not None:
         selected = set(paths)
-        status_files = [
+        status_files = tuple(
             item
-            for item in status["files"]
-            if item.get("path") in selected or item.get("original") in selected
-        ]
-        status["files"] = status_files
-        status["counts"] = dict(Counter(item["category"] for item in status_files))
-        status["total"] = status["shown"] = len(status_files)
-        status["truncated"] = False
+            for item in status_result.files
+            if item.path in selected or item.original in selected
+        )
+        status_result = replace(
+            status_result,
+            files=status_files,
+            counts=dict(Counter(item.category for item in status_files)),
+            total=len(status_files),
+            shown=len(status_files),
+            truncated=False,
+        )
     findings: list[dict[str, Any]] = []
 
     def add(
@@ -181,31 +188,37 @@ def audit_data(
                 }
             )
 
-    if status["counts"].get("conflict"):
+    if status_result.counts.get("conflict"):
         add(
             "unmerged-paths",
             "high",
-            f"{status['counts']['conflict']} unmerged paths remain",
+            f"{status_result.counts['conflict']} unmerged paths remain",
         )
-    if not diff["diff_check_ok"]:
-        for message in diff["diff_check"][:20]:
+    if not diff_result.diff_check_ok:
+        for message in diff_result.diff_check[:20]:
             add("git-diff-check", "high", message)
-    if diff["total_files"] > 30 or (diff["total_added"] + diff["total_deleted"]) > 1200:
+    if (
+        diff_result.total_files > 30
+        or (diff_result.total_added + diff_result.total_deleted) > 1200
+    ):
         add(
             "large-patch",
             "medium",
-            f"broad patch: {diff['total_files']} files, +{diff['total_added']} -{diff['total_deleted']}",
+            f"broad patch: {diff_result.total_files} files, "
+            f"+{diff_result.total_added} -{diff_result.total_deleted}",
         )
     elif (
-        diff["total_files"] > 15 or (diff["total_added"] + diff["total_deleted"]) > 600
+        diff_result.total_files > 15
+        or (diff_result.total_added + diff_result.total_deleted) > 600
     ):
         add(
             "large-patch",
             "low",
-            f"substantial patch: {diff['total_files']} files, +{diff['total_added']} -{diff['total_deleted']}",
+            f"substantial patch: {diff_result.total_files} files, "
+            f"+{diff_result.total_added} -{diff_result.total_deleted}",
         )
 
-    paths = [item["path"] for item in diff["files"]]
+    paths = [item.path for item in diff_result.files]
     source_paths = [p for p in paths if classify_path(p) == "source"]
     test_paths = [p for p in paths if classify_path(p) == "test"]
     manifests = [p for p in paths if Path(p).name in MANIFEST_NAMES]
@@ -240,7 +253,7 @@ def audit_data(
     if (
         source_paths
         and not test_paths
-        and diff["total_added"] + diff["total_deleted"] >= 40
+        and diff_result.total_added + diff_result.total_deleted >= 40
     ):
         add(
             "no-test-change",
@@ -248,7 +261,7 @@ def audit_data(
             "source changed substantially but no test file changed; existing tests may still be sufficient",
         )
 
-    for path, line, text in _added_lines(diff.get("patch", ""), diff.get("files")):
+    for path, line, text in _added_lines(diff_result.patch or "", diff_result.files):
         if SECRET_SIGNAL_RE.search(text) and not re.search(
             r"(?i)(process\.env|os\.environ|getenv|schema|example|placeholder)", text
         ):
@@ -276,11 +289,11 @@ def audit_data(
     truncated = len(findings) >= max_findings
     return {
         "repo_root": str(root),
-        "scope": diff["scope"],
+        "scope": diff_result.scope,
         "patch": {
-            "files": diff["total_files"],
-            "added": diff["total_added"],
-            "deleted": diff["total_deleted"],
+            "files": diff_result.total_files,
+            "added": diff_result.total_added,
+            "deleted": diff_result.total_deleted,
         },
         "counts": dict(counts),
         "findings": findings,

@@ -20,8 +20,14 @@ from tests.support.cli_harness import (
 class InspectCliTests(AgentQIntegrationHarness):
     def test_inspect_reports_cross_language_ambiguity(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import inspectops as inspectops_module
-            from agentq import navigation as navigation_module
+            from agentq.core import typed_from_wire
+            from agentq.navigation import (
+                InspectRequest,
+                TypeScriptNav,
+                inspect,
+                render_inspect,
+            )
+            from agentq.navigation.providers import typescript as typescript_provider
 
         ts_path = self.repo / "packages/a/src/index.ts"
         ts_result = {
@@ -53,19 +59,31 @@ class InspectCliTests(AgentQIntegrationHarness):
         (self.repo / "packages/a/src/dup.py").write_text(
             "class Config:\n    pass\n", encoding="utf-8"
         )
+        nav = TypeScriptNav.from_payload(
+            ts_result, coverage=typed_from_wire(ts_result["coverage"])
+        )
         with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
             with mock.patch.object(
-                navigation_module, "ts_nav_data", return_value=ts_result
+                typescript_provider.TypeScriptProvider,
+                "_runtime_available",
+                return_value=True,
             ):
-                data = inspectops_module.inspect_data(
-                    self.repo, "Config", ["packages/a/src"]
-                )
-        self.assertEqual(data["kind"], "ambiguous")
-        self.assertEqual(data["provenance"], "semantic")
-        self.assertEqual(data["coverage"]["status"], "complete")
-        provider_names = [item["provider"] for item in data["providers"]]
+                with mock.patch.object(
+                    typescript_provider, "_symbol_ts_nav", return_value=nav
+                ):
+                    result = inspect(
+                        InspectRequest(
+                            root=self.repo,
+                            target="Config",
+                            paths=("packages/a/src",),
+                        )
+                    )
+        self.assertEqual(result.kind, "ambiguous")
+        self.assertEqual(result.provenance, "semantic")
+        self.assertEqual(result.coverage.status, "complete")
+        provider_names = [item.provider for item in result.providers]
         self.assertEqual(provider_names, ["typescript", "python"])
-        rendered = inspectops_module.render_inspect(data, budget=100000)
+        rendered = render_inspect(result, budget=100000)
         self.assertIn("multiple languages", rendered)
         self.assertIn("typescript", rendered)
         self.assertIn("python", rendered)
@@ -73,6 +91,7 @@ class InspectCliTests(AgentQIntegrationHarness):
     def test_navigation_provider_layer_routes_and_reports(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq import navigation as navigation_module
+            from agentq.navigation.providers import typescript as typescript_provider
 
         for provider in (
             *navigation_module.LANGUAGE_PROVIDERS,
@@ -103,8 +122,8 @@ class InspectCliTests(AgentQIntegrationHarness):
 
         with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
             with mock.patch.object(
-                navigation_module,
-                "ts_nav_data",
+                typescript_provider,
+                "_symbol_ts_nav",
                 side_effect=AssertionError("typescript queried"),
             ):
                 resolution = navigation_module.resolve_symbol(
@@ -119,10 +138,10 @@ class InspectCliTests(AgentQIntegrationHarness):
         )
         self.assertIsNotNone(resolution.fallback)
         self.assertEqual(resolution.fallback.provider, "lexical")
-        entry_names = [entry["provider"] for entry in resolution.entries()]
+        entry_names = [entry.provider for entry in resolution.entries()]
         self.assertEqual(entry_names, ["python", "lexical"])
         # The python provider ran cleanly and simply found no Python candidate.
-        self.assertEqual(resolution.entries()[0]["coverage"]["status"], "complete")
+        self.assertEqual(resolution.entries()[0].coverage.status, "complete")
 
     def test_inspect_locate_intent_skips_references(self) -> None:
         (self.repo / "packages/a/src/located.py").write_text(
@@ -203,7 +222,7 @@ class InspectCliTests(AgentQIntegrationHarness):
 
     def test_inspect_downgrades_coverage_on_parse_errors(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import inspectops as inspectops_module
+            from agentq.navigation import InspectRequest, inspect
 
         (self.repo / "packages/a/src/broken_nav.py").write_text(
             "def broken(:\n", encoding="utf-8"
@@ -213,14 +232,19 @@ class InspectCliTests(AgentQIntegrationHarness):
             encoding="utf-8",
         )
         with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
-            data = inspectops_module.inspect_data(
-                self.repo, "makeOldName", ["packages/a/src"], lang="python"
+            result = inspect(
+                InspectRequest(
+                    root=self.repo,
+                    target="makeOldName",
+                    paths=("packages/a/src",),
+                    lang="python",
+                )
             )
-        self.assertEqual(data["kind"], "python")
-        self.assertEqual(data["coverage"]["status"], "partial")
-        self.assertIn("parse_error", data["coverage"]["reason"])
-        self.assertEqual(data["python"]["parse_error_count"], 1)
-        self.assertLessEqual(len(data["python"]["parse_errors"]), 5)
+        self.assertEqual(result.kind, "python")
+        self.assertEqual(result.coverage.status, "partial")
+        self.assertIn("parse_error", result.coverage.reasons)
+        self.assertEqual(result.python.parse_error_count, 1)
+        self.assertLessEqual(len(result.python.parse_errors), 5)
 
     def test_typescript_semantic_navigation_when_project_typescript_available(
         self,

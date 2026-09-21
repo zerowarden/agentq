@@ -21,8 +21,9 @@ from unittest import mock
 AGENTQ = Path(sys.executable).with_name("agentq")
 
 from agentq import navigation as navigation_module  # noqa: E402
-from agentq.core import AgentQError  # noqa: E402
-from agentq.inspectops import inspect_data, render_inspect  # noqa: E402
+from agentq.core import AgentQError, typed_from_wire  # noqa: E402
+from agentq.navigation import InspectRequest, inspect, render_inspect  # noqa: E402
+from agentq.navigation.providers import typescript as typescript_provider  # noqa: E402
 
 _EDIT_KEYS = {
     "target",
@@ -58,9 +59,19 @@ def make_repo(files: dict[str, str]) -> tuple[tempfile.TemporaryDirectory, Path]
     return temp, root
 
 
-def edit_data(root: Path, target: str, paths: list[str], **kwargs) -> dict:
+def inspect_result(root: Path, target: str, paths: list[str], **kwargs):
+    return inspect(
+        InspectRequest(root=root, target=target, paths=tuple(paths), **kwargs)
+    )
+
+
+def edit_result(root: Path, target: str, paths: list[str], **kwargs):
     with mock.patch.dict(os.environ, {"AGENTQ_CONTEXT_CACHE": "0"}, clear=False):
-        return inspect_data(root, target, paths, intent="edit", **kwargs)
+        return inspect_result(root, target, paths, intent="edit", **kwargs)
+
+
+def edit_data(root: Path, target: str, paths: list[str], **kwargs) -> dict:
+    return edit_result(root, target, paths, **kwargs).to_wire()
 
 
 def ambiguous_shared_repo() -> tuple[tempfile.TemporaryDirectory, Path]:
@@ -78,7 +89,8 @@ class ExplicitResolutionTests(unittest.TestCase):
     ) -> None:
         temp, root = ambiguous_shared_repo()
         try:
-            data = edit_data(root, "shared", ["pkg"], lang="python")
+            result = edit_result(root, "shared", ["pkg"], lang="python")
+            data = result.to_wire()
             self.assertEqual(data["kind"], "edit")
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "ambiguous")
@@ -90,7 +102,7 @@ class ExplicitResolutionTests(unittest.TestCase):
             self.assertEqual(paths, {"pkg/one.py", "pkg/two.py"})
             ids = [item["candidate_id"] for item in bundle["candidates"]]
             self.assertEqual(len(set(ids)), 2)
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             self.assertNotIn("proceed with the edit", rendered)
             self.assertIn("recovery:", rendered)
             self.assertIn("--candidate", rendered)
@@ -206,6 +218,9 @@ class ExplicitResolutionTests(unittest.TestCase):
                 },
                 "coverage": {"status": "complete", "reason": []},
             }
+            nav = navigation_module.TypeScriptNav.from_payload(
+                ts_payload, coverage=typed_from_wire(ts_payload["coverage"])
+            )
             with (
                 mock.patch.object(
                     navigation_module.TypeScriptProvider,
@@ -213,17 +228,18 @@ class ExplicitResolutionTests(unittest.TestCase):
                     return_value=True,
                 ),
                 mock.patch.object(
-                    navigation_module, "ts_nav_data", return_value=ts_payload
+                    typescript_provider, "_symbol_ts_nav", return_value=nav
                 ),
             ):
-                data = edit_data(root, "shared", ["."])
+                result = edit_result(root, "shared", ["."])
+            data = result.to_wire()
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "ambiguous")
             self.assertIsNone(bundle["selected"])
             providers = [item["provider"] for item in bundle["candidates"]]
             self.assertEqual(providers, ["typescript", "python"])
             self.assertTrue(all(item["candidate_id"] for item in bundle["candidates"]))
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             for item in bundle["candidates"]:
                 self.assertIn(item["candidate_id"], rendered)
         finally:
@@ -236,13 +252,14 @@ class ExplicitResolutionTests(unittest.TestCase):
         }
         temp, root = make_repo(files)
         try:
-            data = edit_data(root, "Dup", ["pkg"], lang="python", limit=1)
+            result = edit_result(root, "Dup", ["pkg"], lang="python", limit=1)
+            data = result.to_wire()
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "ambiguous")
             self.assertIsNone(bundle["selected"])
             self.assertEqual(len(bundle["candidates"]), 1)
             self.assertEqual(bundle["candidate_total"], 3)
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             self.assertIn("1 retained of 3 declared", rendered)
             self.assertIn("--candidate", rendered)
             self.assertNotIn("proceed with the edit", rendered)
@@ -257,14 +274,15 @@ class ExplicitResolutionTests(unittest.TestCase):
             }
         )
         try:
-            data = edit_data(root, "Wanted", ["pkg"], lang="python")
+            result = edit_result(root, "Wanted", ["pkg"], lang="python")
+            data = result.to_wire()
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "partial")
             self.assertIsNone(bundle["selected"])
             self.assertIsNone(bundle["declaration"])
             self.assertEqual(len(bundle["candidates"]), 1)
             self.assertTrue(bundle["candidates"][0]["candidate_id"])
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             self.assertIn("[partial", rendered)
             self.assertIn("recovery:", rendered)
             self.assertIn("--candidate", rendered)
@@ -275,12 +293,13 @@ class ExplicitResolutionTests(unittest.TestCase):
     def test_absent_symbol_is_not_found_with_recovery(self) -> None:
         temp, root = make_repo({"pkg/ok.py": "def other():\n    return 1\n"})
         try:
-            data = edit_data(root, "Missing", ["pkg"], lang="python")
+            result = edit_result(root, "Missing", ["pkg"], lang="python")
+            data = result.to_wire()
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "not_found")
             self.assertIsNone(bundle["selected"])
             self.assertEqual(bundle["candidates"], [])
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             self.assertIn("[not_found", rendered)
             self.assertIn("recovery:", rendered)
         finally:
@@ -294,12 +313,13 @@ class ExplicitResolutionTests(unittest.TestCase):
                 "overview",
                 side_effect=AgentQError("python provider crashed"),
             ):
-                data = edit_data(root, "Missing", ["pkg"], lang="python")
+                result = edit_result(root, "Missing", ["pkg"], lang="python")
+            data = result.to_wire()
             bundle = data["edit"]
             self.assertEqual(bundle["resolution"], "provider_failed")
             self.assertIsNone(bundle["selected"])
             self.assertEqual(bundle["candidates"], [])
-            rendered = str(render_inspect(data, budget=12000))
+            rendered = str(render_inspect(result, budget=12000))
             self.assertIn("[provider_failed", rendered)
             self.assertIn("python provider crashed", rendered)
         finally:
@@ -404,7 +424,7 @@ class ExplicitSelectionTests(unittest.TestCase):
                 os.environ, {"AGENTQ_CONTEXT_CACHE": "0"}, clear=False
             ):
                 with self.assertRaises(AgentQError):
-                    inspect_data(
+                    inspect_result(
                         root,
                         "shared",
                         ["pkg"],
@@ -446,14 +466,15 @@ class EditRenderTests(unittest.TestCase):
                 "pyproject.toml": '[project]\nname = "demo"\n',
             }
         )
-        self.data = edit_data(self.root, "helper", ["pkg"], lang="python")
+        self.result = edit_result(self.root, "helper", ["pkg"], lang="python")
+        self.data = self.result.to_wire()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def test_default_text_shows_target_declaration_and_references(self) -> None:
         self.assertEqual(self.data["edit"]["resolution"], "resolved")
-        rendered = str(render_inspect(self.data, budget=12000))
+        rendered = str(render_inspect(self.result, budget=12000))
         self.assertIn("selected declaration: python pkg/def.py:1:1", rendered)
         self.assertIn("declaration:", rendered)
         self.assertIn("def helper", rendered)
@@ -463,14 +484,14 @@ class EditRenderTests(unittest.TestCase):
             "no direct test reference was returned in the sampled scope", rendered
         )
         self.assertIn("proceed with the edit", rendered)
-        self.assertIs(self.data["navigation"], self.data["edit"]["navigation"])
+        self.assertIs(self.result.python, self.result.edit.navigation)
         self.assertEqual(
             self.data["edit"]["declaration"]["items"][0]["path"], "pkg/def.py"
         )
         self.assertEqual(self.data["edit"]["package"]["path"], "pyproject.toml")
 
     def test_tiny_budget_renders_recovery_not_false_completeness(self) -> None:
-        rendered = render_inspect(self.data, budget=120)
+        rendered = render_inspect(self.result, budget=120)
         self.assertTrue(getattr(rendered, "truncated", False))
         self.assertIn("render budget", str(rendered))
         self.assertIn("next:", str(rendered))
@@ -480,8 +501,8 @@ class EditRenderTests(unittest.TestCase):
     def test_ambiguous_text_requests_recovery_without_completion_claim(self) -> None:
         temp, root = ambiguous_shared_repo()
         try:
-            data = edit_data(root, "shared", ["pkg"], lang="python")
-            rendered = str(render_inspect(data, budget=12000))
+            result = edit_result(root, "shared", ["pkg"], lang="python")
+            rendered = str(render_inspect(result, budget=12000))
             self.assertIn("[ambiguous", rendered)
             self.assertIn("--candidate", rendered)
             self.assertIn("recovery:", rendered)

@@ -214,10 +214,12 @@ class TelemetryCliTests(AgentQIntegrationHarness):
 
     def test_online_read_and_diff_advice_never_load_historical_telemetry(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import gitops as gitops_module
             from agentq import telemetry as telemetry_module
+            from agentq.core import DiffSelection
             from agentq.discovery import ReadRequest
             from agentq.discovery import read as discovery_read
+            from agentq.git import DiffRequest
+            from agentq.git import diff as git_diff
 
         self.archive.parent.mkdir(parents=True, exist_ok=True)
         self.archive.write_text(
@@ -232,9 +234,11 @@ class TelemetryCliTests(AgentQIntegrationHarness):
                 read = discovery_read(
                     ReadRequest(root=self.repo, specs=("packages/a/src/index.ts:1-3",))
                 )
-                diff = gitops_module.diff_data(self.repo)
+                comparison = git_diff(
+                    DiffRequest(root=self.repo, selection=DiffSelection())
+                )
         self.assertEqual(len(read.items[0].lines), 3)
-        self.assertEqual(diff["total_files"], 0)
+        self.assertEqual(comparison.total_files, 0)
 
     def test_read_efficiency_merges_intervals_once_without_cross_context_double_counting(
         self,

@@ -1,7 +1,4 @@
 """Foundational application errors.
-
-These types are imported by core, capability, and adapter modules alike; they
-must not depend on any other agentq module.
 """
 
 from __future__ import annotations
@@ -19,7 +16,8 @@ class AgentQCancelled(AgentQError):
     """A supervised command was cancelled by SIGINT or SIGTERM.
 
     ``exit_code`` is the shared shell mapping supplied by
-    :func:`agentq.process.cli_exit_code` (130 for SIGINT, 143 for SIGTERM),
+    :func:`agentq.execution.supervisor.cli_exit_code` (130 for SIGINT, 143 for
+    SIGTERM),
     so callers never re-derive the cancellation policy.
     """
 

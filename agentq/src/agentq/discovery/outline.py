@@ -105,6 +105,7 @@ class OutlineResult:
     scopes: tuple[str, ...] = ()
     limit: int | None = None
     parse_errors: tuple[OutlineParseError, ...] = ()
+    parse_error_count: int = 0
 
     @property
     def variant(self) -> str:
@@ -136,6 +137,8 @@ class OutlineResult:
             data["limit"] = self.limit
         if self.parse_errors:
             data["parse_errors"] = [item.to_wire() for item in self.parse_errors]
+        if self.parse_error_count:
+            data["parse_error_count"] = self.parse_error_count
         return data
 
     @classmethod
@@ -175,49 +178,22 @@ class OutlineResult:
             scopes=tuple(str(item) for item in paths or []),
             limit=(int(payload["limit"]) if payload.get("limit") is not None else None),
             parse_errors=parse_errors,
+            parse_error_count=_int_or(payload.get("parse_error_count"), 0),
         )
 
 
-def _python_outline(request: OutlineRequest) -> OutlineResult:
-    from agentq.pythonnav import python_outline
+def _int_or(value: Any, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
 
-    payload = python_outline(
-        request.root,
-        list(request.paths),
-        request.match,
-        request.public,
-        request.limit,
-    )
-    return OutlineResult(
-        engine=str(payload["engine"]),
-        shown=int(payload["shown"]),
-        truncated=bool(payload["truncated"]),
-        coverage=typed_from_wire(payload.get("coverage")),
-        provenance=str(payload.get("provenance", SYNTACTIC)),
-        symbols=tuple(
-            OutlineSymbol(
-                name=str(item.get("name", "")),
-                kind=item.get("kind"),
-                file=str(item.get("file", "")),
-                line=item.get("line"),
-                signature=str(item.get("signature") or item.get("name", "")),
-                scope=item.get("scope"),
-                language=item.get("language"),
-                end_line=item.get("end_line"),
-                column=item.get("column"),
-            )
-            for item in payload.get("symbols", [])
-        ),
-        total=int(payload.get("total", payload["shown"])),
-        scopes=tuple(payload.get("paths", [])),
-        limit=int(payload.get("limit", request.limit)),
-        parse_errors=tuple(
-            OutlineParseError(
-                path=str(item.get("path", "")), error=str(item.get("error", ""))
-            )
-            for item in payload.get("parse_errors", [])
-        ),
-    )
+
+def _python_outline(request: OutlineRequest) -> OutlineResult:
+    # The stdlib-AST definition engine is owned by the Python navigation
+    # provider; import it lazily so discovery never imports navigation at load.
+    from agentq.navigation.providers.python import python_outline
+
+    return python_outline(request)
 
 
 def _outline_ast_grep(request: OutlineRequest) -> OutlineResult | None:
@@ -350,26 +326,24 @@ def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
 
 
 def _outline_fallback(request: OutlineRequest) -> OutlineResult:
-    from agentq.pythonnav import python_outline
+    from agentq.navigation.providers.python import python_outline
 
     root = request.root
     query = re.compile(request.match, re.I) if request.match else None
-    python_payload = python_outline(
-        root, list(request.paths), request.match, request.public, request.limit
-    )
+    python_payload = python_outline(request)
     symbols: list[OutlineSymbol] = [
         OutlineSymbol(
-            name=str(item.get("name", "")),
-            kind=item.get("kind"),
-            file=str(item.get("file", "")),
-            line=item.get("line"),
-            signature=str(item.get("signature") or item.get("name", "")),
-            scope=item.get("scope"),
-            language=item.get("language"),
-            end_line=item.get("end_line"),
-            column=item.get("column"),
+            name=item.name,
+            kind=item.kind,
+            file=item.file,
+            line=item.line,
+            signature=item.signature or item.name,
+            scope=item.scope,
+            language=item.language,
+            end_line=item.end_line,
+            column=item.column,
         )
-        for item in python_payload.get("symbols", [])
+        for item in python_payload.symbols
     ]
     ts_re = re.compile(
         r"^\s*(export\s+)?(?:declare\s+)?(?:async\s+)?(function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)",

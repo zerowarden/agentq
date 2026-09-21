@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -10,7 +9,6 @@ from agentq.core import (
     HEURISTIC,
     SAMPLED,
     SCAN_CAP,
-    relpath,
     resolve_repo_path,
     typed_coverage,
 )
@@ -21,6 +19,8 @@ from agentq.discovery import (
     files,
     search,
 )
+
+from .workspace import nearest_manifest
 
 SHARED_RISK_RE = re.compile(
     r"(^|/)(shared|common|foundation|platform|core|public|api|contracts?|types?|config|schema|migrations?|packages?)(/|$)",
@@ -56,32 +56,6 @@ def _variants(target: str) -> list[str]:
         v for v in sorted(variants, key=lambda x: (-len(x), x)) if v and v != target
     ]
     return ordered
-
-
-def nearest_manifest(root: Path, target: Path) -> dict[str, Any] | None:
-    """Walk up from target to the repository root looking for a package manifest."""
-    current = target if target.is_dir() else target.parent
-    while True:
-        for name, kind in (
-            ("package.json", "npm"),
-            ("Cargo.toml", "cargo"),
-            ("pyproject.toml", "python"),
-        ):
-            path = current / name
-            if path.exists():
-                item: dict[str, Any] = {"path": relpath(root, path), "kind": kind}
-                if name == "package.json":
-                    try:
-                        obj = json.loads(path.read_text(encoding="utf-8"))
-                        item["name"] = obj.get("name")
-                        item["scripts"] = sorted((obj.get("scripts") or {}).keys())
-                    except Exception:
-                        pass
-                return item
-        if current == root:
-            break
-        current = current.parent
-    return None
 
 
 def impact_data(
@@ -151,9 +125,7 @@ def impact_data(
         "import_pattern_fanout": len(unique_import_files),
         "direct_test_references": len(tests),
         "config_schema_references": len(docs_config),
-        "owning_package": (
-            (package.get("name") or package.get("path")) if package else None
-        ),
+        "owning_package": ((package.name or package.path) if package else None),
         "scan_reached_cap": scan_capped,
     }
 
@@ -193,7 +165,7 @@ def impact_data(
         validation.append("run directly referenced tests")
     if package:
         validation.append(
-            f"run relevant {package['kind']} package checks for {package.get('name') or package['path']}"
+            f"run relevant {package.kind} package checks for {package.name or package.path}"
         )
     if docs_config:
         validation.append("review docs/config/schema references")
@@ -207,7 +179,7 @@ def impact_data(
         "variants": variants,
         "observations": observations,
         "heuristic_summary": {"level": level, "calibrated": False, "rules": rules},
-        "package": package,
+        "package": package.to_wire() if package is not None else None,
         "tests": [hit.to_wire() for hit in tests[:25]],
         "docs_config": [hit.to_wire() for hit in docs_config[:25]],
         "top_references": [hit.to_wire() for hit in refs.hits[:50]],

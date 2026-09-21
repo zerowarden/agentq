@@ -972,7 +972,7 @@ def search(request: SearchRequest) -> SearchResult:
         return True
 
     from agentq.execution import ExecutionSpec, StopReason, StreamMode
-    from agentq.process import (
+    from agentq.execution.supervisor import (
         STREAM_RECORD_LIMIT_BYTES,
         is_spawn_failure,
         raise_if_cancelled,

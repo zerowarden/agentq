@@ -63,22 +63,6 @@ def search_options_from_args(args: Any) -> SearchOptions:
     )
 
 
-def diff_selection_from_args(args: Any, *, paths: list[str]) -> DiffSelection:
-    return DiffSelection(
-        staged=args.staged,
-        unstaged=args.unstaged,
-        base=args.base,
-        range_value=args.range_value,
-        paths=tuple(paths),
-        task_scope=args.task_scope,
-        view="patch" if args.patch else "hunks" if args.hunks else "stat",
-        context=args.context,
-        max_files=args.max_files,
-        max_hunks=args.max_hunks,
-        max_lines=args.max_lines,
-    )
-
-
 def request_from_args(
     root: Path,
     args: Any,

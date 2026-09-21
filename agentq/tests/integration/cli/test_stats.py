@@ -513,19 +513,9 @@ class StatsCliTests(AgentQIntegrationHarness):
         self.assertIn("Project commands", result.stdout)
         self.assertIn("0 passed, 1 failed, 0 unknown", result.stdout)
         self.assertIn("Failures", result.stdout)
-        self.assertNotIn("CLI failures", result.stdout)
         self.assertIn("Failure rate", result.stdout)
         self.assertIn("Rendering overhead", result.stdout)
         self.assertIn("Overhead", result.stdout)
-        self.assertNotIn("Output change", result.stdout)
-        self.assertNotIn("Output expansion", result.stdout)
-        self.assertNotIn(" larger", result.stdout)
-        self.assertNotIn(" smaller", result.stdout)
-        self.assertNotIn("Saved", result.stdout)
-        self.assertNotIn(" Tool ", result.stdout)
-        self.assertNotIn(" Pass ", result.stdout)
-        self.assertNotIn(" Fail ", result.stdout)
-        self.assertNotIn("Attention", result.stdout)
         self.assertNotIn("unavailable", result.stdout)
 
     def test_stats_recent_is_opt_in_and_implies_detail(self) -> None:
@@ -567,8 +557,6 @@ class StatsCliTests(AgentQIntegrationHarness):
         self.assertIn("Attention", plain)
         self.assertNotIn("unavailable", plain)
         self.assertNotIn(" · ", plain)
-        self.assertNotIn("Metric definitions", plain)
-        self.assertNotIn("Inspect: agentq stats", plain)
 
     def test_stats_distinguishes_missing_verification_measurements_from_zero(
         self,

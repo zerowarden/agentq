@@ -748,36 +748,6 @@ def display_command(record: ContinuationRecord) -> str | None:
         return None
 
 
-def query_follow_up_block(
-    request: OperationRequest,
-    *,
-    refinement: QueryRefinement | None = None,
-    guard: SourceGuard | None = None,
-    reason: Sequence[str] = (),
-    omitted: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the producer block for a typed query follow-up.
-
-    The block carries the typed record plus a literal display command that is
-    replaced by a short cursor when the record is stored.
-    """
-    record = QueryFollowUp(
-        request=request,
-        refinement=refinement,
-        guard=guard,
-        reason=tuple(reason),
-    )
-    block: dict[str, Any] = {
-        "schema": CONTINUATION_SCHEMA,
-        "kind": QUERY_FOLLOW_UP_KIND,
-    }
-    block.update(record.to_wire())
-    block["command"] = display_command(record) or ""
-    if omitted is not None:
-        block["omitted"] = dict(omitted)
-    return block
-
-
 def artifact_page_block(
     *,
     artifact_id: str,

@@ -57,7 +57,7 @@ def _git_head(root: Path) -> str | None:
 
 
 def _baseline(root: Path) -> dict[str, Any]:
-    dirty = changed_files(root)
+    dirty = changed_files(root).files
     return {
         "head": _git_head(root),
         "dirty": {path: _content_fingerprint(root, path) for path in dirty},
@@ -86,7 +86,7 @@ def task_changes(root: Path) -> dict[str, Any]:
         baseline.get("head") if isinstance(baseline.get("head"), str) else None
     )
 
-    worktree = set(changed_files(root))
+    worktree = set(changed_files(root).files)
     committed: set[str] = set()
     current_head = _git_head(root)
     if baseline_head and current_head and baseline_head != current_head:

@@ -308,9 +308,9 @@ def workspace_identity(root: Path) -> str:
     head = run_cmd(["git", "rev-parse", "HEAD"], cwd=root, timeout=10)
     files: list[tuple[str, int | None, int | None]] = []
     try:
-        changed = changed_files(root)
+        changed = changed_files(root).files
     except (AgentQError, OSError):
-        changed = []
+        changed = ()
     for relative in changed:
         try:
             metadata = (root / relative).stat()

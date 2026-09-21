@@ -5,19 +5,34 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from agentq.core import DiffSelection
+from agentq.git import (
+    DiffRequest,
+    DiffResult,
+    HistoryRequest,
+    StatusRequest,
+    StructuralRequest,
+    diff,
+    history,
+    render_diff,
+    render_history,
+    render_status,
+    render_structural,
+    status,
+    structural,
+)
+
 from ..emit import _attach_continuation_cursors, emit
 from ..registry import Outcome
 from .task_scope import attach_task_scope
 
 
 def _run_git_status(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.gitops import render_status, status_data
-
-    return emit(args, status_data(root, args.limit), render_status)
+    result = status(StatusRequest(root=root, limit=args.limit))
+    return emit(args, result.to_wire(), render_status, result=result)
 
 
 def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.gitops import diff_data, render_diff
     from agentq.tasking import task_changes
 
     diff_paths = list(args.paths)
@@ -29,60 +44,55 @@ def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
             if diff_paths
             else list(scoped["files"])
         )
+    view = "patch" if args.patch else "hunks" if args.hunks else "stat"
     if args.task_scope and not diff_paths:
-        data = {
-            "repo_root": str(root),
-            "scope": "active-task",
-            "total_files": 0,
-            "total_added": 0,
-            "total_deleted": 0,
-            "files": [],
-            "files_truncated": False,
-            "diff_check_ok": True,
-            "diff_check": [],
-        }
-        if args.patch:
-            data.update({"patch": "", "patch_stats": {}, "patch_truncated": False})
-        elif args.hunks:
-            data.update({"hunks": [], "hunk_stats": {}, "hunks_truncated": False})
+        result = DiffResult.empty(repo_root=str(root), scope="active-task", view=view)
     else:
-        data = diff_data(
-            root,
-            staged=args.staged,
-            unstaged=args.unstaged,
-            base=args.base,
-            range_value=args.range_value,
-            paths=diff_paths,
-            patch=args.patch,
-            hunks=args.hunks,
-            context=args.context,
-            max_files=args.max_files,
-            max_hunks=args.max_hunks,
-            max_lines=args.max_lines,
-            repeat=args.repeat,
-            budget=args.budget,
-            output_format=args.format,
+        result = diff(
+            DiffRequest(
+                root=root,
+                selection=DiffSelection(
+                    staged=args.staged,
+                    unstaged=args.unstaged,
+                    base=args.base,
+                    range_value=args.range_value,
+                    paths=tuple(diff_paths),
+                    view=view,
+                    context=args.context,
+                    max_files=args.max_files,
+                    max_hunks=args.max_hunks,
+                    max_lines=args.max_lines,
+                ),
+                budget=args.budget,
+                output_format=args.format,
+                repeat=args.repeat,
+            )
         )
+    data = result.to_wire()
     if args.task_scope:
         attach_task_scope(data, scoped, requested=True)
     _attach_continuation_cursors(root, data)
-    return emit(args, data, render_diff, root=root)
+    result = result.with_wire_continuations(data)
+    return emit(args, data, render_diff, root=root, result=result)
 
 
 def _run_git_history(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.gitops import history_data, render_history
-
-    return emit(args, history_data(root, args.limit, args.paths), render_history)
+    result = history(
+        HistoryRequest(root=root, limit=args.limit, paths=tuple(args.paths))
+    )
+    return emit(args, result.to_wire(), render_history, result=result)
 
 
 def _run_git_structural(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.gitops import render_structural, structural_diff_data
-
-    return emit(
-        args,
-        structural_diff_data(root, args.path, args.context, args.max_lines),
-        render_structural,
+    result = structural(
+        StructuralRequest(
+            root=root,
+            path=args.path,
+            context=args.context,
+            max_lines=args.max_lines,
+        )
     )
+    return emit(args, result.to_wire(), render_structural, result=result)
 
 
 def _run_dependencies(args: argparse.Namespace, root: Path) -> Outcome:

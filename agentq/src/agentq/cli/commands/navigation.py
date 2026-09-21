@@ -14,7 +14,7 @@ from ..registry import Outcome
 
 
 def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.tsnav import render_ts_nav, ts_nav_data
+    from agentq.navigation import TypeScriptNavRequest, render_ts_nav, ts_nav
 
     action = {
         "refs": "references",
@@ -47,19 +47,22 @@ def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
         raise AgentQError(
             "provide SYMBOL/--symbol or all of --file, --line, and --column"
         )
-    data = ts_nav_data(
-        root,
-        action,
-        args.file,
-        args.line,
-        args.column,
-        args.limit,
-        symbol=symbol,
-        paths=args.paths,
-        pick=args.pick,
+    nav = ts_nav(
+        TypeScriptNavRequest(
+            root=root,
+            action=action,
+            limit=args.limit,
+            symbol=symbol,
+            file=args.file,
+            line=args.line,
+            column=args.column,
+            paths=tuple(args.paths),
+            pick=args.pick,
+        )
     )
+    data = nav.to_wire()
     _attach_continuation_cursors(root, data)
-    return emit(args, data, render_ts_nav)
+    return emit(args, data, render_ts_nav, result=nav.with_wire_continuation(data))
 
 
 def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
@@ -102,7 +105,7 @@ def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
 
 def _validate_follow_up_source(root: Path, record) -> None:
     """Reject a follow-up whose guarded mutable source has changed."""
-    from agentq.gitops import validate_diff_guard
+    from agentq.git import validate_diff_guard
 
     if record.request.operation != "git-diff":
         raise AgentQError(f"unsupported continuation guard: {record.guard.kind!r}")
@@ -110,7 +113,27 @@ def _validate_follow_up_source(root: Path, record) -> None:
 
 
 def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.inspectops import inspect_data, render_inspect
+    from agentq.navigation import InspectRequest, inspect, render_inspect
+
+    def produce():
+        return inspect(
+            InspectRequest(
+                root=root,
+                target=args.target,
+                paths=tuple(args.paths),
+                intent=args.intent,
+                lang=args.lang,
+                limit=args.limit,
+                context=args.context,
+                line_anchors=tuple(args.line_anchors),
+                line_ranges=tuple(tuple(item) for item in args.line_ranges),
+                max_lines=args.max_lines,
+                repeat=args.repeat,
+                budget=args.budget,
+                output_format=args.format,
+                candidate=args.candidate,
+            )
+        )
 
     return emit_cached(
         args,
@@ -127,21 +150,6 @@ def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
             "intent": args.intent,
             "lang": args.lang,
         },
-        lambda: inspect_data(
-            root,
-            args.target,
-            args.paths,
-            intent=args.intent,
-            lang=args.lang,
-            limit=args.limit,
-            context=args.context,
-            line_anchors=args.line_anchors,
-            line_ranges=args.line_ranges,
-            max_lines=args.max_lines,
-            repeat=args.repeat,
-            budget=args.budget,
-            output_format=args.format,
-            candidate=args.candidate,
-        ),
+        produce,
         render_inspect,
     )

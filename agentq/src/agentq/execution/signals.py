@@ -17,7 +17,7 @@ T = TypeVar("T")
 
 def run_with_cancellation(action: Callable[[], T]) -> T:
     """Run *action* with CLI signal handlers installed."""
-    from agentq.process import CancellationToken, set_active_cancellation
+    from .supervisor import CancellationToken, set_active_cancellation
 
     token = CancellationToken()
     previous: dict[int, Any] = {}

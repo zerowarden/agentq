@@ -33,7 +33,7 @@ def run_cmd(
     check: bool = False,
     env: dict[str, str] | None = None,
 ) -> Completed:
-    from agentq.process import (
+    from .supervisor import (
         BUFFERED_RECORD_LIMIT_BYTES,
         raise_if_cancelled,
         supervise,

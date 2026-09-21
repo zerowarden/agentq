@@ -1,41 +1,36 @@
-"""Execution capability: contracts, supervision, and invocation."""
+"""Execution capability: contracts, supervision, invocation, and bounded runs."""
 
 from __future__ import annotations
 
-from .commands import run_cmd
+from .commands import Completed, run_cmd
 from .models import (
     CaptureStatus,
-    CheckKind,
-    CheckResult,
-    CheckSpec,
-    CheckStatus,
     CleanupStatus,
     ExecutionOutcome,
     ExecutionSpec,
     StdinPolicy,
     StopReason,
     StreamMode,
-    VerificationPlan,
     WrapperStatus,
-    verification_plan_id,
 )
+from .run import RunProfile, RunRequest, RunResult, render_run, run
 from .signals import run_with_cancellation
 
 __all__ = [
     "CaptureStatus",
-    "CheckKind",
-    "CheckResult",
-    "CheckSpec",
-    "CheckStatus",
     "CleanupStatus",
+    "Completed",
     "ExecutionOutcome",
     "ExecutionSpec",
+    "RunProfile",
+    "RunRequest",
+    "RunResult",
     "StdinPolicy",
     "StopReason",
     "StreamMode",
-    "VerificationPlan",
     "WrapperStatus",
+    "render_run",
+    "run",
     "run_cmd",
     "run_with_cancellation",
-    "verification_plan_id",
 ]

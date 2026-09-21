@@ -90,58 +90,59 @@ class TsScopeIntegrationTests(unittest.TestCase):
                     shutil.copytree(real_ts, target)
             if not node_prerequisites_available(root):
                 self.skipTest("node + project typescript are required")
-            from agentq import navigation as navigation_module
-            from agentq import tsnav as tsnav_module
+            from agentq.navigation import (
+                TypeScriptNavRequest,
+                resolve_symbol,
+                ts_nav,
+            )
 
             for scope, expect_pkg in (
                 (["packages/a/src"], "packages/a/src/shared.ts"),
                 (["packages/b/src"], "packages/b/src/shared.ts"),
             ):
                 with self.subTest(scope=scope):
-                    locate = tsnav_module.ts_nav_data(
-                        root,
-                        "locate",
-                        None,
-                        None,
-                        None,
-                        20,
-                        symbol="Shared",
-                        paths=list(scope),
+                    locate = ts_nav(
+                        TypeScriptNavRequest(
+                            root=root,
+                            action="locate",
+                            symbol="Shared",
+                            paths=tuple(scope),
+                            limit=20,
+                        )
                     )
                     # Reported scopes stay on the relative wire form.
-                    self.assertEqual(locate["paths"], scope)
-                    self.assertTrue(str(locate["root"]))
-                    candidates = locate.get("candidates") or []
+                    self.assertEqual(list(locate.paths), scope)
+                    self.assertTrue(str(locate.root))
+                    candidates = locate.candidates
                     self.assertTrue(candidates, "scoped locate must return evidence")
                     self.assertTrue(
                         all(
                             (
-                                str(item["path"]).startswith("packages/a/")
+                                str(item.path).startswith("packages/a/")
                                 if "packages/a" in expect_pkg
-                                else str(item["path"]).startswith("packages/b/")
+                                else str(item.path).startswith("packages/b/")
                             )
                             for item in candidates
                         )
                     )
-                    overview = tsnav_module.ts_nav_data(
-                        root,
-                        "overview",
-                        None,
-                        None,
-                        None,
-                        20,
-                        symbol="Shared",
-                        paths=list(scope),
+                    overview = ts_nav(
+                        TypeScriptNavRequest(
+                            root=root,
+                            action="overview",
+                            symbol="Shared",
+                            paths=tuple(scope),
+                            limit=20,
+                        )
                     )
-                    self.assertEqual(overview["target"], expect_pkg)
+                    self.assertEqual(overview.target, expect_pkg)
 
-                    resolution = navigation_module.resolve_symbol(
+                    resolution = resolve_symbol(
                         root, "Shared", paths=list(scope), limit=20
                     )
                     by_provider = {
-                        entry["provider"]: entry for entry in resolution.entries()
+                        entry.provider: entry for entry in resolution.entries()
                     }
-                    self.assertGreater(by_provider["typescript"]["candidate_count"], 0)
+                    self.assertGreater(by_provider["typescript"].candidate_count, 0)
                     # No lexical fallback when the semantic provider matched.
                     self.assertIsNone(resolution.fallback)
         finally:

@@ -55,8 +55,20 @@ class WorkflowCliTests(AgentQIntegrationHarness):
         replays: dict[str, tuple[list[str], list[str]]] = {}
 
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.inspectops import inspect_data, render_inspect
-            from agentq.tsnav import render_ts_nav
+            from agentq.core import typed_from_wire
+            from agentq.navigation import (
+                InspectRequest,
+                TypeScriptNav,
+                inspect,
+                render_inspect,
+                render_ts_nav,
+            )
+            from agentq.navigation.providers import typescript as typescript_provider
+
+        def ts_nav_payload(payload: dict) -> TypeScriptNav:
+            return TypeScriptNav.from_payload(
+                payload, coverage=typed_from_wire(payload["coverage"])
+            )
 
         definition = {
             "path": "packages/a/src/index.ts",
@@ -147,17 +159,32 @@ class WorkflowCliTests(AgentQIntegrationHarness):
             ],
         }
         legacy_ts = [
-            render_ts_nav(locate),
-            render_ts_nav(semantic_action("definition", [definition])),
-            render_ts_nav(semantic_action("references", [caller, test_reference])),
-            render_ts_nav(semantic_action("implementations", [implementation])),
+            render_ts_nav(ts_nav_payload(locate)),
+            render_ts_nav(ts_nav_payload(semantic_action("definition", [definition]))),
+            render_ts_nav(
+                ts_nav_payload(semantic_action("references", [caller, test_reference]))
+            ),
+            render_ts_nav(
+                ts_nav_payload(semantic_action("implementations", [implementation]))
+            ),
         ]
-        with mock.patch(
-            "agentq.navigation.ts_nav_data", return_value=overview
-        ) as semantic_overview:
-            current_ts_data = inspect_data(self.repo, "OldName", ["packages"], limit=80)
+        with mock.patch.object(
+            typescript_provider.TypeScriptProvider,
+            "_runtime_available",
+            return_value=True,
+        ):
+            with mock.patch.object(
+                typescript_provider,
+                "_symbol_ts_nav",
+                return_value=ts_nav_payload(overview),
+            ) as semantic_overview:
+                current_ts_data = inspect(
+                    InspectRequest(
+                        root=self.repo, target="OldName", paths=("packages",), limit=80
+                    )
+                )
         semantic_overview.assert_called_once()
-        self.assertEqual(semantic_overview.call_args.args[1], "overview")
+        self.assertEqual(semantic_overview.call_args.args[0].action, "overview")
         current_ts = [
             render_inspect(
                 current_ts_data,
@@ -178,7 +205,7 @@ class WorkflowCliTests(AgentQIntegrationHarness):
                 "results": [caller],
             },
         }
-        sampled_ts = render_ts_nav(sampled_overview)
+        sampled_ts = render_ts_nav(ts_nav_payload(sampled_overview))
         self.assertIn("[sampled]", sampled_ts)
         self.assertEqual(sampled_ts.count("continue: agentq ts-nav overview"), 1)
         self.assertIn("--path packages --limit 3", sampled_ts)
