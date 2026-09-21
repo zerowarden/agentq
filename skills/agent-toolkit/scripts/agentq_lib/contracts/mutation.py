@@ -1,7 +1,8 @@
 """Typed mutation contracts: plans, approved byte changes, apply policy, outcomes.
 
-The current production plan schema (``agentq.codemod-plan/v1``) is decoded
-strictly so tampered or malformed persisted plans fail before any mutator runs.
+The production plan schema (``agentq.codemod-plan/v2``) materializes exact byte
+edits and postimages at planning time, so application never rediscovers matches
+or re-runs the engine against the live worktree. Legacy v1 plans are refused.
 A plan digest is integrity metadata, never proof of user authorization.
 """
 
@@ -26,9 +27,10 @@ from ._base import (
     require_str,
 )
 
-MUTATION_PLAN_SCHEMA_V1 = "agentq.codemod-plan/v1"
+MUTATION_PLAN_SCHEMA_V2 = "agentq.codemod-plan/v2"
 MUTATION_OUTCOME_SCHEMA = "agentq.mutation-outcome/v1"
-KNOWN_MUTATION_PLAN_SCHEMAS = frozenset({MUTATION_PLAN_SCHEMA_V1})
+MUTATION_PLANNING_POLICY = "agentq.mutation-planning/v1"
+KNOWN_MUTATION_PLAN_SCHEMAS = frozenset({MUTATION_PLAN_SCHEMA_V2})
 
 
 class Engine(str, Enum):
@@ -94,6 +96,7 @@ class PlannedFile:
             "path": self.path,
             "sha256": self.sha256,
             "matches": self.matches,
+            "changed": len(self.edits),
         }
         if self.match_spans:
             wire["match_spans"] = [[start, end] for start, end in self.match_spans]
@@ -152,14 +155,18 @@ class MutationPlan:
     scopes: tuple[str, ...]
     files: tuple[PlannedFile, ...]
     language: str | None = None
-    engine_version: str | None = None
+    engine_version: str = ""
+    planning_policy: str = ""
     repo_id: str | None = None
     worktree_id: str | None = None
-    applicable: bool = True
+    applicable: bool = False
 
     def __post_init__(self) -> None:
         if self.schema not in KNOWN_MUTATION_PLAN_SCHEMAS:
-            raise ContractError(f"unsupported mutation plan schema: {self.schema!r}")
+            raise ContractError(
+                f"unsupported mutation plan schema {self.schema!r}; "
+                "regenerate the plan with this agentq version"
+            )
         require_str(self.plan_id, "mutation plan id")
         if self.engine not in {item.value for item in Engine}:
             raise ContractError(f"unsupported mutation engine: {self.engine!r}")
@@ -181,20 +188,30 @@ class MutationPlan:
                 "AST mutation plan has no language provenance; regenerate the plan"
             )
         optional_str(self.language, "mutation plan language")
-        optional_str(self.engine_version, "mutation plan engine version")
+        require_str(self.engine_version, "mutation plan engine version")
+        require_str(self.planning_policy, "mutation plan planning policy")
         optional_str(self.repo_id, "mutation plan repo id")
         optional_str(self.worktree_id, "mutation plan worktree id")
         require_bool(self.applicable, "mutation plan applicable flag")
+        if self.applicable != (self.rewrite is not None):
+            raise ContractError(
+                "mutation plan applicable flag contradicts its rewrite provenance"
+            )
 
     def require_applicable(self) -> None:
         if not self.applicable or self.rewrite is None:
             raise ContractError(
                 "mutation plan has no rewrite; regenerate the plan with --rewrite to make it applicable"
             )
+        if not self.exact:
+            raise ContractError(
+                "mutation plan lacks exact postimages; regenerate the plan with this agentq version"
+            )
 
     @property
     def exact(self) -> bool:
-        return bool(self.files) and all(item.edits for item in self.files)
+        """Every planned file carries a verified postimage (edits may be empty)."""
+        return all(item.postimage_sha256 is not None for item in self.files)
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -205,11 +222,12 @@ class MutationPlan:
             "scopes": list(self.scopes),
             "files": [item.to_wire() for item in self.files],
             "plan_id": self.plan_id,
+            "engine_version": self.engine_version,
+            "planning_policy": self.planning_policy,
+            "applicable": self.applicable,
         }
         if self.language is not None:
             wire["language"] = self.language
-        if self.engine_version is not None:
-            wire["engine_version"] = self.engine_version
         if self.repo_id is not None:
             wire["repo_id"] = self.repo_id
         if self.worktree_id is not None:
@@ -231,8 +249,10 @@ class MutationPlan:
                 "plan_id",
                 "language",
                 "engine_version",
+                "planning_policy",
                 "repo_id",
                 "worktree_id",
+                "applicable",
             ),
             what,
         )
@@ -277,12 +297,17 @@ class MutationPlan:
             ),
             files=decoded_files,
             language=optional_str(payload.get("language"), f"{what}.language"),
-            engine_version=optional_str(
+            engine_version=require_str(
                 payload.get("engine_version"), f"{what}.engine_version"
+            ),
+            planning_policy=require_str(
+                payload.get("planning_policy"), f"{what}.planning_policy"
             ),
             repo_id=optional_str(payload.get("repo_id"), f"{what}.repo_id"),
             worktree_id=optional_str(payload.get("worktree_id"), f"{what}.worktree_id"),
-            applicable=rewrite is not None,
+            applicable=require_bool(
+                payload.get("applicable", rewrite is not None), f"{what}.applicable"
+            ),
         )
 
 
@@ -290,7 +315,15 @@ def _planned_file_from_wire(value: Any, what: str, index: int) -> PlannedFile:
     entry = require_mapping(value, f"{what}.files[{index}]")
     reject_unknown_keys(
         entry,
-        ("path", "sha256", "matches", "match_spans", "edits", "postimage_sha256"),
+        (
+            "path",
+            "sha256",
+            "matches",
+            "changed",
+            "match_spans",
+            "edits",
+            "postimage_sha256",
+        ),
         f"{what}.files[{index}]",
     )
     spans = entry.get("match_spans") or []
@@ -325,6 +358,14 @@ def _planned_file_from_wire(value: Any, what: str, index: int) -> PlannedFile:
                 ),
             )
         )
+    if "changed" in entry:
+        changed = require_int(
+            entry.get("changed"), f"{what}.files[{index}].changed", minimum=0
+        )
+        if changed != len(decoded_edits):
+            raise ContractError(
+                f"{what}.files[{index}].changed does not match its edits"
+            )
     return PlannedFile(
         path=require_relative_posix(entry.get("path"), f"{what}.files[{index}].path"),
         sha256=(
@@ -362,8 +403,9 @@ class ApplyPolicy:
     max_files: int = 100
     expect_count: int | None = None
     include_sensitive: bool = False
-    max_file_bytes: int | None = None
-    max_plan_bytes: int | None = None
+    max_file_bytes: int | None = 8 * 1024 * 1024
+    max_plan_bytes: int | None = 32 * 1024 * 1024
+    max_edits_per_file: int | None = 100_000
 
     def __post_init__(self) -> None:
         require_bool(self.consent, "apply policy consent")
@@ -372,6 +414,9 @@ class ApplyPolicy:
         require_bool(self.include_sensitive, "apply policy include sensitive")
         optional_int(self.max_file_bytes, "apply policy max file bytes", minimum=1)
         optional_int(self.max_plan_bytes, "apply policy max plan bytes", minimum=1)
+        optional_int(
+            self.max_edits_per_file, "apply policy max edits per file", minimum=1
+        )
 
 
 @dataclass(frozen=True)
@@ -399,6 +444,8 @@ class MutationOutcome:
     match_count: int = 0
     remaining_matches: int | None = None
     policy_excluded: tuple[str, ...] = ()
+    failed_restores: tuple[str, ...] = ()
+    journal: str | None = None
     message: str = ""
     schema: str = MUTATION_OUTCOME_SCHEMA
 
@@ -413,6 +460,9 @@ class MutationOutcome:
         optional_int(
             self.remaining_matches, "mutation outcome remaining matches", minimum=0
         )
+        for path in (*self.policy_excluded, *self.failed_restores):
+            require_relative_posix(path, "mutation outcome path")
+        optional_str(self.journal, "mutation outcome journal")
         require_str(self.message, "mutation outcome message", allow_empty=True)
         if (
             self.status is MutationStatus.APPLIED
@@ -445,4 +495,8 @@ class MutationOutcome:
         }
         if self.policy_excluded:
             wire["policy_excluded"] = list(self.policy_excluded)
+        if self.failed_restores:
+            wire["failed_restores"] = list(self.failed_restores)
+        if self.journal is not None:
+            wire["journal"] = self.journal
         return wire

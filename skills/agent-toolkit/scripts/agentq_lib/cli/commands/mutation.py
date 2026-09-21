@@ -32,7 +32,7 @@ def _run_codemod_scan(args: argparse.Namespace, root: Path) -> Outcome:
 def _run_codemod_apply(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq_lib.codemod import apply_data, render_apply
 
-    if args.plan is None and (not args.pattern or not args.rewrite):
+    if args.plan is None and (args.pattern is None or args.rewrite is None):
         raise AgentQError("codemod-apply requires PATTERN REWRITE, or use --plan PLAN")
     data = apply_data(
         root,
@@ -44,6 +44,7 @@ def _run_codemod_apply(args: argparse.Namespace, root: Path) -> Outcome:
         apply=args.apply,
         expect_count=args.expect_count,
         max_files=args.max_files,
+        include_sensitive=args.include_sensitive,
         plan=args.plan,
     )
     return emit(args, data, render_apply)

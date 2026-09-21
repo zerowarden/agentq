@@ -55,18 +55,29 @@ from agentq_lib.contracts import (  # noqa: E402
     verification_plan_id,
 )
 from agentq_lib.contracts._base import canonical_digest, canonical_json  # noqa: E402
-from agentq_lib.contracts.mutation import MUTATION_PLAN_SCHEMA_V1  # noqa: E402
+from agentq_lib.contracts.mutation import MUTATION_PLAN_SCHEMA_V2  # noqa: E402
 from agentq_lib.contracts.result import EvidenceFragment  # noqa: E402
 
 
 def sample_plan(**overrides) -> dict:
     plan = {
-        "schema": MUTATION_PLAN_SCHEMA_V1,
+        "schema": MUTATION_PLAN_SCHEMA_V2,
         "engine": "fixed",
         "pattern": "foo",
         "rewrite": "X",
         "scopes": ["."],
-        "files": [{"path": "a.txt", "sha256": "a" * 64, "matches": 1}],
+        "engine_version": "python-test",
+        "planning_policy": "agentq.mutation-planning/v1",
+        "applicable": True,
+        "files": [
+            {
+                "path": "a.txt",
+                "sha256": "a" * 64,
+                "matches": 1,
+                "edits": [{"start": 0, "end": 3, "replacement": "X"}],
+                "postimage_sha256": "b" * 64,
+            }
+        ],
     }
     plan.update(overrides)
     plan["plan_id"] = plan_digest(plan)
@@ -504,10 +515,17 @@ class MutationContractTests(unittest.TestCase):
         boolean_count = sample_plan()
         boolean_count["files"][0]["matches"] = True
         boolean_count["plan_id"] = plan_digest(boolean_count)
+        changed_mismatch = sample_plan()
+        changed_mismatch["files"][0]["changed"] = 5
+        changed_mismatch["plan_id"] = plan_digest(changed_mismatch)
         cases = {
             "digest mismatch": tampered,
             "unknown schema": sample_plan(schema="agentq.codemod-plan/v0"),
             "boolean count": boolean_count,
+            "changed mismatch": changed_mismatch,
+            "applicable contradiction": sample_plan(applicable=False),
+            "missing engine version": sample_plan(engine_version=None),
+            "missing planning policy": sample_plan(planning_policy=None),
             "duplicate paths": sample_plan(
                 files=[
                     {"path": "a.txt", "matches": 1},
@@ -525,6 +543,16 @@ class MutationContractTests(unittest.TestCase):
                     MutationPlan.from_wire(
                         sample_plan(files=[{"path": bad_path, "matches": 1}])
                     )
+
+    def test_inexact_plans_are_refused_for_application(self) -> None:
+        plan = sample_plan(
+            files=[{"path": "a.txt", "sha256": "a" * 64, "matches": 1}]
+        )
+        decoded = MutationPlan.from_wire(plan)
+        self.assertFalse(decoded.exact)
+        with self.assertRaises(ContractError):
+            decoded.require_applicable()
+        self.assertTrue(MutationPlan.from_wire(sample_plan()).exact)
 
     def test_ast_plan_requires_language(self) -> None:
         plan = sample_plan(engine="ast-grep")

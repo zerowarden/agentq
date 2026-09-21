@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +19,14 @@ from .common import (
     list_repo_files,
     run_cmd,
     scope_match,
+    tool_version,
 )
 from .contracts._base import ContractError
 from .contracts.mutation import (
-    MUTATION_PLAN_SCHEMA_V1,
+    MUTATION_PLAN_SCHEMA_V2,
+    MUTATION_PLANNING_POLICY,
     ApplyPolicy,
-    ChangedFile,
+    ByteEdit,
     MutationOutcome,
     MutationPlan,
     MutationStatus,
@@ -39,9 +44,14 @@ from .evidence import (
 from .evidence import (
     coverage as coverage_block,
 )
-from .paths import RepoPath, resolve_repo_path, resolve_repo_scopes
+from .mutation_apply import apply_edits, apply_reviewed_plan, mutation_dir
+from .paths import resolve_repo_scopes
+from .runtime import repo_id as runtime_repo_id
 
-PLAN_SCHEMA = MUTATION_PLAN_SCHEMA_V1
+PLAN_SCHEMA = MUTATION_PLAN_SCHEMA_V2
+_MODE_ENGINES = {"fixed": "fixed", "regex": "python-re", "ast": "ast-grep"}
+_MAX_PLAN_BYTES = 32 * 1024 * 1024
+_MAX_STAGED_BYTES = 32 * 1024 * 1024
 
 
 def _compile_regex(pattern: str) -> re.Pattern[str]:
@@ -49,10 +59,6 @@ def _compile_regex(pattern: str) -> re.Pattern[str]:
         return re.compile(pattern)
     except re.error as exc:
         raise AgentQError(f"invalid regex pattern {pattern!r}: {exc}") from exc
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _iter_codemod_files(
@@ -97,6 +103,38 @@ def _iter_codemod_files(
         yield rel, text
 
 
+class _TextMatcher:
+    """One fixed/regex matching implementation shared by scan and planning."""
+
+    def __init__(self, pattern: str, mode: str) -> None:
+        if mode not in {"fixed", "regex"}:
+            raise AgentQError(f"unsupported codemod mode: {mode}")
+        if mode == "fixed" and not pattern:
+            raise AgentQError("codemod pattern must be non-empty")
+        self.mode = mode
+        self.pattern = pattern
+        self._regex = _compile_regex(pattern) if mode == "regex" else None
+
+    def spans(self, text: str, rewrite: str = "") -> list[tuple[int, int, str]]:
+        """Ordered (start, end, expanded replacement) character spans."""
+        if self._regex is not None:
+            return [
+                (match.start(), match.end(), match.expand(rewrite))
+                for match in self._regex.finditer(text)
+            ]
+        spans: list[tuple[int, int, str]] = []
+        start = 0
+        while True:
+            index = text.find(self.pattern, start)
+            if index == -1:
+                return spans
+            spans.append((index, index + len(self.pattern), rewrite))
+            start = index + len(self.pattern)
+
+    def count(self, text: str) -> int:
+        return len(self.spans(text))
+
+
 def _scan_matches(
     root: Path,
     pattern: str,
@@ -106,59 +144,31 @@ def _scan_matches(
     samples: int,
     max_files: int,
 ) -> dict[str, Any]:
-    """Count and sample matches using the same Python engine used for mutation."""
-    if mode == "regex":
-        regex = _compile_regex(pattern)
-
-        def iter_spans(text: str):
-            return ((m.start(), m.end()) for m in regex.finditer(text))
-
-        def count(text: str) -> int:
-            return len(regex.findall(text))
-
-    elif mode == "fixed":
-        needle = pattern
-
-        def iter_spans(text: str):
-            spans: list[tuple[int, int]] = []
-            start = 0
-            while True:
-                i = text.find(needle, start)
-                if i == -1:
-                    break
-                spans.append((i, i + len(needle)))
-                start = i + len(needle)
-            return spans
-
-        def count(text: str) -> int:
-            return text.count(needle)
-
-    else:
-        raise AgentQError(f"unsupported codemod mode: {mode}")
-
+    """Count and sample matches using the same engine used for mutation."""
+    matcher = _TextMatcher(pattern, mode)
     counts: list[dict[str, int]] = []
     samples_list: list[dict[str, Any]] = []
     total = 0
     for rel, text in _iter_codemod_files(root, scopes_relative, include_sensitive):
-        matches = list(iter_spans(text))
-        file_count = len(matches)
-        if file_count:
-            counts.append({"path": rel, "count": file_count})
-            total += file_count
-            for start, end in matches:
-                if len(samples_list) >= samples:
-                    break
-                line_no = text.count("\n", 0, start) + 1
-                line_start = text.rfind("\n", 0, start) + 1
-                line_end = text.find("\n", end)
-                line_end = len(text) if line_end == -1 else line_end
-                samples_list.append(
-                    {
-                        "path": rel,
-                        "line": line_no,
-                        "text": compact_line(text[line_start:line_end], 240),
-                    }
-                )
+        matches = matcher.spans(text)
+        if not matches:
+            continue
+        counts.append({"path": rel, "count": len(matches)})
+        total += len(matches)
+        for start, end, _ in matches:
+            if len(samples_list) >= samples:
+                break
+            line_no = text.count("\n", 0, start) + 1
+            line_start = text.rfind("\n", 0, start) + 1
+            line_end = text.find("\n", end)
+            line_end = len(text) if line_end == -1 else line_end
+            samples_list.append(
+                {
+                    "path": rel,
+                    "line": line_no,
+                    "text": compact_line(text[line_start:line_end], 240),
+                }
+            )
     counts.sort(key=lambda item: (-item["count"], item["path"]))
     return {
         "matches": total,
@@ -316,6 +326,187 @@ def _canonical_plan_path(value: str) -> str:
     return text
 
 
+def _planned_entry(
+    rel: str,
+    original: bytes,
+    postimage: bytes,
+    matches: int,
+    edits: tuple[ByteEdit, ...],
+) -> dict[str, Any]:
+    return {
+        "path": rel,
+        "sha256": hashlib.sha256(original).hexdigest(),
+        "matches": matches,
+        "edits": [edit.to_wire() for edit in edits],
+        "postimage_sha256": hashlib.sha256(postimage).hexdigest(),
+    }
+
+
+def _edits_from_spans(
+    text: str, spans: list[tuple[int, int, str]]
+) -> tuple[ByteEdit, ...]:
+    """Convert character spans to ordered byte edits without normalizing bytes."""
+    edits: list[ByteEdit] = []
+    char_cursor = 0
+    byte_cursor = 0
+    for start, end, replacement in spans:
+        byte_cursor += len(text[char_cursor:start].encode("utf-8"))
+        byte_end = byte_cursor + len(text[start:end].encode("utf-8"))
+        edits.append(
+            ByteEdit(start=byte_cursor, end=byte_end, replacement=replacement)
+        )
+        byte_cursor = byte_end
+        char_cursor = end
+    return tuple(edits)
+
+
+def _span_edits(original: bytes, postimage: bytes) -> tuple[ByteEdit, ...]:
+    """One exact edit spanning the changed region (empty when unchanged)."""
+    if original == postimage:
+        return ()
+    start = 0
+    shared = min(len(original), len(postimage))
+    while start < shared and original[start] == postimage[start]:
+        start += 1
+    end_original = len(original)
+    end_postimage = len(postimage)
+    while (
+        end_original > start
+        and end_postimage > start
+        and original[end_original - 1] == postimage[end_postimage - 1]
+    ):
+        end_original -= 1
+        end_postimage -= 1
+    try:
+        replacement = postimage[start:end_postimage].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentQError(
+            "AST rewrite produced a non-UTF-8 postimage; regenerate the plan"
+        ) from exc
+    return (ByteEdit(start=start, end=end_original, replacement=replacement),)
+
+
+def _text_plan_files(
+    root: Path,
+    pattern: str,
+    rewrite: str | None,
+    mode: str,
+    scopes_relative: list[str],
+    include_sensitive: bool,
+) -> list[dict[str, Any]]:
+    matcher = _TextMatcher(pattern, mode)
+    files: list[dict[str, Any]] = []
+    for rel_text, text in _iter_codemod_files(
+        root, scopes_relative, include_sensitive
+    ):
+        rel = _canonical_plan_path(rel_text)
+        original = text.encode("utf-8")
+        spans = matcher.spans(text, rewrite or "")
+        if not spans:
+            continue
+        if rewrite is None:
+            files.append(
+                {
+                    "path": rel,
+                    "sha256": hashlib.sha256(original).hexdigest(),
+                    "matches": len(spans),
+                }
+            )
+            continue
+        edits = _edits_from_spans(text, spans)
+        postimage = apply_edits(original, edits)
+        files.append(_planned_entry(rel, original, postimage, len(spans), edits))
+    return files
+
+
+def _stage_ast_files(root: Path, staging: Path, rels: list[str]) -> list[str]:
+    staged: list[str] = []
+    staged_bytes = 0
+    for rel in rels:
+        source = root / rel
+        staged_bytes += source.stat().st_size
+        if staged_bytes > _MAX_STAGED_BYTES:
+            raise AgentQError(
+                "AST planning staging exceeds the bounded staging size; narrow the scope"
+            )
+        destination = staging / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        staged.append(str(destination))
+    return staged
+
+
+def _run_ast_rewrite(
+    executable: str,
+    pattern: str,
+    rewrite: str,
+    language: str,
+    staging: Path,
+    staged_paths: list[str],
+) -> None:
+    result = run_cmd(
+        [
+            executable,
+            "run",
+            "--pattern",
+            pattern,
+            "--rewrite",
+            rewrite,
+            "--lang",
+            language,
+            "--update-all",
+            "--color",
+            "never",
+            *staged_paths,
+        ],
+        cwd=staging,
+        timeout=180,
+    )
+    if result.returncode not in (0, 1):
+        raise AgentQError(
+            compact_line(result.stderr or result.stdout or "ast-grep failed", 600)
+        )
+
+
+def _ast_plan_files(
+    root: Path,
+    pattern: str,
+    rewrite: str,
+    language: str,
+    scopes_relative: list[str],
+) -> tuple[list[dict[str, Any]], str]:
+    executable = find_executable("ast-grep")
+    if not executable:
+        raise AgentQError("ast-grep is required for AST codemod plans")
+    scanned = _ast_matches(root, pattern, None, language, scopes_relative, 0)
+    counts = [
+        (_canonical_plan_path(item["path"]), int(item["count"]))
+        for item in scanned["counts"]
+    ]
+    counts = [(rel, count) for rel, count in counts if (root / rel).is_file()]
+    version = tool_version(executable)
+    if not counts:
+        return [], version
+    staging = Path(tempfile.mkdtemp(prefix="ast-", dir=str(mutation_dir())))
+    try:
+        staged_paths = _stage_ast_files(root, staging, [rel for rel, _ in counts])
+        _run_ast_rewrite(
+            executable, pattern, rewrite, language, staging, staged_paths
+        )
+        files = []
+        for rel, count in counts:
+            original = (root / rel).read_bytes()
+            postimage = (staging / rel).read_bytes()
+            files.append(
+                _planned_entry(
+                    rel, original, postimage, count, _span_edits(original, postimage)
+                )
+            )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return files, version
+
+
 def build_codemod_plan(
     root: Path,
     pattern: str,
@@ -325,68 +516,58 @@ def build_codemod_plan(
     scopes_relative: list[str],
     include_sensitive: bool,
 ) -> dict[str, Any]:
-    """Build an immutable codemod plan with per-file preimage fingerprints."""
+    """Build a v2 plan that materializes exact edits, hashes, and provenance."""
+    if mode not in _MODE_ENGINES:
+        raise AgentQError(f"unsupported codemod mode: {mode}")
+    engine = _MODE_ENGINES[mode]
     if mode == "ast":
         if not language:
             raise AgentQError("--lang is required for AST codemod plans")
-        ast = _ast_matches(root, pattern, None, language, scopes_relative, 0)
-        files = []
-        for c in ast["counts"]:
-            rel = _canonical_plan_path(c["path"])
-            path = root / rel
-            if path.exists():
-                files.append(
-                    {"path": rel, "sha256": _file_sha256(path), "matches": c["count"]}
-                )
-        engine = "ast-grep"
-    else:
-        if mode == "regex":
-            regex = _compile_regex(pattern)
-
-            def iter_spans(text: str):
-                return ((m.start(), m.end()) for m in regex.finditer(text))
-
+        if rewrite is None:
+            scanned = _ast_matches(root, pattern, None, language, scopes_relative, 0)
+            files = []
+            for item in scanned["counts"]:
+                rel = _canonical_plan_path(item["path"])
+                path = root / rel
+                if path.is_file():
+                    files.append(
+                        {
+                            "path": rel,
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                            "matches": int(item["count"]),
+                        }
+                    )
+            engine_version = tool_version(find_executable("ast-grep") or "ast-grep")
         else:
-            needle = pattern
-
-            def iter_spans(text: str):
-                spans: list[tuple[int, int]] = []
-                start = 0
-                while True:
-                    i = text.find(needle, start)
-                    if i == -1:
-                        break
-                    spans.append((i, i + len(needle)))
-                    start = i + len(needle)
-                return spans
-
-        files = []
-        for rel_text, text in _iter_codemod_files(
-            root, scopes_relative, include_sensitive
-        ):
-            rel = _canonical_plan_path(rel_text)
-            spans = [list(span) for span in iter_spans(text)]
-            if spans:
-                files.append(
-                    {
-                        "path": rel,
-                        "sha256": _file_sha256(root / rel),
-                        "matches": len(spans),
-                        "match_spans": spans,
-                    }
-                )
-        engine = "python-re" if mode == "regex" else "fixed"
-    plan = {
+            files, engine_version = _ast_plan_files(
+                root, pattern, rewrite, language, scopes_relative
+            )
+    else:
+        files = _text_plan_files(
+            root, pattern, rewrite, mode, scopes_relative, include_sensitive
+        )
+        engine_version = f"python-{platform.python_version()}"
+    plan: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
         "engine": engine,
         "pattern": pattern,
         "rewrite": rewrite,
         "scopes": scopes_relative or ["."],
-        "files": sorted(files, key=lambda f: f["path"]),
+        "files": sorted(files, key=lambda item: item["path"]),
+        "engine_version": engine_version,
+        "planning_policy": MUTATION_PLANNING_POLICY,
+        "repo_id": runtime_repo_id(root),
+        "applicable": rewrite is not None,
     }
-    if engine == "ast-grep":
+    if language is not None:
         plan["language"] = language
     plan["plan_id"] = _plan_id(plan)
+    if len(
+        json.dumps(plan, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ) > _MAX_PLAN_BYTES:
+        raise AgentQError(
+            "generated mutation plan exceeds the bounded plan size; narrow the scope"
+        )
     try:
         MutationPlan.from_wire(plan, what="generated mutation plan")
     except ContractError as exc:
@@ -406,7 +587,7 @@ def _write_plan(path_str: str, plan: dict[str, Any]) -> None:
     os.replace(tmp, target)
 
 
-def _load_plan(path_str: str) -> dict[str, Any]:
+def _load_plan(path_str: str) -> MutationPlan:
     target = Path(path_str)
     if not target.exists():
         raise AgentQError(f"codemod plan not found: {path_str}")
@@ -415,32 +596,14 @@ def _load_plan(path_str: str) -> dict[str, Any]:
     except (json.JSONDecodeError, OSError) as exc:
         raise AgentQError(f"invalid codemod plan: {exc}") from exc
     try:
-        plan = MutationPlan.from_wire(payload, what="codemod plan")
+        return MutationPlan.from_wire(payload, what="codemod plan")
     except ContractError as exc:
         raise AgentQError(f"invalid codemod plan: {exc}") from exc
-    return plan.to_wire()
-
-
-def _approved_plan_files(
-    plan: dict[str, Any], include_sensitive: bool
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Split planned file entries into approved and policy-excluded paths."""
-    approved: list[dict[str, Any]] = []
-    excluded: list[str] = []
-    for entry in plan.get("files", []):
-        rel = entry.get("path") if isinstance(entry, dict) else None
-        if not isinstance(rel, str) or not rel:
-            raise AgentQError("codemod plan contains a file entry without a path")
-        if not include_sensitive and is_sensitive_path(rel):
-            excluded.append(rel)
-        else:
-            approved.append(entry)
-    return approved, excluded
 
 
 def _policy_exclusion_error(excluded: list[str]) -> AgentQError:
     return AgentQError(
-        "refusing codemod apply: every planned file is excluded by policy ("
+        "refusing codemod apply: planned files are excluded by policy ("
         + ", ".join(excluded)
         + "); regenerate the plan or pass --include-sensitive"
     )
@@ -473,20 +636,13 @@ def _policy_excluded_matches(
     ]
 
 
-def _resolve_mutation_target(root: Path, rel: str) -> RepoPath:
-    target = resolve_repo_path(root, rel, must_exist=True)
-    if not target.absolute.is_file():
-        raise AgentQError(f"codemod mutation target is not a regular file: {rel}")
-    return target
-
-
 def _empty_mutation_result(
-    plan: dict[str, Any], *, reviewed_plan: bool
+    plan: MutationPlan, *, reviewed_plan: bool
 ) -> dict[str, Any]:
     outcome = MutationOutcome(
         status=MutationStatus.NOOP,
-        engine=plan["engine"],
-        plan_id=plan.get("plan_id"),
+        engine=plan.engine,
+        plan_id=plan.plan_id,
         reviewed_plan=reviewed_plan,
         match_count=0,
         remaining_matches=0,
@@ -499,9 +655,9 @@ def _empty_mutation_result(
     data = outcome.to_wire()
     data.update(
         {
-            "pattern": plan.get("pattern"),
-            "rewrite": plan.get("rewrite"),
-            "scopes": plan.get("scopes", []),
+            "pattern": plan.pattern,
+            "rewrite": plan.rewrite,
+            "scopes": list(plan.scopes),
             "files": 0,
             "counts": [],
             "samples": [],
@@ -510,212 +666,72 @@ def _empty_mutation_result(
     return data
 
 
-def _count_remaining(root: Path, plan: dict[str, Any], include_sensitive: bool) -> int:
-    scopes_relative = plan.get("scopes", ["."])
-    if plan["engine"] == "ast-grep":
-        mode = "ast"
-    elif plan["engine"] == "python-re":
-        mode = "regex"
-    else:
-        mode = "fixed"
-    if mode == "ast":
-        ast = _ast_matches(
-            root, plan["pattern"], None, plan.get("language", "ts"), scopes_relative, 0
-        )
-        return ast["matches"]
-    data = _scan_matches(
-        root,
-        plan["pattern"],
-        mode,
-        scopes_relative,
-        include_sensitive,
-        0,
-        0,
-    )
-    return data["matches"]
-
-
-def _apply_text_plan(
-    root: Path, plan: dict[str, Any], include_sensitive: bool
-) -> list[dict[str, Any]]:
-    approved, excluded = _approved_plan_files(plan, include_sensitive)
-    if not approved:
-        if excluded:
-            raise _policy_exclusion_error(excluded)
-        return []
-    prepared: list[tuple[Path, str, bytes, int]] = []
-    for f in approved:
-        rel = f["path"]
-        rp = _resolve_mutation_target(root, rel)
-        if f.get("sha256") and f["sha256"] != _file_sha256(rp.absolute):
-            raise AgentQError(
-                f"preimage changed for {rel}; refusing to apply stale plan"
-            )
-        text = rp.absolute.read_text(encoding="utf-8")
-        if plan["engine"] == "python-re":
-            regex = _compile_regex(plan["pattern"])
-            new_text, count = regex.subn(plan["rewrite"], text)
-        else:
-            new_text = text.replace(plan["pattern"], plan["rewrite"])
-            count = text.count(plan["pattern"])
-        if count and new_text != text:
-            prepared.append((rp.absolute, rel, new_text.encode("utf-8"), count))
-
-    changed: list[dict[str, Any]] = []
-    originals: dict[Path, bytes] = {}
-    if plan["engine"] != "ast-grep" and plan.get("rewrite") is None:
-        raise AgentQError(
-            "plan has no rewrite; rescan with --rewrite to produce an applicable plan"
-        )
-    try:
-        for path, rel, new_bytes, count in prepared:
-            originals[path] = path.read_bytes()
-            tmp = path.with_name(path.name + ".agentq.tmp")
-            tmp.write_bytes(new_bytes)
-            os.chmod(tmp, path.stat().st_mode)
-            os.replace(tmp, path)
-            changed.append({"path": rel, "replacements": count})
-    except Exception as exc:
-        for path, original in originals.items():
-            try:
-                path.write_bytes(original)
-            except OSError:
-                pass
-        raise AgentQError(f"codemod apply failed and rolled back: {exc}") from exc
-    return changed
-
-
-def _apply_ast_plan(
+def _decode_generated_plan(
     root: Path,
-    plan: dict[str, Any],
+    pattern: str,
+    rewrite: str | None,
+    mode: str,
     language: str | None,
+    scopes_relative: list[str],
     include_sensitive: bool,
-    max_files: int,
-) -> list[dict[str, Any]]:
-    approved, excluded = _approved_plan_files(plan, include_sensitive)
-    if not approved:
-        if excluded:
-            raise _policy_exclusion_error(excluded)
-        raise AgentQError(
-            "refusing AST codemod without explicit file arguments; no implicit default scope is applied"
-        )
-    files = [f["path"] for f in approved]
-    if len(files) > max_files:
-        raise AgentQError(
-            f"refusing codemod across {len(files)} files; max is {max_files}. Narrow scope or raise --max-files explicitly"
-        )
-    paths = [_resolve_mutation_target(root, rel).relative for rel in files]
-    exe = find_executable("ast-grep")
-    if not exe:
-        raise AgentQError("ast-grep is required for AST codemods")
-    originals = {root / rel: (root / rel).read_bytes() for rel in paths}
-    args = [
-        exe,
-        "run",
-        "--pattern",
-        plan["pattern"],
-        "--rewrite",
-        plan["rewrite"],
-        "--lang",
-        language or "ts",
-        "--update-all",
-        "--color",
-        "never",
-        *paths,
-    ]
+) -> MutationPlan:
+    generated = build_codemod_plan(
+        root, pattern, rewrite, mode, language, scopes_relative, include_sensitive
+    )
     try:
-        result = run_cmd(args, cwd=root, timeout=180)
-    except AgentQError:
-        for path, original in originals.items():
-            try:
-                path.write_bytes(original)
-            except OSError:
-                pass
-        raise
-    if result.returncode not in (0, 1):
-        for path, original in originals.items():
-            try:
-                path.write_bytes(original)
-            except OSError:
-                pass
-        raise AgentQError(
-            compact_line(
-                result.stderr or result.stdout or "ast-grep rewrite failed", 600
-            )
-        )
-    plan_matches = {f["path"]: f.get("matches", 0) for f in plan["files"]}
-    changed = [{"path": rel, "replacements": plan_matches.get(rel, 0)} for rel in paths]
-    return changed
+        return MutationPlan.from_wire(generated, what="fresh mutation plan")
+    except ContractError as exc:
+        raise AgentQError(f"invalid codemod plan: {exc}") from exc
 
 
-def apply_plan(
-    root: Path,
-    plan: dict[str, Any],
+def _reject_conflicting_overrides(
+    plan: MutationPlan,
     *,
-    apply: bool,
-    max_files: int,
-    include_sensitive: bool,
-    language: str | None = None,
-) -> dict[str, Any]:
-    policy = ApplyPolicy(
-        consent=apply, max_files=max_files, include_sensitive=include_sensitive
-    )
-    for sc in plan.get("scopes", []):
-        resolve_repo_path(root, sc, must_exist=False)
-    total_matches = sum(f.get("matches", 0) for f in plan["files"])
-    file_count = len(plan["files"])
-    if not policy.consent:
-        return {
-            "plan_id": plan.get("plan_id"),
-            "engine": plan["engine"],
-            "mode": plan["engine"],
-            "pattern": plan.get("pattern"),
-            "rewrite": plan.get("rewrite"),
-            "scopes": plan.get("scopes", []),
-            "matches": total_matches,
-            "files": file_count,
-            "counts": [],
-            "samples": [],
-            "applied": False,
-            "reviewed_plan": True,
-            "message": "dry run from reviewed plan; pass --apply to mutate files",
-        }
-    approved, excluded = _approved_plan_files(plan, policy.include_sensitive)
-    if not approved:
-        if excluded:
-            raise _policy_exclusion_error(excluded)
-        return _empty_mutation_result(plan, reviewed_plan=True)
-    if plan.get("rewrite") is None:
+    pattern: str | None,
+    rewrite: str | None,
+    mode: str | None,
+    language: str | None,
+) -> None:
+    conflicts: list[str] = []
+    if pattern is not None and pattern != plan.pattern:
+        conflicts.append("pattern")
+    if rewrite is not None and rewrite != plan.rewrite:
+        conflicts.append("rewrite")
+    if mode is not None and _MODE_ENGINES.get(mode) != plan.engine:
+        conflicts.append("mode")
+    if language is not None and language != plan.language:
+        conflicts.append("language")
+    if conflicts:
         raise AgentQError(
-            "plan has no rewrite; rescan with --rewrite to produce an applicable plan"
+            "loaded plan conflicts with CLI overrides ("
+            + ", ".join(conflicts)
+            + "); regenerate the plan or drop the overrides"
         )
-    if plan["engine"] == "ast-grep":
-        changed = _apply_ast_plan(
-            root,
-            plan,
-            language or plan.get("language"),
-            policy.include_sensitive,
-            policy.max_files,
-        )
-    else:
-        changed = _apply_text_plan(root, plan, policy.include_sensitive)
-    after = _count_remaining(root, plan, policy.include_sensitive)
-    outcome = MutationOutcome(
-        status=MutationStatus.APPLIED,
-        engine=plan["engine"],
-        plan_id=plan.get("plan_id"),
-        reviewed_plan=True,
-        changed=tuple(
-            ChangedFile(path=item["path"], replacements=item["replacements"])
-            for item in changed
+
+
+def _dry_run_summary(
+    plan: MutationPlan, *, reviewed_plan: bool, total_matches: int, file_count: int
+) -> dict[str, Any]:
+    return {
+        "plan_id": plan.plan_id,
+        "engine": plan.engine,
+        "mode": plan.engine,
+        "pattern": plan.pattern,
+        "rewrite": plan.rewrite,
+        "scopes": list(plan.scopes),
+        "matches": total_matches,
+        "files": file_count,
+        "counts": [],
+        "samples": [],
+        "applied": False,
+        "reviewed_plan": reviewed_plan,
+        "message": (
+            "dry run from reviewed plan; pass --apply to mutate files"
+            if reviewed_plan
+            else "dry run only; pass --apply to mutate files "
+            "(this applies a freshly generated plan, not a previously reviewed plan)"
         ),
-        match_count=total_matches,
-        remaining_matches=after,
-        message=f"applied {len(changed)} file(s) from reviewed plan {plan.get('plan_id')}",
-    )
-    data = outcome.to_wire()
-    data["scopes"] = plan.get("scopes", [])
-    return data
+    }
 
 
 def apply_data(
@@ -724,7 +740,7 @@ def apply_data(
     rewrite: str | None,
     *,
     scopes: list[str],
-    mode: str,
+    mode: str | None,
     language: str | None = None,
     apply: bool,
     expect_count: int | None = None,
@@ -733,106 +749,69 @@ def apply_data(
     plan: str | None = None,
 ) -> dict[str, Any]:
     if plan is not None:
-        loaded = _load_plan(plan)
-        return apply_plan(
-            root,
-            loaded,
-            apply=apply,
-            max_files=max_files,
-            include_sensitive=include_sensitive,
-            language=language,
+        plan_obj = _load_plan(plan)
+        _reject_conflicting_overrides(
+            plan_obj, pattern=pattern, rewrite=rewrite, mode=mode, language=language
         )
+        reviewed_plan = True
+        scopes_relative = list(plan_obj.scopes)
+    else:
+        resolved_mode = mode or "fixed"
+        if resolved_mode == "ast" and not language:
+            raise AgentQError("--lang is required for AST codemods")
+        if pattern is None:
+            raise AgentQError("a codemod pattern is required (or use --plan)")
+        scopes_relative = [s.path.relative for s in resolve_repo_scopes(root, scopes)]
+        plan_obj = _decode_generated_plan(
+            root,
+            pattern,
+            rewrite,
+            resolved_mode,
+            language,
+            scopes_relative,
+            include_sensitive,
+        )
+        reviewed_plan = False
 
-    scopes_relative = [s.path.relative for s in resolve_repo_scopes(root, scopes)]
-    plan_obj = build_codemod_plan(
-        root, pattern, rewrite, mode, language, scopes_relative, include_sensitive
-    )
-    if apply:
-        try:
-            MutationPlan.from_wire(
-                plan_obj, what="fresh mutation plan"
-            ).require_applicable()
-        except ContractError as exc:
-            raise AgentQError(f"invalid codemod plan: {exc}") from exc
     policy = ApplyPolicy(
         consent=apply,
         max_files=max_files,
         expect_count=expect_count,
         include_sensitive=include_sensitive,
     )
-    total_matches = sum(f.get("matches", 0) for f in plan_obj["files"])
-    file_count = len(plan_obj["files"])
-
-    if policy.expect_count is not None and total_matches != policy.expect_count:
-        raise AgentQError(
-            f"match-count guard failed: expected {policy.expect_count}, found {total_matches}"
-        )
-    if file_count > policy.max_files:
-        raise AgentQError(
-            f"refusing codemod across {file_count} files; max is {policy.max_files}. Narrow scope or raise --max-files explicitly"
-        )
-
+    total_matches = sum(item.matches for item in plan_obj.files)
+    file_count = len(plan_obj.files)
     if not policy.consent:
-        data = {
-            "mode": plan_obj["engine"],
-            "matches": total_matches,
-            "files": file_count,
-            "counts": [],
-            "samples": [],
-            "pattern": pattern,
-            "rewrite": rewrite,
-            "scopes": scopes_relative or ["."],
-            "applied": False,
-            "reviewed_plan": False,
-            "message": "dry run only; pass --apply to mutate files (this applies a freshly generated plan, not a previously reviewed plan)",
-        }
-        return data
-
-    approved, excluded = _approved_plan_files(plan_obj, policy.include_sensitive)
-    if not approved:
-        if excluded:
-            raise _policy_exclusion_error(excluded)
-        skipped = _policy_excluded_matches(root, pattern, mode, scopes_relative)
-        if skipped:
-            raise _policy_exclusion_error(skipped)
-        return _empty_mutation_result(plan_obj, reviewed_plan=False)
-
-    if mode == "ast":
-        if not language:
-            raise AgentQError("--lang is required for AST codemods")
-        changed = _apply_ast_plan(
-            root, plan_obj, language, policy.include_sensitive, policy.max_files
+        return _dry_run_summary(
+            plan_obj,
+            reviewed_plan=reviewed_plan,
+            total_matches=total_matches,
+            file_count=file_count,
         )
-        after = _count_remaining(root, plan_obj, policy.include_sensitive)
-    else:
-        changed = _apply_text_plan(root, plan_obj, policy.include_sensitive)
-        after = _count_remaining(root, plan_obj, policy.include_sensitive)
+    if file_count == 0:
+        if not reviewed_plan:
+            skipped = _policy_excluded_matches(
+                root, pattern or "", mode or "fixed", scopes_relative
+            )
+            if skipped:
+                raise _policy_exclusion_error(skipped)
+        return _empty_mutation_result(plan_obj, reviewed_plan=reviewed_plan)
 
-    outcome = MutationOutcome(
-        status=MutationStatus.APPLIED,
-        engine=plan_obj["engine"],
-        plan_id=plan_obj["plan_id"],
-        reviewed_plan=False,
-        changed=tuple(
-            ChangedFile(path=item["path"], replacements=item["replacements"])
-            for item in changed
-        ),
-        match_count=total_matches,
-        remaining_matches=after,
-        message="applied a freshly generated plan; review the diff before trusting the result",
-    )
+    outcome = apply_reviewed_plan(root, plan_obj, policy, reviewed_plan=reviewed_plan)
     data = outcome.to_wire()
     data["files"] = file_count
-    data["scopes"] = scopes_relative or ["."]
+    data["scopes"] = list(plan_obj.scopes)
     return data
 
 
 def render_apply(data: dict[str, Any]) -> str:
     if not data.get("applied"):
         return render_scan(data) + f"\n\n{data['message']}"
+    remaining = data.get("remaining_matches")
+    remaining_text = "n/a" if remaining is None else str(remaining)
     lines = [
         f"codemod applied [{data['mode']}]: initial matches={data.get('matches', '?')}; "
-        f"remaining={data.get('remaining_matches', '?')}"
+        f"remaining={remaining_text}"
     ]
     if data.get("reviewed_plan"):
         lines.append(f"reviewed plan: {data['plan_id']}")

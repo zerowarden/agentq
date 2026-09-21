@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 from agentq_lib import (  # noqa: E402
     codemod,
     evidence,
+    mutation_apply,
 )
 from agentq_lib.common import AgentQError  # noqa: E402
 from agentq_lib.paths import (  # noqa: E402
@@ -181,14 +182,24 @@ class CodemodPlanTests(unittest.TestCase):
         # Mutate a file out of band so the preimage no longer matches.
         (self.repo / "a.txt").write_text("CHANGED\n")
         with self.assertRaises(codemod.AgentQError):
-            codemod.apply_plan(
-                self.repo, plan, apply=True, max_files=100, include_sensitive=False
+            codemod.apply_data(
+                self.repo,
+                None,
+                None,
+                scopes=["."],
+                mode=None,
+                apply=True,
+                plan=str(plan_file),
             )
+        self.assertEqual((self.repo / "a.txt").read_text(), "CHANGED\n")
+        self.assertEqual((self.repo / "b.txt").read_text(), "foo\n")
 
     def test_rollback_on_failure(self) -> None:
         plan = codemod.build_codemod_plan(
             self.repo, "foo", "X", "fixed", None, ["."], False
         )
+        plan_file = Path(self.temp.name) / "rollback-plan.json"
+        codemod._write_plan(str(plan_file), plan)
         original_a = (self.repo / "a.txt").read_text()
         original_b = (self.repo / "b.txt").read_text()
         calls = {"n": 0}
@@ -196,14 +207,25 @@ class CodemodPlanTests(unittest.TestCase):
         real_replace = os.replace
 
         def flaky_replace(src, dst):
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                raise OSError("simulated write failure")
+            if Path(dst).parent == self.repo:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("simulated write failure")
             real_replace(src, dst)
 
-        with mock.patch.object(codemod.os, "replace", flaky_replace):
-            with self.assertRaises(codemod.AgentQError):
-                codemod._apply_text_plan(self.repo, plan, include_sensitive=False)
+        with mock.patch("agentq_lib.mutation_apply.os.replace", flaky_replace):
+            with self.assertRaises(mutation_apply.MutationApplyError) as caught:
+                codemod.apply_data(
+                    self.repo,
+                    None,
+                    None,
+                    scopes=["."],
+                    mode=None,
+                    apply=True,
+                    plan=str(plan_file),
+                )
+        self.assertEqual(caught.exception.result.status.value, "rolled_back")
+        self.assertEqual(caught.exception.result.restored, ("a.txt",))
         # First file was replaced, then the failure triggered rollback of it.
         self.assertEqual((self.repo / "a.txt").read_text(), original_a)
         self.assertEqual((self.repo / "b.txt").read_text(), original_b)
@@ -212,8 +234,16 @@ class CodemodPlanTests(unittest.TestCase):
         plan = codemod.build_codemod_plan(
             self.repo, "foo", "Z", "regex", None, ["."], False
         )
-        result = codemod.apply_plan(
-            self.repo, plan, apply=True, max_files=100, include_sensitive=False
+        plan_file = Path(self.temp.name) / "success-plan.json"
+        codemod._write_plan(str(plan_file), plan)
+        result = codemod.apply_data(
+            self.repo,
+            None,
+            None,
+            scopes=["."],
+            mode=None,
+            apply=True,
+            plan=str(plan_file),
         )
         self.assertTrue(result["applied"])
         self.assertEqual((self.repo / "a.txt").read_text(), "Z\nZ\n")

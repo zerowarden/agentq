@@ -32,7 +32,11 @@ def _codemod_apply_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "rewrite", nargs="?", help="codemod replacement (omit when using --plan)"
     )
-    p.add_argument("--mode", choices=("fixed", "regex", "ast"), default="fixed")
+    p.add_argument(
+        "--mode",
+        choices=("fixed", "regex", "ast"),
+        help="engine used for a fresh plan; a loaded plan must not conflict with it",
+    )
     p.add_argument("--lang")
     p.add_argument("--expect-count", type=nonnegative_int)
     p.add_argument("--max-files", type=positive_int, default=100)
@@ -53,7 +57,7 @@ COMMANDS = (
     Command(
         "codemod-apply",
         help="guarded codemod; dry-run unless --apply is explicit",
-        groups=(Group.COMMON, Group.SCOPE),
+        groups=(Group.COMMON, Group.SCOPE, Group.SENSITIVE),
         configure=_codemod_apply_options,
     ),
 )

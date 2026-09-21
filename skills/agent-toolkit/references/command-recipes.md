@@ -42,10 +42,18 @@ AQ=~/.agents/skills/agent-toolkit/scripts/agentq
 
 ## Refactoring
 
+A plan materializes exact byte edits, preimage/postimage hashes, and engine
+provenance at planning time. Applying a saved plan never rescans the worktree
+or re-runs ast-grep; both fresh and loaded routes use the same validation,
+policy, lock, journal, and commit path. Legacy plan schemas are refused with a
+regeneration message.
+
 ```bash
 "$AQ" codemod-scan 'OldName' --path packages
 "$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37
 "$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37 --apply
+"$AQ" codemod-scan 'OldName' --path packages --plan-out /tmp/rename.json
+"$AQ" codemod-apply --plan /tmp/rename.json --apply
 ```
 
 ## Task boundaries
