@@ -14,18 +14,58 @@ const rootArg = symbolMode ? argv[2] : argv[1];
 if (!rootArg) fail('missing repository root');
 const root = fs.realpathSync(rootArg);
 
-let ts;
-try {
-  const requireFromRoot = createRequire(path.join(root, 'package.json'));
-  ts = requireFromRoot('typescript');
-} catch (error) {
-  fail('TypeScript package is not resolvable from the repository; use the project\'s existing typescript dependency', { detail: String(error?.message || error) });
+let ts = null;
+function loadTs() {
+  if (ts) return ts;
+  try {
+    const requireFromRoot = createRequire(path.join(root, 'package.json'));
+    ts = requireFromRoot('typescript');
+  } catch (error) {
+    fail('TypeScript package is not resolvable from the repository; use the project\'s existing typescript dependency', { detail: String(error?.message || error) });
+  }
+  return ts;
+}
+
+function canonicalAbsolute(abs) {
+  try {
+    return fs.realpathSync(abs);
+  } catch {
+    return path.resolve(abs);
+  }
 }
 
 function rel(abs) {
-  const resolved = path.resolve(abs);
+  const resolved = canonicalAbsolute(abs);
   const withinRoot = resolved === root || resolved.startsWith(root + path.sep);
   return withinRoot ? path.relative(root, resolved).split(path.sep).join('/') : resolved;
+}
+
+function isValidWireScope(scope) {
+  if (typeof scope !== 'string' || !scope) return false;
+  if (scope.includes('\\') || scope.includes('\x00')) return false;
+  if (scope.startsWith('/') || /^[A-Za-z]:/.test(scope)) return false;
+  if (scope === '.') return true;
+  if (scope.endsWith('/')) return false;
+  const parts = scope.split('/');
+  return parts.every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
+function parseWireScopes(scopesJson) {
+  let scopes;
+  try {
+    scopes = JSON.parse(scopesJson || '[]');
+  } catch {
+    fail('invalid scope wire payload: scopes must be a JSON array', { code: 'invalid_scope' });
+  }
+  if (!Array.isArray(scopes)) fail('invalid scope wire payload: scopes must be a JSON array', { code: 'invalid_scope' });
+  // Empty input is the repository root on the wire.
+  if (!scopes.length) return ['.'];
+  for (const scope of scopes) {
+    if (!isValidWireScope(scope)) {
+      fail(`invalid scope wire entry: ${JSON.stringify(scope)} (expected repository-relative POSIX, root is ".")`, { code: 'invalid_scope', scope });
+    }
+  }
+  return [...new Set(scopes)];
 }
 
 function parseConfig(configPath, extraFile = undefined) {
@@ -73,7 +113,7 @@ function sourcePreview(source, line) {
 }
 
 function location(service, fileName, textSpan, extra = {}) {
-  const abs = path.resolve(fileName);
+  const abs = canonicalAbsolute(fileName);
   const source = service.getProgram()?.getSourceFile(abs);
   let start = { line: 0, character: 0 };
   let end = { line: 0, character: 0 };
@@ -180,11 +220,10 @@ function declarationSpan(service, file, position) {
 function scopeAllows(fileName, scopes) {
   if (!scopes.length || scopes.includes('.')) return true;
   const relative = rel(fileName);
+  // External references stay absolute here and are never treated as in-scope
+  // local candidates; they must not become allowed mutation targets.
   if (path.isAbsolute(relative)) return false;
-  return scopes.some((scope) => {
-    const normalized = scope.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
-    return !normalized || normalized === '.' || relative === normalized || relative.startsWith(normalized + '/');
-  });
+  return scopes.some((scope) => relative === scope || relative.startsWith(scope + '/'));
 }
 
 function discoverConfigs(scopes) {
@@ -224,6 +263,7 @@ function runPositionMode() {
   if (!action || !fileArg || !lineArg || !columnArg) {
     fail('usage: ts_nav.mjs <definition|references|implementations> <root> <file> <line> <column> [limit]');
   }
+  loadTs();
   const file = fs.realpathSync(path.isAbsolute(fileArg) ? fileArg : path.join(root, fileArg));
   const line = Number(lineArg);
   const column = Number(columnArg);
@@ -257,7 +297,11 @@ function runPositionMode() {
 function runSymbolMode() {
   const [, action, , symbol, scopesJson, limitArg, pickArg] = argv;
   if (!action || !symbol) fail('usage: ts_nav.mjs symbol <action> <root> <symbol> <scopes-json> [limit] [pick]');
-  const scopes = JSON.parse(scopesJson || '[]');
+  // Validate the wire form before requiring the TypeScript runtime so a
+  // malformed scope is always an explicit bridge-validation error, never an
+  // empty complete list or a missing-runtime message.
+  const scopes = parseWireScopes(scopesJson);
+  loadTs();
   const limit = Math.max(1, Number(limitArg || 80));
   const pick = pickArg ? Number(pickArg) : null;
   const configs = discoverConfigs(scopes);
@@ -287,7 +331,7 @@ function runSymbolMode() {
       const key = `${candidate.path}:${candidate.line}:${candidate.column}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      candidates.push({ ...candidate, _file: path.resolve(item.fileName), _position: item.textSpan.start, _config: configPath });
+      candidates.push({ ...candidate, _file: canonicalAbsolute(item.fileName), _position: item.textSpan.start, _config: configPath });
     }
   }
   candidates.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.column - b.column);

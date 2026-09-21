@@ -147,23 +147,23 @@ def _run_files(args: argparse.Namespace, root: Path) -> Outcome:
 
 
 def _run_search(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq_lib.common import ensure_within, relpath
+    from agentq_lib.paths import resolve_repo_path
     from agentq_lib.requests import search_options_from_args
     from agentq_lib.search import render_search, search_data
 
     trailing_paths: list[str] = []
     for value in args.trailing_paths:
         try:
-            candidate = ensure_within(root, Path(value))
+            confined = resolve_repo_path(root, value)
         except AgentQError:
             raise AgentQError(
                 "search accepts one QUERY; use: agentq search QUERY --path PATH"
             ) from None
-        if not candidate.exists():
+        if not confined.absolute.exists():
             raise AgentQError(
                 "search accepts one QUERY; use: agentq search QUERY --path PATH"
             )
-        trailing_paths.append(relpath(root, candidate))
+        trailing_paths.append(confined.relative)
     search_paths = [*args.paths, *trailing_paths]
     options = search_options_from_args(args)
     continuation_options = {

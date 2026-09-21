@@ -9,8 +9,12 @@ from .budgeting import budget_text_records, rendered_text
 from .common import AgentQError, ensure_within, find_executable, run_cmd
 from .evidence import (
     REFERENCE_LIMIT,
+    RESULT_LIMIT,
     SAMPLED,
     SEMANTIC,
+    status_of,
+    typed_from_wire,
+    visible_coverage,
 )
 from .evidence import (
     complete as complete_coverage,
@@ -18,7 +22,7 @@ from .evidence import (
 from .evidence import (
     coverage as coverage_block,
 )
-from .paths import resolve_repo_path
+from .paths import normalize_scopes_for_wire
 
 _TS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 _IDENTIFIER_RE = __import__("re").compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -73,8 +77,10 @@ def _symbol_ts_nav(
     node = find_executable("node")
     if not node:
         raise AgentQError("node is required for TypeScript semantic navigation")
-    # Confine every scope before it reaches the TypeScript language service.
-    confined = [str(resolve_repo_path(root, p).absolute) for p in (paths or [])]
+    # Confine every scope before it reaches the TypeScript language service and
+    # send only the repository-relative POSIX wire form. The absolute root
+    # stays a distinct field; it never appears on the wire as a scope.
+    wire_scopes = normalize_scopes_for_wire(root, paths or [])
     script = Path(__file__).with_name("ts_nav.mjs")
     result = run_cmd(
         [
@@ -84,7 +90,7 @@ def _symbol_ts_nav(
             action,
             str(root),
             symbol,
-            json.dumps(confined, ensure_ascii=False),
+            json.dumps(wire_scopes, ensure_ascii=False),
             str(limit),
             str(pick or ""),
         ],
@@ -97,22 +103,29 @@ def _symbol_ts_nav(
         raise AgentQError("TypeScript navigation returned invalid JSON") from exc
     if not data.get("ok"):
         raise AgentQError(data.get("error") or "TypeScript navigation failed")
-    data["paths"] = confined
+    data["paths"] = wire_scopes
+    data["root"] = str(Path(root).expanduser().resolve())
     data["limit"] = limit
     return data
 
 
 def _ts_coverage(data: dict[str, Any]) -> dict[str, Any]:
-    if data.get("action") == "overview":
-        truncated = any(
-            isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
-            for key in ("definition", "references", "implementations")
-        )
-    else:
-        truncated = bool(data.get("truncated"))
-    return (
-        coverage_block(SAMPLED, REFERENCE_LIMIT) if truncated else complete_coverage()
+    # Candidate-list truncation counts alongside section truncation: a sampled
+    # retained list must never report complete coverage. Each cut names its
+    # own cause.
+    list_truncated = bool(data.get("truncated"))
+    section_truncated = data.get("action") == "overview" and any(
+        isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
+        for key in ("definition", "references", "implementations")
     )
+    if not (list_truncated or section_truncated):
+        return complete_coverage()
+    reasons = []
+    if list_truncated:
+        reasons.append(RESULT_LIMIT)
+    if section_truncated:
+        reasons.append(REFERENCE_LIMIT)
+    return coverage_block(SAMPLED, *reasons)
 
 
 def ts_nav_data(
@@ -133,9 +146,12 @@ def ts_nav_data(
     )
     data["provenance"] = SEMANTIC
     data["coverage"] = _ts_coverage(data)
-    if action == "overview" and any(
-        isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
-        for key in ("definition", "references", "implementations")
+    if action == "overview" and (
+        bool(data.get("truncated"))
+        or any(
+            isinstance(data.get(key), dict) and bool(data[key].get("truncated"))
+            for key in ("definition", "references", "implementations")
+        )
     ):
         data["continuation"] = {"command": _overview_continuation(data)}
     return data
@@ -223,7 +239,10 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
         data.get("action") == "locate" or data.get("ambiguous") or not candidates
     ):
         symbol = data.get("symbol", "?")
-        lines = [f"ts symbol {symbol} · {len(candidates)} candidates"]
+        base_status = status_of(data.get("coverage"))
+        lines = [
+            f"ts symbol {symbol} · {len(candidates)} candidates [{base_status}]"
+        ]
         for index, item in enumerate(candidates, 1):
             detail = f" [{item.get('kind')}]" if item.get("kind") else ""
             config = f" · {item.get('config')}" if item.get("config") else ""
@@ -234,19 +253,33 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             if preview:
                 lines.append(f"     {preview}")
         if not candidates:
-            lines.append(
-                "No semantic TypeScript/JavaScript declaration candidate was found in the requested scope."
-            )
+            if base_status == "complete":
+                lines.append(
+                    "No semantic TypeScript/JavaScript declaration candidate was found in the requested scope."
+                )
+            else:
+                lines.append(
+                    "No semantic TypeScript/JavaScript declaration candidate was found "
+                    f"in the retained sample (coverage {base_status}); narrow --path or "
+                    "retry with a larger limit before concluding absence."
+                )
         elif data.get("ambiguous"):
             lines.append(
                 "resolution incomplete: narrow --path or select a candidate with --pick N"
             )
-        rendered, _ = budget_text_records(
+        rendered, render_truncated = budget_text_records(
             lines[0],
             lines[1:],
             budget,
             omission="… {count} complete semantic records omitted by render budget; narrow --path or lower --limit",
         )
+        if render_truncated and "[complete]" in rendered:
+            visible = visible_coverage(data.get("coverage"), render_truncated=True)
+            rendered = rendered_text(
+                rendered.replace("[complete]", f"[{visible.status}]", 1),
+                prebudget_chars=rendered.prebudget_chars,
+                truncated=True,
+            )
         return rendered
 
     if data.get("action") == "overview":
@@ -255,7 +288,7 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             ("references", "references"),
             ("implementations", "implementations"),
         )
-        complete = not any(
+        selection_sampled = any(
             bool(
                 (data.get(key) if isinstance(data.get(key), dict) else {}).get(
                     "truncated"
@@ -263,12 +296,18 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             )
             for key, _ in sections
         )
+        base = typed_from_wire(data.get("coverage"))
+        # The typed coverage object is authoritative; a renderer must never
+        # promote partial/sampled/unknown to complete.
+        label = base.status if base.status != "complete" else (
+            "sampled" if selection_sampled else "complete"
+        )
         continuation = (data.get("continuation") or {}).get(
             "command"
         ) or _overview_continuation(data)
         lines = [
             f"ts overview {data.get('symbol', '?')} · candidate {data.get('candidate', 1)}/{data.get('candidate_count', 1)} "
-            f"[{'complete' if complete else 'sampled'}]",
+            f"[{label}]",
             f"target {data['target']}:{data['line']}:{data['column']} · project {data['config']}",
         ]
         span = data.get("declaration_span")
@@ -276,7 +315,7 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             lines.append(
                 f"declaration span {span.get('start_line')}:{span.get('end_line')}"
             )
-        for key, label in sections:
+        for key, label_section in sections:
             section = data.get(key) if isinstance(data.get(key), dict) else {}
             items = (
                 section.get("results")
@@ -284,10 +323,10 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
                 else []
             )
             lines.append(
-                f"\n{label} · {section.get('shown', len(items))}/{section.get('total', len(items))}"
+                f"\n{label_section} · {section.get('shown', len(items))}/{section.get('total', len(items))}"
             )
             lines.extend(_grouped_results(items))
-        if not complete:
+        if label != "complete":
             lines.append(f"continue: {continuation}")
         rendered, truncated = budget_text_records(
             lines[0],
@@ -295,9 +334,10 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
             budget,
             omission=f"… {{count}} complete semantic overview records omitted; continue: {continuation}",
         )
-        if truncated and complete:
+        if truncated and "[complete]" in rendered:
+            visible = visible_coverage(data.get("coverage"), render_truncated=True)
             rendered = rendered_text(
-                rendered.replace("[complete]", "[partial]", 1),
+                rendered.replace("[complete]", f"[{visible.status}]", 1),
                 prebudget_chars=rendered.prebudget_chars,
                 truncated=True,
             )
@@ -315,19 +355,28 @@ def render_ts_nav(data: dict[str, Any], *, budget: int = 0) -> str:
         lines.append(
             f"ts {data['action']} {data['target']}:{data['line']}:{data['column']} · project {data['config']}"
         )
-    lines.append(
-        f"results {data['shown']}/{data['total']}"
-        + (" · sampled" if data.get("truncated") else "")
+    base = typed_from_wire(data.get("coverage"))
+    sampled = bool(data.get("truncated")) or base.status != "complete"
+    status = base.status if base.status != "complete" else (
+        "sampled" if sampled else "complete"
     )
+    lines.append(f"results {data['shown']}/{data['total']} [{status}]")
     lines.extend(_grouped_results(data.get("results", [])))
     if data.get("truncated"):
         lines.append(
             "coverage sampled; narrow the owning package for exhaustive semantic evidence"
         )
-    rendered, _ = budget_text_records(
+    rendered, render_truncated = budget_text_records(
         lines[0],
         lines[1:],
         budget,
         omission="… {count} complete semantic records omitted by render budget; narrow --path or lower --limit",
     )
+    if render_truncated and "[complete]" in rendered:
+        visible = visible_coverage(data.get("coverage"), render_truncated=True)
+        rendered = rendered_text(
+            rendered.replace("[complete]", f"[{visible.status}]", 1),
+            prebudget_chars=rendered.prebudget_chars,
+            truncated=True,
+        )
     return rendered

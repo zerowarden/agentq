@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from .budgeting import RenderedText, budget_text_records, rendered_text
-from .common import AgentQError, classify_path, ensure_within, language_for, relpath
-from .evidence import LEXICAL, best_provenance, merge_coverage
+from .common import AgentQError, classify_path, language_for
+from .evidence import COMPLETE, LEXICAL, best_provenance, merge_coverage, status_of
 from .evidence import complete as complete_coverage
 from .impact import nearest_manifest
 from .navigation import resolve_symbol
+from .paths import resolve_repo_path
 from .pythonnav import render_python_overview
 from .search import (
     outline_data,
@@ -86,8 +87,11 @@ def _edit_bundle(
     max_lines: int,
 ) -> dict[str, Any]:
     bundle: dict[str, Any] = {"navigation": navigation}
-    candidate_path = ensure_within(root, Path(str(candidate["file"])))
-    relative = relpath(root, candidate_path)
+    # Confine the candidate before it becomes a read target; an external
+    # reference never becomes an allowed local target here.
+    confined = resolve_repo_path(root, str(candidate["file"]))
+    candidate_path = confined.absolute
+    relative = confined.relative
     start = max(1, int(candidate["line"]))
     end = int(candidate.get("end_line") or start)
     if end >= start:
@@ -146,9 +150,10 @@ def inspect_data(
     lang = _normalize_lang(lang)
     anchors = line_anchors or []
     ranges = line_ranges or []
-    candidate = ensure_within(root, Path(target))
+    confined = resolve_repo_path(root, target)
+    candidate = confined.absolute
     if candidate.exists():
-        relative = relpath(root, candidate)
+        relative = confined.relative
         if candidate.is_file():
             if anchors or ranges:
                 wrapper = {
@@ -391,17 +396,26 @@ def render_inspect(data: dict[str, Any], *, budget: int = 0) -> str:
         providers = (
             data.get("providers") if isinstance(data.get("providers"), list) else []
         )
-        unavailable = [
+        search = data.get("search") if isinstance(data.get("search"), dict) else {}
+        # The fallback's own coverage is not the visible coverage: a complete
+        # lexical scan must not erase a failed or partial language provider.
+        # Report both the available fallback and the limitation.
+        visible = merge_coverage(data.get("coverage"), search.get("coverage"))
+        limited = [
             item
             for item in providers
-            if not item.get("available") and item.get("errors")
+            if item.get("errors") or status_of(item.get("coverage")) != COMPLETE
         ]
         prefix = ""
-        if unavailable:
-            names = ", ".join(str(item["provider"]) for item in unavailable)
-            prefix = f"semantic providers unavailable ({names}); lexical fallback\n"
+        if limited:
+            names = ", ".join(
+                f"{item['provider']} ({status_of(item.get('coverage'))})"
+                for item in limited
+            )
+            prefix = f"limited provider evidence ({names}); lexical fallback\n"
         rendered = render_search(
-            data["search"], budget=max(0, budget - len(prefix)) if budget else 0
+            {**search, "coverage": visible},
+            budget=max(0, budget - len(prefix)) if budget else 0,
         )
         return rendered_text(
             prefix + rendered,

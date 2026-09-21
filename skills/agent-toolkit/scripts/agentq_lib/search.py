@@ -46,6 +46,7 @@ from .evidence import (
 from .evidence import (
     coverage as coverage_block,
 )
+from .paths import resolve_repo_path
 from .pythonnav import python_outline
 from .redaction import StreamingRedactor
 
@@ -89,6 +90,7 @@ def _is_subsequence(needle: str, haystack: str) -> bool:
 def files_data(
     root: Path, query: str, scopes: list[str], limit: int, include_sensitive: bool
 ) -> dict[str, Any]:
+    scopes = _validated_scopes(root, scopes)
     candidates = []
     for path in list_repo_files(root):
         if not scope_match(path, scopes):
@@ -144,11 +146,13 @@ def _validated_scopes(root: Path, scopes: list[str]) -> list[str]:
     normalized: list[str] = []
     missing: list[str] = []
     for value in values:
-        candidate = ensure_within(root, Path(value))
-        if not candidate.exists():
+        # One confinement implementation (paths.py); existence stays separate
+        # so missing scopes keep their basename suggestions below.
+        confined = resolve_repo_path(root, value)
+        if not confined.absolute.exists():
             missing.append(value)
             continue
-        normalized.append(relpath(root, candidate))
+        normalized.append(confined.relative)
     if missing:
         joined = ", ".join(missing[:6]) + (" …" if len(missing) > 6 else "")
         suggestions: list[str] = []
@@ -1177,11 +1181,11 @@ def render_search(data: dict[str, Any], *, budget: int = 0) -> str:
     matching_files = int(data.get("matching_files", 0))
     shown = int(data.get("shown", 0))
     shown_files = int(data.get("shown_files", 0))
-    status = status_of(data.get("coverage")) or SAMPLED
+    status = status_of(data.get("coverage"))
     header = (
         f"search {data['query']!r}: {shown}/{total} matching lines in "
         f"{shown_files}/{matching_files} files [{data.get('effective_view', 'matches')}"
-        + ("; complete" if status == "complete" else "; sampled")
+        + f"; {status}"
         + "]"
     )
     candidates = data.get("symbol_candidates") or []
@@ -2160,10 +2164,13 @@ def outline_data(
     language: str | None,
     limit: int,
 ) -> dict[str, Any]:
+    # Normalized once here so every outline engine scans the same scope; a
+    # missing scope is an explicit error, never a silent empty result.
+    paths = _validated_scopes(root, paths)
     scoped = [
         path
         for path in list_repo_files(root)
-        if scope_match(path, paths or ["."]) and not is_sensitive_path(path)
+        if scope_match(path, paths) and not is_sensitive_path(path)
     ]
     if (language and language.lower() in {"py", "python"}) or (
         scoped and all(path.endswith(".py") for path in scoped)
@@ -2186,10 +2193,20 @@ def outline_data(
 
 
 def render_outline(data: dict[str, Any]) -> str:
+    coverage = data.get("coverage") or {"status": "unknown", "reason": []}
+    status = status_of(coverage)
     lines = [
         f"outline engine: {data['engine']}",
-        f"items: {data['shown']}" + (" (truncated)" if data.get("truncated") else ""),
+        f"items: {data['shown']}"
+        + (" (truncated)" if data.get("truncated") else "")
+        + f" [coverage {status}]",
     ]
+    if not data.get("shown") and status != "complete":
+        reason = ", ".join(coverage.get("reason") or []) or status
+        lines.append(
+            f"no symbols in the retained sample ({reason}); "
+            "narrow --path or retry before concluding absence"
+        )
     if "lines" in data:
         lines.extend(data["lines"])
     else:

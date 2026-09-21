@@ -2,7 +2,7 @@
 
 The renderer decides what fragments are present in the final serialized output.
 A :class:`DeliveryReceipt` is created only after that output exists. Ledger
-insertion still belongs to the state boundary (W05); this module never writes
+insertion still belongs to the state boundary; this module never writes
 exposure state and never records delivery for partial output.
 """
 

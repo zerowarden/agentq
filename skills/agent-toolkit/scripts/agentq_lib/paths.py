@@ -76,3 +76,15 @@ def resolve_repo_scopes(root: Path, values: Sequence[str | Path]) -> list[RepoSc
         rp = resolve_repo_path(root_abs, value, must_exist=True)
         scopes.append(RepoScope(root=root_abs, path=rp))
     return scopes
+
+
+def normalize_scopes_for_wire(root: Path, values: Sequence[str | Path]) -> list[str]:
+    """Return the provider wire form for *values*: repo-relative POSIX scopes.
+
+    The wire form is canonical: the repository root is exactly ``"."``, entries
+    have no trailing slash, absolute form, ``..`` or empty-path synonym. Input
+    is confined and required to exist via :func:`resolve_repo_scopes`; the
+    absolute root stays a distinct field on the request and never appears on
+    the wire as an absolute path.
+    """
+    return [scope.path.relative for scope in resolve_repo_scopes(root, values)]

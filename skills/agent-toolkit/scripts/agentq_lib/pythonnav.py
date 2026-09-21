@@ -9,18 +9,19 @@ from typing import Any
 from .budgeting import budget_text_records, rendered_text
 from .common import (
     compact_line,
-    ensure_within,
     is_sensitive_path,
     list_repo_files,
-    relpath,
     scope_match,
 )
 from .evidence import (
     PARSE_ERROR,
     PARTIAL,
     REFERENCE_LIMIT,
+    RESULT_LIMIT,
     SAMPLED,
     SYNTACTIC,
+    typed_from_wire,
+    visible_coverage,
 )
 from .evidence import (
     complete as complete_coverage,
@@ -28,6 +29,9 @@ from .evidence import (
 from .evidence import (
     coverage as coverage_block,
 )
+from .paths import normalize_scopes_for_wire
+
+_MAX_PARSE_ERRORS = 5
 
 
 def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -84,17 +88,32 @@ class _DefinitionVisitor(ast.NodeVisitor):
         self._visit_definition(node)
 
 
-def _python_files(root: Path, paths: list[str]) -> list[str]:
-    scopes = [
-        relpath(root, ensure_within(root, Path(path))) for path in (paths or ["."])
-    ]
-    return [
+def _collect_python_files(
+    root: Path, paths: list[str]
+) -> tuple[list[str], list[str]]:
+    """Confined `.py` files plus the normalized wire scopes, resolved once.
+
+    Single scope authority: confined, existence-checked, repo-relative wire
+    scopes from paths.py. No second Path.resolve/prefix checker here.
+    """
+    scopes = normalize_scopes_for_wire(root, paths or [])
+    files = [
         relative
         for relative in list_repo_files(root)
         if relative.endswith(".py")
         and scope_match(relative, scopes)
         and not is_sensitive_path(relative)
     ]
+    return files, scopes
+
+
+def _python_coverage(parse_error_count: int, *reasons: str) -> dict[str, Any]:
+    """One coverage decision: parse failures dominate, else sample, else complete."""
+    if parse_error_count:
+        return coverage_block(PARTIAL, PARSE_ERROR, *reasons)
+    if reasons:
+        return coverage_block(SAMPLED, *reasons)
+    return complete_coverage()
 
 
 def _parse_python(path: Path) -> tuple[ast.AST | None, list[str], str | None]:
@@ -112,16 +131,6 @@ def _definitions_from_tree(relative: str, tree: ast.AST) -> list[dict[str, Any]]
     return visitor.records
 
 
-def python_definitions(root: Path, paths: list[str]) -> list[dict[str, Any]]:
-    definitions: list[dict[str, Any]] = []
-    for relative in _python_files(root, paths):
-        tree, _, _ = _parse_python(root / relative)
-        if tree is None:
-            continue
-        definitions.extend(_definitions_from_tree(relative, tree))
-    return definitions
-
-
 def python_outline(
     root: Path,
     paths: list[str],
@@ -130,25 +139,43 @@ def python_outline(
     limit: int,
 ) -> dict[str, Any]:
     pattern = re.compile(match, re.I) if match else None
+    files, wire_scopes = _collect_python_files(root, paths)
+    definitions: list[dict[str, Any]] = []
+    parse_errors: list[dict[str, str]] = []
+    parse_error_count = 0
+    for relative in files:
+        tree, _, error = _parse_python(root / relative)
+        if tree is None:
+            parse_error_count += 1
+            if len(parse_errors) < _MAX_PARSE_ERRORS:
+                parse_errors.append(
+                    {"path": relative, "error": error or "unparseable"}
+                )
+            continue
+        definitions.extend(_definitions_from_tree(relative, tree))
     definitions = [
         item
-        for item in python_definitions(root, paths)
+        for item in definitions
         if (not pattern or pattern.search(str(item["name"])))
         and (not public or not str(item["name"]).startswith("_"))
     ]
     truncated = len(definitions) > limit
-    return {
+    reasons = [RESULT_LIMIT] if truncated else []
+    result: dict[str, Any] = {
         "engine": "stdlib-python-ast",
         "shown": min(limit, len(definitions)),
+        "total": len(definitions),
         "truncated": truncated,
         "provenance": SYNTACTIC,
-        "coverage": (
-            coverage_block(SAMPLED, REFERENCE_LIMIT)
-            if truncated
-            else complete_coverage()
-        ),
+        "coverage": _python_coverage(parse_error_count, *reasons),
         "symbols": definitions[:limit],
+        "paths": wire_scopes,
+        "limit": limit,
     }
+    if parse_error_count:
+        result["parse_errors"] = parse_errors
+        result["parse_error_count"] = parse_error_count
+    return result
 
 
 def python_symbol_overview(
@@ -164,11 +191,12 @@ def python_symbol_overview(
     parse_errors: list[dict[str, str]] = []
     parse_error_count = 0
     total = 0
-    for relative in _python_files(root, paths):
+    files, wire_scopes = _collect_python_files(root, paths)
+    for relative in files:
         tree, lines, error = _parse_python(root / relative)
         if tree is None:
             parse_error_count += 1
-            if len(parse_errors) < 5:
+            if len(parse_errors) < _MAX_PARSE_ERRORS:
                 parse_errors.append({"path": relative, "error": error or "unparseable"})
             continue
         candidates.extend(
@@ -201,16 +229,20 @@ def python_symbol_overview(
                 }
             )
     truncated = total > len(references)
-    if parse_error_count:
-        coverage = coverage_block(PARTIAL, PARSE_ERROR)
-    elif truncated:
-        coverage = coverage_block(SAMPLED, REFERENCE_LIMIT)
-    else:
-        coverage = complete_coverage()
+    candidates_truncated = len(candidates) > limit
+    # references_requested=false is not a failed scan: references.total stays 0
+    # and references.truncated stays False. A retained-sample limit on either
+    # candidates or references still prevents a unique-selection claim, so the
+    # coverage must be at most sampled. Parse failures dominate with partial.
+    reasons = []
+    if candidates_truncated:
+        reasons.append(RESULT_LIMIT)
+    if truncated:
+        reasons.append(REFERENCE_LIMIT)
     result: dict[str, Any] = {
         "engine": "stdlib-python-ast",
         "provenance": SYNTACTIC,
-        "coverage": coverage,
+        "coverage": _python_coverage(parse_error_count, *reasons),
         "symbol": symbol,
         "candidates": candidates[:limit],
         "candidate_count": len(candidates),
@@ -222,8 +254,9 @@ def python_symbol_overview(
             "truncated": truncated,
         },
         "references_omitted": not include_references,
+        "references_requested": include_references,
         "evidence": "definitions are syntax-aware; references are bounded lexical AST evidence, not semantic proof",
-        "paths": list(paths),
+        "paths": wire_scopes,
         "limit": limit,
     }
     if parse_error_count:
@@ -260,13 +293,18 @@ def render_python_overview(data: dict[str, Any], *, budget: int = 0) -> str:
     definitions_sampled = len(data["candidates"]) < int(data["candidate_count"])
     if data.get("references_omitted"):
         reference_summary = "references not requested (--intent locate)"
-        sampled = definitions_sampled
+        selection_sampled = definitions_sampled
     else:
         reference_summary = (
             f"{references['shown']}/{references['total']} lexical references"
         )
-        sampled = definitions_sampled or bool(references["truncated"])
-    status = "sampled" if sampled else "complete"
+        selection_sampled = definitions_sampled or bool(references["truncated"])
+    # Typed coverage is authoritative: a renderer cannot promote partial,
+    # sampled, unavailable, or unknown evidence to complete.
+    base = typed_from_wire(data.get("coverage"))
+    status = base.status
+    if status == "complete" and selection_sampled:
+        status = "sampled"
     header = (
         f"python overview {data['symbol']}: {data['candidate_count']} definitions, "
         f"{reference_summary} [{status}]"
@@ -281,10 +319,15 @@ def render_python_overview(data: dict[str, Any], *, budget: int = 0) -> str:
         records.append(
             f"R {item['path']}:{item['line']}:{item['column']} [{item['kind']}] {item['preview']}"
         )
+    if not data["candidates"] and base.status != "complete":
+        records.append(
+            f"no definitions in the retained sample (coverage {base.status}); "
+            "narrow --path or retry before concluding absence"
+        )
     continuation = (data.get("continuation") or {}).get(
         "command"
     ) or _python_continuation(data)
-    if sampled:
+    if selection_sampled or base.status != "complete":
         records.append(f"continue: {continuation}")
     rendered, truncated = budget_text_records(
         header,
@@ -292,9 +335,10 @@ def render_python_overview(data: dict[str, Any], *, budget: int = 0) -> str:
         budget,
         omission=f"… {{count}} complete Python records omitted; continue: {continuation}",
     )
-    if truncated and status == "complete":
+    if truncated and "[complete]" in rendered:
+        visible = visible_coverage(base, render_truncated=True)
         rendered = rendered_text(
-            rendered.replace("[complete]", "[partial]", 1),
+            rendered.replace("[complete]", f"[{visible.status}]", 1),
             prebudget_chars=rendered.prebudget_chars,
             truncated=True,
         )

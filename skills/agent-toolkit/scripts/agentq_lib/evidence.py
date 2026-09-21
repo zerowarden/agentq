@@ -427,6 +427,19 @@ def with_omission(
     return typed_from_wire(block).with_omission(reason, omitted=omitted)
 
 
+def visible_coverage(base: Any, *, render_truncated: bool) -> Coverage:
+    """Acquisition/selection coverage merged with a render omission.
+
+    The single helper every renderer uses to choose its visible status label:
+    a renderer can only downgrade toward ``partial``/``sampled``, never promote
+    toward ``complete``.
+    """
+    typed = typed_from_wire(base)
+    if render_truncated:
+        return typed.with_omission(RENDER_OMISSION)
+    return typed
+
+
 def with_failure(
     block: Any, reason: str = PROVIDER_ERROR, *, status: str = PARTIAL
 ) -> Coverage:

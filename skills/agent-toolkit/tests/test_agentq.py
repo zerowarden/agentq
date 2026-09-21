@@ -4053,6 +4053,8 @@ class AgentQIntegrationTest(unittest.TestCase):
                 "total": len(items),
                 "truncated": False,
                 "results": items,
+                "provenance": "semantic",
+                "coverage": {"status": "complete", "reason": []},
             }
 
         overview = {
@@ -4084,6 +4086,8 @@ class AgentQIntegrationTest(unittest.TestCase):
             "action": "locate",
             "symbol": "OldName",
             "ambiguous": False,
+            "provenance": "semantic",
+            "coverage": {"status": "complete", "reason": []},
             "candidates": [
                 {
                     "path": "packages/a/src/index.ts",

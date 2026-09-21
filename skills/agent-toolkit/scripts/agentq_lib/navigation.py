@@ -26,6 +26,8 @@ from .contracts.result import (
 )
 from .evidence import (
     LEXICAL,
+    PARSE_ERROR,
+    PROVIDER_ERROR,
     SEMANTIC,
     SYNTACTIC,
     Diagnostic,
@@ -102,6 +104,17 @@ def _metadata(result: ProviderResult[Any]) -> dict[str, Any]:
     }
 
 
+def _declared_candidate_count(payload: dict[str, Any], key: str) -> int:
+    """Producer-declared total; a retained-sample limit must not shrink it."""
+    declared = payload.get("candidate_count")
+    if isinstance(declared, bool):
+        declared = None
+    if isinstance(declared, int) and declared >= 0:
+        return declared
+    candidates = payload.get(key)
+    return len(candidates) if isinstance(candidates, list) else 0
+
+
 def _query(
     provider: NavigationProvider,
     request: NavigationRequest,
@@ -111,6 +124,8 @@ def _query(
         method = provider.overview if include_references else provider.locate
         payload = method(request)
     except (AgentQError, ContractError) as exc:
+        # A missing runtime never reaches here: providers return None for it,
+        # which maps to unavailable below. Everything else is a failure.
         return failed_result(provider.name, str(exc), provenance=provider.provenance)
     if payload is None:
         return unavailable_result(
@@ -124,12 +139,31 @@ def _query(
             "provider returned a non-object payload",
             provenance=provider.provenance,
         )
-    candidates = payload.get(provider.candidates_key)
-    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+    candidate_count = _declared_candidate_count(payload, provider.candidates_key)
     coverage = payload.get("coverage")
+    messages = list(provider.result_errors(payload))
+    # Preserve the full parse-error count even when detailed messages are
+    # sampled to a bounded list: bounded diagnostics never imply only the
+    # visible errors occurred.
+    parse_total = payload.get("parse_error_count")
+    visible_parses = payload.get("parse_errors")
+    if (
+        isinstance(parse_total, int)
+        and isinstance(visible_parses, list)
+        and parse_total > len(visible_parses)
+    ):
+        messages.append(
+            f"{parse_total - len(visible_parses)} additional parse errors omitted "
+            f"({parse_total} total)"
+        )
     diagnostics = tuple(
-        Diagnostic(message=message, code="provider_error")
-        for message in provider.result_errors(payload)
+        Diagnostic(
+            message=message,
+            code=(
+                PARSE_ERROR if "parse" in message.lower() else PROVIDER_ERROR
+            ),
+        )
+        for message in messages
     )
     return ProviderResult(
         provider=provider.name,
@@ -154,7 +188,15 @@ class TypeScriptProvider:
     def supports(self, request: NavigationRequest) -> bool:
         return request.lang in {None, "typescript"}
 
+    @staticmethod
+    def _runtime_available() -> bool:
+        from .common import find_executable
+
+        return find_executable("node") is not None
+
     def locate(self, request: NavigationRequest) -> dict[str, Any] | None:
+        if not self._runtime_available():
+            return None
         return ts_nav_data(
             request.root,
             "locate",
@@ -168,6 +210,8 @@ class TypeScriptProvider:
         )
 
     def overview(self, request: NavigationRequest) -> dict[str, Any] | None:
+        if not self._runtime_available():
+            return None
         return ts_nav_data(
             request.root,
             "overview",
