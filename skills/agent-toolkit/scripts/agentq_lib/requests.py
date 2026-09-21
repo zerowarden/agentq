@@ -40,21 +40,6 @@ def current_context(root: Path, *, consumer_id: str | None = None) -> RequestCon
     )
 
 
-def budget_from_args(
-    args: Any,
-    *,
-    max_scan_records: int | None = None,
-    retained_artifact_limit: int | None = None,
-    execution_deadline_seconds: float | None = None,
-) -> Budget:
-    return Budget(
-        output_chars=int(getattr(args, "budget", 0) or 0),
-        max_scan_records=max_scan_records,
-        retained_artifact_limit=retained_artifact_limit,
-        execution_deadline_seconds=execution_deadline_seconds,
-    )
-
-
 def search_options_from_args(args: Any) -> SearchOptions:
     return SearchOptions(
         query=args.query,
@@ -102,26 +87,65 @@ def request_from_args(
     consumer_id: str | None = None,
 ) -> OperationRequest:
     """Normalize one CLI invocation into an accepted request."""
+    return request_for(
+        root,
+        operation,
+        options,
+        scopes=scopes,
+        output_chars=int(getattr(args, "budget", 0) or 0),
+        max_scan_records=None,
+        retained_artifact_limit=None,
+        execution_deadline_seconds=execution_deadline_seconds,
+        output_format=str(getattr(args, "format", "text")),
+        repeat=bool(getattr(args, "repeat", False)),
+        consumer_id=consumer_id,
+    )
+
+
+def request_for(
+    root: Path,
+    operation: str,
+    options: Any,
+    *,
+    scopes: tuple[str, ...] = (),
+    output_chars: int = 0,
+    max_scan_records: int | None = None,
+    retained_artifact_limit: int | None = None,
+    execution_deadline_seconds: float | None = None,
+    output_format: str = "text",
+    repeat: bool = False,
+    consumer_id: str | None = None,
+    context: RequestContext | None = None,
+) -> OperationRequest:
+    """Build one accepted request without depending on argparse.
+
+    ``context`` lets a caller supply an identity it already resolved; the
+    default reads the current host context, which may consult task state.
+    """
     codec = OPTIONS_CODECS.get(operation)
     if codec is None:
         raise ContractError(
             f"request normalization is not implemented for operation {operation!r}"
         )
-    request = OperationRequest(
+    if context is None:
+        context = current_context(root, consumer_id=consumer_id)
+    return OperationRequest(
         operation=operation,
         request_id=_request_identity(root, operation, options, scopes, codec[1]),
         repo_id=stable_id(str(root.expanduser().resolve()), length=32),
         worktree_id=stable_id(str(root.expanduser().resolve()), length=32),
         options=options,
-        context=current_context(root, consumer_id=consumer_id),
+        context=context,
         scopes=scopes,
-        budget=budget_from_args(
-            args, execution_deadline_seconds=execution_deadline_seconds
+        budget=Budget(
+            output_chars=output_chars,
+            max_scan_records=max_scan_records,
+            retained_artifact_limit=retained_artifact_limit,
+            execution_deadline_seconds=execution_deadline_seconds,
         ),
-        output_format=str(getattr(args, "format", "text")),
-        repeat=bool(getattr(args, "repeat", False)),
+        output_format=output_format,
+        repeat=repeat,
     )
-    return request
 
 
 def _request_identity(
@@ -179,6 +203,14 @@ def request_argv(request: OperationRequest) -> list[str]:
     )
 
 
+def _presentation_args(request: OperationRequest) -> list[str]:
+    """Presentation flags shared by every continuation argv."""
+    args = ["--format", request.output_format]
+    if request.budget.output_chars > 0:
+        args += ["--budget", str(request.budget.output_chars)]
+    return args
+
+
 def _search_argv(request: OperationRequest) -> list[str]:
     options = request.options
     if not isinstance(options, SearchOptions) or not options.query:
@@ -216,14 +248,7 @@ def _search_argv(request: OperationRequest) -> list[str]:
         argv.append("--include-sensitive")
     for scope in request.scopes:
         argv.extend(("--path", scope))
-    argv.extend(
-        (
-            "--format",
-            request.output_format,
-            "--budget",
-            str(request.budget.output_chars),
-        )
-    )
+    argv.extend(_presentation_args(request))
     if request.repeat:
         argv.append("--repeat")
     return argv
@@ -262,12 +287,5 @@ def _diff_argv(request: OperationRequest) -> list[str]:
     )
     for scope in options.paths or request.scopes:
         argv.extend(("--path", scope))
-    argv.extend(
-        (
-            "--format",
-            request.output_format,
-            "--budget",
-            str(request.budget.output_chars),
-        )
-    )
+    argv.extend(_presentation_args(request))
     return argv

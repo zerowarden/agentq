@@ -50,6 +50,7 @@ class NavigationRequest:
     limit: int = 80
     lang: str | None = None
     context: int = 0
+    pick: int | None = None
     request_context: RequestContext = field(default_factory=RequestContext)
     budget: Budget = field(default_factory=Budget)
 
@@ -58,6 +59,12 @@ class NavigationRequest:
             raise ContractError("navigation symbol must be a non-empty string")
         if self.lang not in {None, "typescript", "python"}:
             raise ContractError(f"unsupported navigation language: {self.lang!r}")
+        if self.pick is not None and (
+            isinstance(self.pick, bool)
+            or not isinstance(self.pick, int)
+            or self.pick < 1
+        ):
+            raise ContractError("navigation pick must be a positive integer")
         if (
             isinstance(self.limit, bool)
             or not isinstance(self.limit, int)
@@ -159,9 +166,7 @@ def _query(
     diagnostics = tuple(
         Diagnostic(
             message=message,
-            code=(
-                PARSE_ERROR if "parse" in message.lower() else PROVIDER_ERROR
-            ),
+            code=(PARSE_ERROR if "parse" in message.lower() else PROVIDER_ERROR),
         )
         for message in messages
     )
@@ -206,7 +211,7 @@ class TypeScriptProvider:
             request.limit,
             symbol=request.symbol,
             paths=list(request.paths),
-            pick=None,
+            pick=request.pick,
         )
 
     def overview(self, request: NavigationRequest) -> dict[str, Any] | None:
@@ -221,7 +226,7 @@ class TypeScriptProvider:
             request.limit,
             symbol=request.symbol,
             paths=list(request.paths),
-            pick=None,
+            pick=request.pick,
         )
 
     def result_errors(self, result: dict[str, Any]) -> list[str]:
@@ -348,6 +353,7 @@ def resolve_symbol(
     limit: int = 80,
     lang: str | None = None,
     context: int = 0,
+    pick: int | None = None,
     include_references: bool = True,
     request_context: RequestContext | None = None,
     budget: Budget | None = None,
@@ -360,6 +366,7 @@ def resolve_symbol(
         limit=limit,
         lang=lang,
         context=context,
+        pick=pick,
         request_context=request_context or RequestContext(),
         budget=budget or Budget(),
     )

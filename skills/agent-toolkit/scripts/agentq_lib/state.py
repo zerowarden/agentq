@@ -103,6 +103,28 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS receipt_fragments_expiry ON receipt_fragments (expires_at)",
         ),
     ),
+    (
+        4,
+        (
+            # Typed cursor records live in payload; rows written before this
+            # column existed keep only an opaque command and are expired rather
+            # than reinterpreted.
+            "ALTER TABLE continuations ADD COLUMN payload TEXT",
+            "UPDATE continuations SET expires_at = 0 WHERE payload IS NULL",
+            """
+        CREATE TABLE IF NOT EXISTS continuation_artifacts (
+            repo_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            PRIMARY KEY (repo_id, artifact_id)
+        )
+        """,
+            "CREATE INDEX IF NOT EXISTS continuation_artifacts_expiry "
+            "ON continuation_artifacts (expires_at)",
+        ),
+    ),
 )
 
 _connections: dict[str, sqlite3.Connection] = {}
@@ -444,13 +466,14 @@ def delete_task(repo_id: str) -> None:
 def store_continuation(
     repo_id: str,
     context_id: str,
-    command: str,
+    payload: dict[str, Any],
     *,
     workspace: str | None,
     now: float,
 ) -> dict[str, Any] | None:
-    """Store a continuation cursor; returns cursor metadata or None on failure."""
+    """Store one typed continuation record; cursor metadata or None on failure."""
     expires_at = now + CONTINUATION_TTL_SECONDS
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     for _ in range(3):
         cursor = secrets.token_hex(4)
         try:
@@ -458,9 +481,19 @@ def store_continuation(
                 conn.execute("DELETE FROM continuations WHERE expires_at < ?", (now,))
                 conn.execute(
                     "INSERT INTO continuations "
-                    "(cursor, repo_id, context_id, command, workspace, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (cursor, repo_id, context_id, command, workspace, now, expires_at),
+                    "(cursor, repo_id, context_id, command, payload, workspace, "
+                    "created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        cursor,
+                        repo_id,
+                        context_id,
+                        "",
+                        encoded,
+                        workspace,
+                        now,
+                        expires_at,
+                    ),
                 )
         except sqlite3.IntegrityError:
             continue  # cursor token collision; draw a new one
@@ -473,12 +506,14 @@ def store_continuation(
 def load_continuation(
     repo_id: str, context_id: str, cursor: str, *, now: float
 ) -> dict[str, Any] | None:
+    """Load a typed cursor record; command-only rows are never returned."""
     try:
         row = (
             connection()
             .execute(
-                "SELECT command, workspace, expires_at FROM continuations "
-                "WHERE cursor = ? AND repo_id = ? AND context_id = ? AND expires_at > ?",
+                "SELECT payload, workspace, expires_at FROM continuations "
+                "WHERE cursor = ? AND repo_id = ? AND context_id = ? "
+                "AND expires_at > ? AND payload IS NOT NULL",
                 (cursor, repo_id, context_id, now),
             )
             .fetchone()
@@ -487,4 +522,66 @@ def load_continuation(
         return None
     if not row:
         return None
-    return {"command": row[0], "workspace": row[1], "expires_at": row[2]}
+    return {"payload": row[0], "workspace": row[1], "expires_at": row[2]}
+
+
+def store_artifact(
+    repo_id: str,
+    artifact_id: str,
+    payload: bytes,
+    *,
+    expires_at: float,
+    quota_bytes: int,
+    now: float,
+) -> bool:
+    """Store artifact bytes and enforce the per-repository byte quota."""
+    try:
+        with connection() as conn:
+            conn.execute(
+                "DELETE FROM continuation_artifacts WHERE expires_at < ?", (now,)
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO continuation_artifacts "
+                "(repo_id, artifact_id, payload, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (repo_id, artifact_id, payload, now, expires_at),
+            )
+            rows = conn.execute(
+                "SELECT artifact_id, LENGTH(payload) FROM continuation_artifacts "
+                "WHERE repo_id = ? ORDER BY created_at DESC, artifact_id DESC",
+                (repo_id,),
+            ).fetchall()
+            total = 0
+            excess: list[str] = []
+            for identifier, size in rows:
+                total += int(size or 0)
+                if total > quota_bytes:
+                    excess.append(str(identifier))
+            for identifier in excess:
+                conn.execute(
+                    "DELETE FROM continuation_artifacts "
+                    "WHERE repo_id = ? AND artifact_id = ?",
+                    (repo_id, identifier),
+                )
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def load_artifact(repo_id: str, artifact_id: str, *, now: float) -> bytes | None:
+    """Return retained artifact bytes, or None when absent or expired."""
+    try:
+        row = (
+            connection()
+            .execute(
+                "SELECT payload FROM continuation_artifacts "
+                "WHERE repo_id = ? AND artifact_id = ? AND expires_at > ?",
+                (repo_id, artifact_id, now),
+            )
+            .fetchone()
+        )
+    except sqlite3.Error:
+        return None
+    if not row or row[0] is None:
+        return None
+    return bytes(row[0])

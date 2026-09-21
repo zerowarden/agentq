@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ..emit import emit
+from ..emit import _attach_continuation_cursors, emit
 from ..types import Outcome
 from .task_scope import attach_task_scope
 
@@ -61,9 +61,11 @@ def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
             max_lines=args.max_lines,
             repeat=args.repeat,
             budget=args.budget,
+            output_format=args.format,
         )
     if args.task_scope:
         attach_task_scope(data, scoped, requested=True)
+    _attach_continuation_cursors(root, data)
     return emit(args, data, render_diff, root=root)
 
 

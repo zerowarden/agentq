@@ -5,6 +5,7 @@ import shlex
 import tempfile
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,22 @@ from .common import (
     run_cmd,
 )
 from .context_cache import diff_cache_key, diff_repeat_advice
+from .continuations import (
+    GIT_DIFF_GUARD_KIND,
+    QueryRefinement,
+    SourceGuard,
+    fingerprint_id,
+    query_follow_up_block,
+)
+from .contracts.request import DiffSelection, OperationRequest, RequestContext
 from .evidence import (
     LEXICAL,
+    PARTIAL,
     RESULT_LIMIT,
     SAMPLED,
+    SOURCE_UNSTABLE,
     merge_coverage,
+    with_failure,
 )
 from .evidence import (
     complete as complete_coverage,
@@ -32,6 +44,8 @@ from .evidence import (
     coverage as coverage_block,
 )
 from .paths import resolve_repo_path
+from .requests import request_for
+from .runtime import session_id
 
 
 def _truncated_coverage(*truncated: bool) -> dict[str, Any]:
@@ -41,6 +55,12 @@ def _truncated_coverage(*truncated: bool) -> dict[str, Any]:
 
 
 _DIFF_PREFIX_ARGS = ["--src-prefix=a/", "--dst-prefix=b/"]
+_DIFF_COMMON = (
+    "--no-ext-diff",
+    "--no-color",
+    "--find-renames",
+    *_DIFF_PREFIX_ARGS,
+)
 _HUNK_HEADER_RE = re.compile(
     r"^@@ -(?P<old>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new>\d+)(?:,(?P<new_count>\d+))? @@(?:\s*(?P<context>.*))?$"
@@ -227,24 +247,192 @@ def render_status(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _diff_prefix(
-    root: Path,
-    *,
-    staged: bool = False,
-    unstaged: bool = False,
-    base: str | None = None,
-    range_value: str | None = None,
+def _resolve_revision(root: Path, revision: str) -> str:
+    result = _git(
+        root,
+        ["rev-parse", "--verify", f"{revision}^{{commit}}"],
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AgentQError(
+            compact_line(
+                result.stderr.strip() or f"cannot resolve revision: {revision}", 300
+            )
+        )
+    return result.stdout.strip().splitlines()[0]
+
+
+def _optional_revision(root: Path, revision: str) -> str | None:
+    result = _git(
+        root,
+        ["rev-parse", "--verify", f"{revision}^{{commit}}"],
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip().splitlines()[0]
+
+
+def _merge_base(root: Path, left: str, right: str) -> str:
+    result = _git(root, ["merge-base", left, right], timeout=10, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise AgentQError(
+            compact_line(
+                result.stderr.strip() or "no merge base for the requested range", 300
+            )
+        )
+    return result.stdout.strip().splitlines()[0]
+
+
+def _split_range(value: str) -> tuple[str, str, bool]:
+    """Split ``A..B`` / ``A...B``; empty sides mean HEAD, as git does."""
+    if "..." in value:
+        left, _, right = value.partition("...")
+        return left or "HEAD", right or "HEAD", True
+    left, separator, right = value.partition("..")
+    if not separator:
+        raise AgentQError(f"diff range must use A..B or A...B: {value!r}")
+    return left or "HEAD", right or "HEAD", False
+
+
+@dataclass(frozen=True)
+class _ResolvedDiff:
+    """One normalized selection with revisions pinned once for every call."""
+
+    selection: DiffSelection
+    revision_args: tuple[str, ...]
+    revisions: tuple[str, ...]
+    mutable: bool
+    unborn: bool = False
+
+
+def _normalized_paths(root: Path, paths: list[str] | None) -> tuple[str, ...]:
+    return tuple(resolve_repo_path(root, path).relative for path in paths or [])
+
+
+def _resolve_diff_selection(root: Path, selection: DiffSelection) -> _ResolvedDiff:
+    """Resolve named commits to object ids before any subcommand runs.
+
+    Two-dot ranges keep both endpoints; a three-dot range is pinned to the
+    merge base of its endpoints so the comparison cannot drift with a branch.
+    A default comparison resolves HEAD explicitly (or the unborn index
+    comparison), and every index/worktree comparison stays marked mutable.
+    """
+    if selection.range_value:
+        left, right, three_dot = _split_range(selection.range_value)
+        left_oid = _resolve_revision(root, left)
+        right_oid = _resolve_revision(root, right)
+        if three_dot:
+            left_oid = _merge_base(root, left_oid, right_oid)
+        return _ResolvedDiff(
+            selection=replace(selection, range_value=f"{left_oid}..{right_oid}"),
+            revision_args=(left_oid, right_oid),
+            revisions=(left_oid, right_oid),
+            mutable=False,
+        )
+    if selection.base is not None:
+        base_oid = _resolve_revision(root, selection.base)
+        return _ResolvedDiff(
+            selection=replace(selection, base=base_oid),
+            revision_args=(base_oid,),
+            revisions=(base_oid,),
+            mutable=True,
+        )
+    if selection.staged:
+        return _ResolvedDiff(selection, ("--cached",), (), True)
+    if selection.unstaged:
+        return _ResolvedDiff(selection, (), (), True)
+    head = _optional_revision(root, "HEAD")
+    if head is None:
+        # Unborn HEAD: the default comparison is the index against the worktree.
+        return _ResolvedDiff(
+            replace(selection, unstaged=True), (), (), True, unborn=True
+        )
+    return _ResolvedDiff(
+        selection=replace(selection, base=head),
+        revision_args=(head,),
+        revisions=(head,),
+        mutable=True,
+    )
+
+
+def _diff_argv(
+    resolved: _ResolvedDiff, *extra: str, paths: list[str] | None = None
 ) -> list[str]:
-    if staged:
-        return ["--cached"]
-    if unstaged:
-        return []
-    if base:
-        return [base]
-    if range_value:
-        return [range_value]
-    head = run_cmd(["git", "rev-parse", "--verify", "HEAD"], cwd=root, timeout=5)
-    return ["HEAD"] if head.returncode == 0 else []
+    """The single request-to-git-argv function for every diff subcommand."""
+    args = ["diff", *_DIFF_COMMON, *extra, *resolved.revision_args]
+    if paths:
+        args += ["--", *paths]
+    return args
+
+
+def _diff_scope(selection: DiffSelection) -> str:
+    if selection.staged:
+        return "staged"
+    if selection.unstaged:
+        return "unstaged"
+    return selection.base or selection.range_value or "HEAD+working-tree"
+
+
+def _mutable_source_fingerprint(
+    root: Path, resolved: _ResolvedDiff, paths: list[str] | None = None
+) -> str | None:
+    """Digest of the mutable sources one comparison actually depends on.
+
+    A staged comparison depends on the index; git's ``--raw`` output carries
+    the index blob ids (and the pinned HEAD tree) and ignores worktree edits.
+    Comparisons against the worktree are driven by changed-path metadata for
+    the index-to-worktree shape, plus ``--raw`` only when the index is also a
+    compared side. Immutable revision ranges return ``None``.
+    """
+    if not resolved.mutable:
+        return None
+    path_args = list(paths) if paths else None
+    parts: list[Any] = []
+    staged = bool(resolved.selection.staged)
+    if staged or resolved.selection.unstaged:
+        raw = _git(
+            root,
+            _diff_argv(resolved, "--raw", "-z", "--full-index", paths=path_args),
+            timeout=30,
+            check=False,
+        )
+        parts.append([raw.returncode, raw.stdout])
+    if not staged:
+        listed = _git(
+            root,
+            _diff_argv(resolved, "--name-status", "-z", paths=path_args),
+            timeout=30,
+            check=False,
+        )
+        metadata: list[list[Any]] = []
+        for item in _parse_name_status(listed.stdout):
+            for key in ("path", "old_path"):
+                value = item.get(key)
+                if isinstance(value, str):
+                    metadata.append([value, _path_metadata(root / value)])
+        parts.append(sorted(metadata))
+    return fingerprint_id(parts)
+
+
+def validate_diff_guard(
+    root: Path, request: OperationRequest, guard: SourceGuard
+) -> None:
+    """Fail explicitly when a follow-up's mutable source snapshot is stale."""
+    selection = request.options
+    if request.operation != "git-diff" or not isinstance(selection, DiffSelection):
+        raise AgentQError("a diff source guard requires a git-diff request")
+    resolved = _resolve_diff_selection(root, selection)
+    current = _mutable_source_fingerprint(
+        root, resolved, list(guard.paths) if guard.paths else None
+    )
+    if current is None or current != guard.fingerprint:
+        raise AgentQError(
+            "diff source changed since this follow-up was created; rerun the "
+            "original git-diff command for a fresh comparison"
+        )
 
 
 def _parse_name_status(raw: str) -> list[dict[str, Any]]:
@@ -373,38 +561,16 @@ def _path_metadata(path: Path) -> tuple[int, int, int, int] | None:
 
 
 def _diff_state_metadata(
-    root: Path,
-    files: list[dict[str, Any]],
-    prefix: list[str],
-    raw: str,
-    *,
-    staged: bool,
+    resolved: _ResolvedDiff, fingerprint: str | None
 ) -> dict[str, Any]:
-    revision_args = [value for value in prefix if not value.startswith("-")]
-    revisions = (
-        _git(root, ["rev-parse", "--revs-only", *revision_args], check=False)
-        if revision_args
-        else None
-    )
-    state: dict[str, Any] = {
-        "raw": raw,
-        "revisions": (
-            revisions.stdout.splitlines()
-            if revisions and revisions.returncode == 0
-            else []
-        ),
+    """Repeat-suppression state: pinned revisions plus the source snapshot."""
+    return {
+        "revisions": list(resolved.revisions),
+        "relation": resolved.selection.range_value
+        or resolved.selection.base
+        or ("staged" if resolved.selection.staged else "worktree"),
+        "fingerprint": fingerprint,
     }
-    if not staged:
-        paths = sorted(
-            {
-                str(item[key])
-                for item in files
-                for key in ("path", "old_path")
-                if isinstance(item.get(key), str)
-            }
-        )
-        state["worktree"] = [(path, _path_metadata(root / path)) for path in paths]
-    return state
 
 
 def _stream_bounded_patch(
@@ -542,7 +708,6 @@ def _stream_hunk_index(
                 "symbol": compact_line(context, 120) if context else None,
                 "added": 0,
                 "deleted": 0,
-                "follow_up": f"agentq git-diff --patch --path {shlex.quote(path)} --max-lines 300",
             }
             current_risks = _path_risk_flags(current_item, current_sensitive)
             return True
@@ -572,6 +737,73 @@ def _stream_hunk_index(
     )
 
 
+def _follow_up_paths(item: dict[str, Any] | None) -> tuple[str, ...]:
+    """Path identities of one changed file, including a rename origin."""
+    if not item:
+        return ()
+    paths: list[str] = []
+    for key in ("path", "old_path"):
+        value = item.get(key)
+        if isinstance(value, str) and value and value not in paths:
+            paths.append(value)
+    return tuple(paths)
+
+
+def _attach_diff_follow_ups(
+    root: Path,
+    data: dict[str, Any],
+    request: OperationRequest,
+    resolved: _ResolvedDiff,
+    *,
+    fingerprint: str | None,
+) -> None:
+    """Attach typed hunk/patch follow-ups that preserve this comparison.
+
+    Each follow-up refines presentation only (patch view, selected paths, a
+    larger line cap) and keeps the original request as its source of truth. A
+    mutable-source guard is attached when the comparison depends on the index
+    or worktree, so a stale snapshot fails explicitly instead of recomputing a
+    different diff.
+    """
+    guard = (
+        SourceGuard(
+            kind=GIT_DIFF_GUARD_KIND,
+            fingerprint=fingerprint,
+            paths=resolved.selection.paths,
+        )
+        if fingerprint is not None
+        else None
+    )
+    if data.get("patch") is not None:
+        files = data.get("files")
+        paths = _follow_up_paths(files[0]) if files else ()
+        if paths:
+            data["continuation"] = query_follow_up_block(
+                request,
+                refinement=QueryRefinement(paths=paths, view="patch", max_lines=300),
+                guard=guard,
+                reason=("render-budget",),
+            )
+        return
+    by_path = {
+        str(item["path"]): item
+        for item in data.get("files") or []
+        if isinstance(item.get("path"), str)
+    }
+    for hunk in data.get("hunks") or []:
+        if not isinstance(hunk, dict):
+            continue
+        paths = _follow_up_paths(by_path.get(str(hunk.get("path"))))
+        if not paths:
+            continue
+        hunk["follow_up"] = query_follow_up_block(
+            request,
+            refinement=QueryRefinement(paths=paths, view="patch", max_lines=300),
+            guard=guard,
+            reason=("hunk-follow-up",),
+        )
+
+
 def diff_data(
     root: Path,
     *,
@@ -588,36 +820,36 @@ def diff_data(
     max_lines: int = 700,
     repeat: bool = False,
     budget: int = 0,
+    output_format: str = "text",
 ) -> dict[str, Any]:
-    prefix = _diff_prefix(
-        root,
+    path_values = list(_normalized_paths(root, paths))
+    selection = DiffSelection(
         staged=staged,
         unstaged=unstaged,
         base=base,
         range_value=range_value,
+        paths=tuple(path_values),
+        view="patch" if patch else "hunks" if hunks else "stat",
+        context=context,
+        max_files=max_files,
+        max_hunks=max_hunks,
+        max_lines=max_lines,
     )
-    path_args = ["--", *(paths or [])] if paths else []
-    common = ["--no-ext-diff", "--no-color", "--find-renames", *_DIFF_PREFIX_ARGS]
-    name = _git(root, ["diff", *common, "--name-status", "-z", *prefix, *path_args])
+    resolved = _resolve_diff_selection(root, selection)
+    before = _mutable_source_fingerprint(root, resolved)
+    name = _git(root, _diff_argv(resolved, "--name-status", "-z", paths=path_values))
     files = _parse_name_status(name.stdout)
-    numstat = _git(root, ["diff", *common, "--numstat", "-z", *prefix, *path_args])
+    numstat = _git(root, _diff_argv(resolved, "--numstat", "-z", paths=path_values))
     stats = _parse_numstat(numstat.stdout)
     for item in files:
         added, deleted = stats.get(item["path"], (None, None))
         item["added"], item["deleted"] = added, deleted
-    check = _git(root, ["diff", "--check", *prefix, *path_args], check=False)
-    raw = _git(
-        root, ["diff", *common, "--raw", "-z", "--full-index", *prefix, *path_args]
-    )
+    check = _git(root, _diff_argv(resolved, "--check", paths=path_values), check=False)
     total_added = sum(v[0] or 0 for v in stats.values())
     total_deleted = sum(v[1] or 0 for v in stats.values())
     data: dict[str, Any] = {
         "repo_root": str(root),
-        "scope": (
-            "staged"
-            if staged
-            else "unstaged" if unstaged else base or range_value or "HEAD+working-tree"
-        ),
+        "scope": _diff_scope(selection),
         "total_files": len(files),
         "total_added": total_added,
         "total_deleted": total_deleted,
@@ -638,9 +870,7 @@ def diff_data(
             "max_hunks": max_hunks,
             "max_lines": max_lines,
             "patch": patch,
-            "state": _diff_state_metadata(
-                root, files, prefix, raw.stdout, staged=staged
-            ),
+            "state": _diff_state_metadata(resolved, before),
         },
     )
     advice = diff_repeat_advice(root, cache_key)
@@ -656,7 +886,7 @@ def diff_data(
     if patch:
         bounded, patch_stats, truncated = _stream_bounded_patch(
             root,
-            ["diff", *common, f"--unified={context}", *prefix, *path_args],
+            _diff_argv(resolved, f"--unified={context}", paths=path_values),
             max_files=max_files,
             max_hunks=max_hunks,
             max_lines=max_lines,
@@ -668,13 +898,36 @@ def diff_data(
     elif hunks:
         index, hunk_stats, truncated = _stream_hunk_index(
             root,
-            ["diff", *common, "--unified=0", *prefix, *path_args],
+            _diff_argv(resolved, "--unified=0", paths=path_values),
             max_files=max_files,
             max_hunks=max_hunks,
             files=files,
         )
         data.update(
             {"hunks": index, "hunk_stats": hunk_stats, "hunks_truncated": truncated}
+        )
+    after = _mutable_source_fingerprint(root, resolved)
+    unstable = before is not None and before != after
+    if unstable:
+        data["source_unstable"] = True
+        data["coverage"] = with_failure(
+            data["coverage"], SOURCE_UNSTABLE, status=PARTIAL
+        )
+    if (patch or hunks) and not unstable:
+        _attach_diff_follow_ups(
+            root,
+            data,
+            request_for(
+                root,
+                "git-diff",
+                resolved.selection,
+                output_chars=budget,
+                output_format=output_format,
+                repeat=repeat,
+                context=RequestContext(session_id=session_id()),
+            ),
+            resolved,
+            fingerprint=after,
         )
     data["repeat"] = repeat
     data["coverage"] = merge_coverage(
@@ -687,9 +940,7 @@ def diff_data(
     # only after the final bytes are written and flushed without render
     # truncation. The digest covers the full collected result, so an identical
     # repeat renders identical bytes.
-    data.setdefault("_agentq_internal", {})["delivery"] = {
-        "result": {"key": cache_key}
-    }
+    data.setdefault("_agentq_internal", {})["delivery"] = {"result": {"key": cache_key}}
     return data
 
 
@@ -706,14 +957,27 @@ def _patch_render_blocks(patch: str) -> list[str]:
     return blocks
 
 
+def _follow_up_command(block: Any) -> str | None:
+    """Display command of a continuation block, cursor or literal."""
+    if isinstance(block, dict):
+        command = block.get("command")
+        return command if isinstance(command, str) and command else None
+    if isinstance(block, str) and block:
+        return block
+    return None
+
+
 def _hunk_render_record(hunk: dict[str, Any]) -> str:
     symbol = f" · {hunk['symbol']}" if hunk.get("symbol") else ""
     risks = f"; risks={','.join(hunk['risk_flags'])}" if hunk.get("risk_flags") else ""
-    return (
+    record = (
         f"  {hunk['path']}:{hunk.get('new_start') or '?'} {hunk['header']}{symbol} "
-        f"[+{hunk['added']} -{hunk['deleted']}{risks}]\n"
-        f"    inspect: {hunk['follow_up']}"
+        f"[+{hunk['added']} -{hunk['deleted']}{risks}]"
     )
+    command = _follow_up_command(hunk.get("follow_up"))
+    if command:
+        record += f"\n    inspect: {command}"
+    return record
 
 
 def render_diff(data: dict[str, Any], *, budget: int = 0) -> str:
@@ -741,6 +1005,10 @@ def render_diff(data: dict[str, Any], *, budget: int = 0) -> str:
         )
     if data.get("files_truncated"):
         lines.append("File list truncated; request a path-scoped diff.")
+    if data.get("source_unstable"):
+        lines.append(
+            "Diff source changed while collecting; this snapshot is partial — rerun the diff."
+        )
     if not data["diff_check_ok"]:
         lines.append("\nwhitespace/errors:")
         lines.extend(f"  {x}" for x in data["diff_check"])
@@ -749,15 +1017,12 @@ def render_diff(data: dict[str, Any], *, budget: int = 0) -> str:
     if data.get("patch") is not None:
         lines.append("patch:")
         records = _patch_render_blocks(data["patch"]) or ["(no textual patch)"]
-        path = (
-            str(data.get("files", [{}])[0].get("path", "PATH"))
-            if data.get("files")
-            else "PATH"
-        )
-        omission = (
-            f"… {{count}} complete patch blocks omitted by render budget; "
-            f"continue: agentq git-diff --patch --path {shlex.quote(path)} --max-lines 300"
-        )
+        command = _follow_up_command(data.get("continuation"))
+        if command:
+            omission = (
+                f"… {{count}} complete patch blocks omitted by render budget; "
+                f"continue: {command}"
+            )
         if data.get("patch_truncated"):
             records.append(
                 "Patch source cap reached. Narrow by --path before expanding."

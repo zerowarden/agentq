@@ -100,6 +100,14 @@ def _inspect_options(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="force source windows already returned in the active context",
     )
+    p.add_argument(
+        "--candidate",
+        metavar="ID",
+        help=(
+            "select a declaration candidate by its opaque candidate id "
+            "(requires --intent edit)"
+        ),
+    )
 
 
 COMMANDS = (

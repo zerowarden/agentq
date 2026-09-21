@@ -74,6 +74,7 @@ testpaths = ["skills/agent-toolkit/tests"]
 include = [
     "skills/agent-toolkit/scripts/agentq_lib/cli",
     "skills/agent-toolkit/scripts/agentq_lib/contracts",
+    "skills/agent-toolkit/scripts/agentq_lib/continuations.py",
     "skills/agent-toolkit/scripts/agentq_lib/evidence.py",
     "skills/agent-toolkit/scripts/agentq_lib/emission.py",
     "skills/agent-toolkit/scripts/agentq_lib/process.py",

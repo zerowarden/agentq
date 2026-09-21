@@ -23,7 +23,6 @@ __all__ = [
     "CheckStatus",
     "CleanupStatus",
     "ComparisonIdentity",
-    "ContinuationRequest",
     "ContractError",
     "DeliveryReceipt",
     "DiffSelection",
@@ -92,7 +91,6 @@ _EXPORTS = {
     ),
     "request": (
         "Budget",
-        "ContinuationRequest",
         "DiffSelection",
         "OperationRequest",
         "OutputFormat",

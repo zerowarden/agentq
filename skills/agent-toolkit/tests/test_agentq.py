@@ -752,12 +752,19 @@ class AgentQIntegrationTest(unittest.TestCase):
         self.assertIn(
             "suppressions", by_path["packages/a/src/suppressed.ts"]["risk_flags"]
         )
+        follow_ups = [item["follow_up"] for item in data["hunks"]]
         self.assertTrue(
             all(
-                item["follow_up"].startswith("agentq git-diff --patch --path ")
-                for item in data["hunks"]
+                block["command"].startswith("agentq continue ") and block["cursor"]
+                for block in follow_ups
             )
         )
+        continued = self.aq(
+            "continue", by_path["packages/a/src/public.ts"]["follow_up"]["cursor"]
+        )
+        patch = json.loads(continued.stdout)["patch"]
+        self.assertIn("packages/a/src/public.ts", patch)
+        self.assertIn("changedApi", patch)
 
     def test_sensitive_git_diff_omits_body(self) -> None:
         (self.repo / ".env").write_text(
@@ -3330,7 +3337,7 @@ class AgentQIntegrationTest(unittest.TestCase):
 
     def test_continuation_cursors_expire(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq_lib import context_cache as cache_module
+            from agentq_lib import continuations as continuations_module
             from agentq_lib import state as state_module
 
         env = {
@@ -3339,14 +3346,14 @@ class AgentQIntegrationTest(unittest.TestCase):
             "AGENTQ_STATE_DB": str(Path(self.temp.name) / "ttl.db"),
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            stored = cache_module.remember_continuation(
-                self.repo, "agentq files zz-none"
+            stored = continuations_module.store_block(
+                self.repo, {"command": "agentq files zz-none"}
             )
             self.assertIsNotNone(stored)
             self.assertTrue(stored["expires_at"])
-            record = cache_module.continuation_record(self.repo, stored["cursor"])
-            self.assertIsNotNone(record)
-            self.assertEqual(record["command"], "agentq files zz-none")
+            resolved = continuations_module.load_cursor(self.repo, stored["cursor"])
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved.record.argv, ("agentq", "files", "zz-none"))
 
             reader = sqlite3.connect(state_module.database_path())
             try:
@@ -3355,7 +3362,7 @@ class AgentQIntegrationTest(unittest.TestCase):
             finally:
                 reader.close()
             self.assertIsNone(
-                cache_module.continuation_record(self.repo, stored["cursor"])
+                continuations_module.load_cursor(self.repo, stored["cursor"])
             )
 
     def test_inspect_python_and_tsnav_continuations_carry_cursors(self) -> None:

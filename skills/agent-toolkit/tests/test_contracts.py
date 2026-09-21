@@ -4,7 +4,6 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
-import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +12,8 @@ from types import SimpleNamespace
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from agentq_lib import evidence  # noqa: E402
+from agentq_lib import continuations, evidence  # noqa: E402
+from agentq_lib.common import AgentQError  # noqa: E402
 from agentq_lib.contracts import (  # noqa: E402
     AcknowledgmentStatus,
     ApplyPolicy,
@@ -24,7 +24,6 @@ from agentq_lib.contracts import (  # noqa: E402
     CheckResult,
     CheckSpec,
     CheckStatus,
-    ContinuationRequest,
     ContractError,
     DeliveryReceipt,
     DiffSelection,
@@ -219,48 +218,161 @@ class OperationRequestTests(unittest.TestCase):
             OperationRequest.from_wire(wire, SearchOptions.from_wire)
 
 
-class ContinuationRequestTests(unittest.TestCase):
-    def _record(self, command: str = "agentq search needle --path src") -> dict:
-        return {"command": command, "workspace": None, "expires_at": 200.0}
-
-    def _decode(self, record: dict) -> ContinuationRequest:
-        return ContinuationRequest.from_record(
-            record,
-            cursor="c1",
+class ContinuationWireTests(unittest.TestCase):
+    def _request(self) -> OperationRequest:
+        return OperationRequest(
+            operation="git-diff",
+            request_id="r1",
             repo_id="repo",
-            context_id="ctx",
-            now=100.0,
+            worktree_id="wt",
+            options=DiffSelection(staged=True, paths=("src",), view="hunks"),
+            budget=Budget(output_chars=120),
+            output_format="json",
         )
 
-    def test_valid_command_decodes(self) -> None:
-        request = self._decode(self._record())
-        self.assertEqual(request.operation, "search")
-        self.assertEqual(request.argv[1], "search")
+    def _follow_up(self) -> continuations.QueryFollowUp:
+        return continuations.QueryFollowUp(
+            request=self._request(),
+            refinement=continuations.QueryRefinement(
+                paths=("src/a.py",), view="patch", max_lines=300
+            ),
+            guard=continuations.SourceGuard(
+                kind="git-diff-source", fingerprint="a" * 64, paths=("src",)
+            ),
+            reason=("hunk-follow-up",),
+        )
 
-    def test_rejects_unknown_operation_and_foreign_executable(self) -> None:
-        with self.assertRaises(ContractError):
-            self._decode(self._record("agentq continue other"))
-        with self.assertRaises(ContractError):
-            self._decode(self._record("rm -rf /"))
+    def test_query_follow_up_round_trip(self) -> None:
+        follow_up = self._follow_up()
+        wire = follow_up.to_wire()
+        self.assertEqual(continuations.QueryFollowUp.from_wire(wire), follow_up)
+        self.assertEqual(wire["kind"], "query-follow-up")
+        self.assertEqual(wire["schema"], "agentq.continuation/v2")
 
-    def test_rejects_expired_and_unknown_fields(self) -> None:
+    def test_rejects_unknown_schema_and_kind(self) -> None:
+        wire = self._follow_up().to_wire()
+        wire["schema"] = "agentq.continuation/v1"
         with self.assertRaises(ContractError):
-            self._decode(
-                {"command": "agentq search x", "workspace": None, "expires_at": 50.0}
+            continuations.QueryFollowUp.from_wire(wire)
+        wire = self._follow_up().to_wire()
+        wire["kind"] = "page"
+        with self.assertRaises(ContractError):
+            continuations.QueryFollowUp.from_wire(wire)
+        with self.assertRaises(ContractError):
+            continuations.parse_block(
+                {"kind": "unknown-kind", "schema": "agentq.continuation/v2"}
             )
+
+    def test_refinement_rejects_mode_and_unknown_fields(self) -> None:
+        for payload in (
+            {"staged": True},
+            {"range": "a..b"},
+            {"view": "everything"},
+            {"max_lines": 0},
+            {"paths": ["/etc/passwd"]},
+        ):
+            with self.assertRaises(ContractError):
+                continuations.QueryRefinement.from_wire(payload)
+
+    def test_guard_requires_a_guarded_operation(self) -> None:
         with self.assertRaises(ContractError):
-            self._decode(
-                {
-                    "command": "agentq search x",
-                    "workspace": None,
-                    "expires_at": 200.0,
-                    "injected": 1,
-                }
+            continuations.SourceGuard(kind="other-guard", fingerprint="a" * 64)
+        search_request = OperationRequest(
+            operation="search",
+            request_id="r2",
+            repo_id="repo",
+            worktree_id="wt",
+            options=SearchOptions(query="needle"),
+        )
+        with self.assertRaises(ContractError):
+            continuations.QueryFollowUp(
+                request=search_request,
+                guard=continuations.SourceGuard(
+                    kind="git-diff-source", fingerprint="a" * 64
+                ),
             )
 
-    def test_rejects_nul_in_argv(self) -> None:
+    def test_artifact_page_position_and_kind_validation(self) -> None:
+        page = continuations.artifact_page_block(
+            artifact_id="abc123",
+            position=7,
+            request_id="r1",
+            operation="search",
+            repo_id_value="repo",
+            worktree_id="wt",
+            reason=("scan-cap",),
+        )
+        self.assertEqual(
+            continuations.ArtifactPage.from_wire(page).position,
+            7,
+        )
+        for position in (-1, True, "3"):
+            payload = dict(page)
+            payload["position"] = position
+            with self.assertRaises(ContractError):
+                continuations.ArtifactPage.from_wire(payload)
+        payload = dict(page)
+        payload["kind"] = "query-follow-up"
         with self.assertRaises(ContractError):
-            self._decode(self._record("agentq search 'x\x00y'"))
+            continuations.ArtifactPage.from_wire(payload)
+
+    def test_legacy_command_block_validates_argv(self) -> None:
+        record = continuations.parse_block({"command": "agentq files zz-none"})
+        self.assertIsNone(record)
+        legacy = continuations.LegacyArgv.from_command("agentq search needle")
+        self.assertEqual(legacy.argv, ("agentq", "search", "needle"))
+        for command in ("rm -rf /", "agentq continue other", "agentq"):
+            with self.assertRaises(ContractError):
+                continuations.LegacyArgv.from_command(command)
+
+    def test_producer_blocks_strip_display_fields(self) -> None:
+        block = continuations.query_follow_up_block(
+            self._request(),
+            refinement=continuations.QueryRefinement(view="patch"),
+            reason=("render-budget",),
+            omitted={"matches": 4},
+        )
+        self.assertIn("command", block)
+        self.assertIn("omitted", block)
+        record = continuations.parse_block(block)
+        self.assertIsInstance(record, continuations.QueryFollowUp)
+        self.assertEqual(record.reason, ("render-budget",))
+        self.assertNotIn("omitted", record.to_wire())
+
+    def test_refinement_applies_only_allowed_fields(self) -> None:
+        request = self._request()
+        refined = continuations.apply_refinement(
+            request,
+            continuations.QueryRefinement(
+                paths=("src/a.py",), view="patch", max_lines=300, output_chars=900
+            ),
+        )
+        self.assertEqual(refined.options.view, "patch")
+        self.assertEqual(refined.options.paths, ("src/a.py",))
+        self.assertEqual(refined.options.base, request.options.base)
+        self.assertEqual(refined.budget.output_chars, 900)
+        with self.assertRaises(ContractError):
+            continuations.apply_refinement(
+                request, continuations.QueryRefinement(scan_cap=10)
+            )
+
+    def test_dispatch_argv_uses_the_typed_request(self) -> None:
+        record = self._follow_up()
+        argv = continuations.dispatch_argv(record)
+        self.assertEqual(argv[:3], ["agentq", "git-diff", "--staged"])
+        self.assertIn("--patch", argv)
+        self.assertNotIn("--hunks", argv)
+        with self.assertRaises(AgentQError):
+            continuations.dispatch_argv(
+                continuations.ArtifactPage(
+                    artifact_id="abc123",
+                    position=0,
+                    request_id="r1",
+                    operation="search",
+                    repo_id="repo",
+                    worktree_id="wt",
+                )
+            )
 
 
 class ProviderResultTests(unittest.TestCase):
@@ -545,9 +657,7 @@ class MutationContractTests(unittest.TestCase):
                     )
 
     def test_inexact_plans_are_refused_for_application(self) -> None:
-        plan = sample_plan(
-            files=[{"path": "a.txt", "sha256": "a" * 64, "matches": 1}]
-        )
+        plan = sample_plan(files=[{"path": "a.txt", "sha256": "a" * 64, "matches": 1}])
         decoded = MutationPlan.from_wire(plan)
         self.assertFalse(decoded.exact)
         with self.assertRaises(ContractError):
@@ -684,13 +794,8 @@ class RequestNormalizationTests(unittest.TestCase):
         argv = requests.request_argv(decoded)
         self.assertEqual(argv[0], "agentq")
         self.assertIn("--path", argv)
-        continuation = ContinuationRequest.from_record(
-            {"command": shlex.join(argv), "workspace": None, "expires_at": None},
-            cursor="c1",
-            repo_id="repo",
-            context_id="ctx",
-        )
-        self.assertEqual(continuation.operation, "search")
+        follow_up = continuations.QueryFollowUp(request=decoded)
+        self.assertEqual(continuations.dispatch_argv(follow_up), argv)
 
     def test_request_json_rejects_unknown_operation(self) -> None:
         from agentq_lib import requests

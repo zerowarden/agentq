@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,14 +12,8 @@ from .contracts.result import EvidenceFragment
 from .evidence import SourceRef
 from .runtime import env_enabled, repo_id, session_id, stable_id
 from .state import (
-    load_continuation as _load_continuation_state,
-)
-from .state import (
     receipt_fragment_hits,
     receipt_fragment_payloads,
-)
-from .state import (
-    store_continuation as _store_continuation_state,
 )
 from .tasking import current_task_id
 from .workspace import changed_files
@@ -580,72 +573,3 @@ def extract_delivered_fragments(
             }
         )
     return evidence, rows
-
-
-def _continuation_context_id(root: Path) -> str:
-    identity = _context(root)
-    return identity[0] if identity else ""
-
-
-def remember_continuation(root: Path, command: str) -> dict[str, Any] | None:
-    """Store a reproducible continuation command under the current session scope.
-
-    Returns {"cursor", "expires_at"} (ISO 8601 UTC expiry), or None when the
-    local state store is unavailable; callers then keep the full command.
-    """
-    stored = _store_continuation_state(
-        repo_id(root),
-        _continuation_context_id(root),
-        command,
-        workspace=workspace_identity(root),
-        now=time.time(),
-    )
-    if stored is None:
-        return None
-    return {
-        "cursor": stored["cursor"],
-        "expires_at": datetime.fromtimestamp(
-            stored["expires_at"], tz=timezone.utc
-        ).isoformat(),
-    }
-
-
-def continuation_record(root: Path, cursor: str) -> dict[str, Any] | None:
-    """Load a continuation cursor scoped to this repository and session.
-
-    Raises AgentQError when the workspace changed since the cursor was created;
-    the recorded result can no longer be resumed reliably.
-    """
-    record = _load_continuation_state(
-        repo_id(root),
-        _continuation_context_id(root),
-        cursor,
-        now=time.time(),
-    )
-    if record is None:
-        return None
-    if record["workspace"] and record["workspace"] != workspace_identity(root):
-        raise AgentQError(
-            "workspace changed since this continuation was created; rerun the original command"
-        )
-    return record
-
-
-def continuation_request(root: Path, cursor: str):
-    """Load and strictly validate an executable continuation request."""
-    from .contracts._base import ContractError
-    from .contracts.request import ContinuationRequest
-
-    record = continuation_record(root, cursor)
-    if record is None:
-        return None
-    try:
-        return ContinuationRequest.from_record(
-            record,
-            cursor=cursor,
-            repo_id=repo_id(root),
-            context_id=_continuation_context_id(root),
-            now=time.time(),
-        )
-    except ContractError as exc:
-        raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc

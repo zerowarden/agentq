@@ -63,20 +63,50 @@ def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
 
 
 def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq_lib.context_cache import continuation_request
+    from agentq_lib.continuations import (
+        ArtifactPage,
+        QueryFollowUp,
+        dispatch_argv,
+        load_cursor,
+        resolve_page_handler,
+    )
+    from agentq_lib.contracts._base import ContractError
 
     from . import execute
 
-    request = continuation_request(root, args.cursor)
-    if request is None:
+    resolved = load_cursor(root, args.cursor)
+    if resolved is None:
         raise AgentQError(f"unknown or expired continuation cursor: {args.cursor}")
-    argv = list(request.argv)[1:]
+    record = resolved.record
+    if isinstance(record, ArtifactPage):
+        handler = resolve_page_handler(record.operation)
+        if handler is None:
+            raise AgentQError(
+                f"artifact page continuation for {record.operation!r} is not "
+                "available; rerun the original command"
+            )
+        return handler(args, root, record)
+    if isinstance(record, QueryFollowUp) and record.guard is not None:
+        _validate_follow_up_source(root, record)
+    try:
+        argv = dispatch_argv(record)[1:]
+    except ContractError as exc:
+        raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc
     try:
         nested = build_parser().parse_args(argv)
     except (ValueError, AgentQError) as exc:
         raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc
     nested.repo = str(root)
     return execute(nested, root)
+
+
+def _validate_follow_up_source(root: Path, record) -> None:
+    """Reject a follow-up whose guarded mutable source has changed."""
+    from agentq_lib.gitops import validate_diff_guard
+
+    if record.request.operation != "git-diff":
+        raise AgentQError(f"unsupported continuation guard: {record.guard.kind!r}")
+    validate_diff_guard(root, record.request, record.guard)
 
 
 def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
@@ -111,6 +141,7 @@ def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
             repeat=args.repeat,
             budget=args.budget,
             output_format=args.format,
+            candidate=args.candidate,
         ),
         render_inspect,
     )

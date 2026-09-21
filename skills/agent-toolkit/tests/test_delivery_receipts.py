@@ -63,8 +63,11 @@ class DeliveryHarness(unittest.TestCase):
         self.git("config", "user.email", "agentq@example.invalid")
         self.git("config", "user.name", "AgentQ Test")
         (self.repo / "pkg").mkdir()
+        # Filler lines must stay valid Python: a parse failure elsewhere in the
+        # requested scope is incomplete acquisition and cannot resolve an edit
+        # target automatically.
         (self.repo / "pkg" / "mod.py").write_text(
-            "".join(f"line {index}\n" for index in range(1, 21)), encoding="utf-8"
+            "".join(f"# line {index}\n" for index in range(1, 21)), encoding="utf-8"
         )
         (self.repo / "pkg" / "sym.py").write_text(
             "def target():\n    return 1\n", encoding="utf-8"

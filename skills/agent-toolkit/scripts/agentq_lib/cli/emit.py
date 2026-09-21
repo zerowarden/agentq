@@ -222,23 +222,35 @@ def render_context_repeat(data: dict[str, Any]) -> str:
     )
 
 
-def _continuation_blocks(data: dict[str, Any]):
-    """Every continuation block, in the bounded two-level scope walk.
-
-    Covers the top level, evidence wrappers (source), and provider results
-    (semantic, python, edit bundles). Both cursor attachment and the
-    budget-envelope check must see exactly the same blocks.
-    """
-    scopes = [data]
+def _nested_continuation_scopes(data: dict[str, Any]):
+    """Top-level and bounded nested mappings that may hold a continuation."""
+    yield data
     for value in data.values():
-        if isinstance(value, dict):
-            scopes.append(value)
-            for inner in value.values():
-                if isinstance(inner, dict):
-                    scopes.append(inner)
-    for scope in scopes:
+        if not isinstance(value, dict):
+            continue
+        yield value
+        for inner in value.values():
+            if isinstance(inner, dict):
+                yield inner
+
+
+def _continuation_blocks(data: dict[str, Any]):
+    """Every continuation block, in the bounded scope walk.
+
+    Covers the top level, evidence wrappers (source), provider results
+    (semantic, python, edit bundles), and the per-record follow-ups of a
+    bounded hunk index. Cursor attachment and the budget-envelope check must
+    see exactly the same blocks.
+    """
+    for scope in _nested_continuation_scopes(data):
         for key in ("continuation", "budget_continuation"):
             block = scope.get(key)
+            if isinstance(block, dict):
+                yield block
+    hunks = data.get("hunks")
+    if isinstance(hunks, list):
+        for hunk in hunks:
+            block = hunk.get("follow_up") if isinstance(hunk, dict) else None
             if isinstance(block, dict):
                 yield block
 
@@ -285,23 +297,23 @@ def _require_usable_budget(
 
 
 def _attach_continuation_cursors(root: Path, data: dict[str, Any]) -> None:
-    """Replace verbose continuation commands with short local cursor tokens.
+    """Replace producer continuation blocks with short local cursor tokens.
 
-    `agentq continue CURSOR` replays the stored command after session and
-    workspace validation, so reproducibility survives without spending render
-    budget on verbose command text.
+    Typed blocks are validated and stored as typed records; legacy command
+    blocks from unmigrated producers are validated into argv records. Both
+    become ``agentq continue CURSOR`` for display, and typed records are only
+    ever executed from their stored request, never from command text.
     """
-    from agentq_lib.context_cache import remember_continuation
+    from agentq_lib.continuations import attach_cursor
+    from agentq_lib.contracts._base import ContractError
 
     for block in _continuation_blocks(data):
-        if not isinstance(block.get("command"), str):
+        try:
+            attach_cursor(root, block)
+        except ContractError:
+            # A malformed producer block stays visible in its literal form
+            # instead of failing the whole command result.
             continue
-        stored = remember_continuation(root, str(block["command"]))
-        if not stored:
-            continue
-        block["command"] = f"agentq continue {stored['cursor']}"
-        block["cursor"] = stored["cursor"]
-        block["expires_at"] = stored["expires_at"]
 
 
 def _mark_operation_delivery(data: dict[str, Any], key: str) -> None:

@@ -53,6 +53,7 @@ PARSE_ERROR = "parse_error"
 PROVIDER_ERROR = "provider_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 RENDER_OMISSION = "render_omission"
+SOURCE_UNSTABLE = "source_unstable"
 
 EXACT = "exact"
 LOWER_BOUND = "lower_bound"

@@ -2,14 +2,12 @@
 
 ``OperationRequest`` separates semantic query identity (``options``) from
 presentation options (``output_format``, ``budget.output_chars``). The accepted
-request cannot silently change during a continuation: a ``ContinuationRequest``
-is decoded from the persisted command and re-validated before execution.
+request cannot silently change during a continuation: typed continuations
+persist the request itself and re-validate it before execution.
 """
 
 from __future__ import annotations
 
-import shlex
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Generic, TypeVar
@@ -31,8 +29,6 @@ from ._base import (
 )
 
 REQUEST_SCHEMA = "agentq.request/v1"
-CONTINUATION_SCHEMA = "agentq.continuation/v1"
-CONTINUATION_TTL_SECONDS = 60 * 60
 
 KNOWN_OPERATIONS = frozenset(
     {
@@ -468,96 +464,4 @@ class OperationRequest(Generic[OptionsT]):
                 payload.get("output_format", "text"), f"{what}.output_format"
             ),
             repeat=require_bool(payload.get("repeat", False), f"{what}.repeat"),
-        )
-
-
-@dataclass(frozen=True)
-class ContinuationRequest:
-    """An executable continuation decoded from persisted state and re-validated."""
-
-    cursor: str
-    operation: str
-    argv: tuple[str, ...]
-    repo_id: str
-    context_id: str
-    workspace_id: str | None = None
-    expires_at: float | None = None
-    schema: str = CONTINUATION_SCHEMA
-
-    def __post_init__(self) -> None:
-        require_schema(self.schema, CONTINUATION_SCHEMA, "continuation schema")
-        require_str(self.cursor, "continuation.cursor")
-        require_tag(self.operation, "continuation.operation")
-        if self.operation not in KNOWN_OPERATIONS - {"continue"}:
-            raise ContractError(
-                f"continuation operation is not executable: {self.operation!r}"
-            )
-        if not self.argv or not all(
-            isinstance(item, str) and item for item in self.argv
-        ):
-            raise ContractError(
-                "continuation.argv must contain at least the command name"
-            )
-        if any("\x00" in item for item in self.argv):
-            raise ContractError("continuation.argv contains a NUL byte")
-        require_str(self.repo_id, "continuation.repo_id")
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "schema": self.schema,
-            "cursor": self.cursor,
-            "operation": self.operation,
-            "command": shlex.join(self.argv),
-            "repo_id": self.repo_id,
-            "context_id": self.context_id,
-            "workspace_id": self.workspace_id,
-            "expires_at": self.expires_at,
-        }
-
-    @classmethod
-    def from_record(
-        cls,
-        record: Mapping[str, Any],
-        *,
-        cursor: str,
-        repo_id: str,
-        context_id: str,
-        now: float | None = None,
-        what: str = "continuation record",
-    ) -> ContinuationRequest:
-        payload = require_mapping(record, what)
-        reject_unknown_keys(payload, ("command", "workspace", "expires_at"), what)
-        command = require_str(payload.get("command"), f"{what}.command")
-        try:
-            argv = tuple(shlex.split(command))
-        except ValueError as exc:
-            raise ContractError(f"{what}.command is not parseable: {exc}") from exc
-        if len(argv) < 2:
-            raise ContractError(f"{what}.command must invoke an agentq operation")
-        executable = argv[0].rsplit("/", 1)[-1]
-        if executable not in {"agentq", "agentq.py"}:
-            raise ContractError(f"{what}.command must start with the agentq executable")
-        operation = require_tag(argv[1], f"{what}.operation")
-        if operation not in KNOWN_OPERATIONS - {"continue"}:
-            raise ContractError(
-                f"{what}.command is not an executable operation: {operation!r}"
-            )
-        expires = payload.get("expires_at")
-        if expires is not None and (
-            isinstance(expires, bool) or not isinstance(expires, (int, float))
-        ):
-            raise ContractError(f"{what}.expires_at must be a number")
-        if now is not None and expires is not None and float(expires) <= now:
-            raise ContractError("continuation has expired")
-        workspace = payload.get("workspace")
-        if workspace is not None and not isinstance(workspace, str):
-            raise ContractError(f"{what}.workspace must be a string or null")
-        return cls(
-            cursor=cursor,
-            operation=operation,
-            argv=argv,
-            repo_id=repo_id,
-            context_id=context_id,
-            workspace_id=workspace,
-            expires_at=None if expires is None else float(expires),
         )
