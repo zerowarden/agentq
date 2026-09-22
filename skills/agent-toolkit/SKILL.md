@@ -1,11 +1,6 @@
 ---
 name: agent-toolkit
 description: Toolkit maintenance only: validate agentq, diagnose local dependencies/privacy behavior, install optional FOSS tools, or inspect command recipes. Never use implicitly for normal coding, search, Git inspection, or verification.
-license: MIT
-compatibility: Linux or macOS; Python 3.10+, Git, and ripgrep. Designed for ~/.agents/skills and compatible with OpenCode Agent Skills discovery.
-metadata:
-  version: "1.8.0"
-  network: "runtime-offline"
 ---
 
 # Agent Toolkit

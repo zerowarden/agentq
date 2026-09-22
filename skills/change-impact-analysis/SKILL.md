@@ -1,11 +1,6 @@
 ---
 name: change-impact-analysis
 description: Estimate the likely blast radius before changing or renaming a shared symbol, file, package, API, contract, schema, migration, config key, or build surface. Combines bounded lexical/import evidence, related tests and docs/config references, package ownership, and optional workspace dependencies. Use for planning and risk classification, not as a semantic proof.
-license: MIT
-compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. An LSP-capable agent harness improves semantic confirmation.
-metadata:
-  version: "1.8.0"
-  mutation: "none"
 ---
 
 # Change Impact Analysis

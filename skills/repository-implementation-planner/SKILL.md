@@ -6,13 +6,6 @@ description: >-
   and applicable design with agentq, define concrete behavior and contracts, select
   one coherent approach, and produce a dependency-ordered Markdown handoff another
   coding agent can execute. Planning only; do not implement the change.
-license: MIT
-compatibility: >-
-  Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+.
-  TypeScript semantic inspection additionally requires Node.js and project TypeScript.
-metadata:
-  version: "2.0.0"
-  mutation: "explicitly-requested-plan-artifact-only"
 ---
 
 # Repository Implementation Planner

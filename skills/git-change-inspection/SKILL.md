@@ -1,11 +1,6 @@
 ---
 name: git-change-inspection
 description: Use for Git status, diff, history, patch review, and high-signal patch-quality audit. MUST use bounded agentq git-* and audit commands instead of raw Git inspection whenever an equivalent wrapper exists. Read-only: never commit, reset, checkout, stash, clean, rebase, push, or rewrite history.
-license: MIT
-compatibility: Requires the bundled agent-toolkit and Git. Difftastic is optional for one-file syntax-aware diffs.
-metadata:
-  version: "1.8.0"
-  mutation: "none"
 ---
 
 # Git Change Inspection

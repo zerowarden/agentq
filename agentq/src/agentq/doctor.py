@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import platform
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,21 +28,9 @@ TOOLS = [
 
 def _skill_installation_state() -> dict[str, Any]:
     skills_root = Path(__file__).resolve().parents[3] / "skills"
-    skill_rows: list[dict[str, Any]] = []
-    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
-        try:
-            text = skill_file.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        match = re.search(r"(?m)^\s*version:\s*[\"']?([^\"'\s]+)", text)
-        version = match.group(1) if match else None
-        skill_rows.append(
-            {
-                "name": skill_file.parent.name,
-                "version": version,
-                "current": version == VERSION,
-            }
-        )
+    skills = sorted(
+        skill_file.parent.name for skill_file in skills_root.glob("*/SKILL.md")
+    )
     path_agentq = find_executable("agentq")
     runtime_agentq = Path(sys.executable).with_name("agentq")
     path_matches_runtime: bool | None = None
@@ -58,10 +45,8 @@ def _skill_installation_state() -> dict[str, Any]:
         "path_agentq": path_agentq,
         "runtime_agentq": str(runtime_agentq),
         "path_matches_runtime": path_matches_runtime,
-        "skills": skill_rows,
-        "skills_current": sum(bool(row["current"]) for row in skill_rows),
-        "skills_total": len(skill_rows),
-        "stale_skills": [row for row in skill_rows if not row["current"]],
+        "skills": skills,
+        "skills_total": len(skills),
     }
 
 
@@ -127,11 +112,9 @@ def render_doctor(data: dict[str, Any], *, budget: int = 0) -> str:
                 f"  PATH agentq: {installation.get('path_agentq') or 'not found'}",
                 f"  runtime:     {installation.get('runtime_agentq')}",
                 f"  PATH matches runtime: {path_state}",
-                f"  skills: {installation.get('skills_current', 0)}/{installation.get('skills_total', 0)} at {data['agentq_version']}",
+                f"  skills: {installation.get('skills_total', 0)} installed",
             ]
         )
-        for row in installation.get("stale_skills", []):
-            lines.append(f"    stale: {row['name']} {row.get('version') or 'unknown'}")
     lines.append("\ntools:")
     for item in data["tools"]:
         state = item["version"] if item["installed"] else "MISSING"

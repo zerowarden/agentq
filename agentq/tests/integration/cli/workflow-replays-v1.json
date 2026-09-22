@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "baseline_version": "pre-phase-4-v1",
+  "baseline_version": "pre-consolidation-v1",
   "minimum_call_reduction_percent": 25,
   "minimum_visible_reduction_percent": 20,
   "baseline": {

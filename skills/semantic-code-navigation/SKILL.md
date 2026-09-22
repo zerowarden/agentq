@@ -1,11 +1,6 @@
 ---
 name: semantic-code-navigation
 description: Use when an exact TypeScript/JavaScript symbol or exact source position is known and semantic definition, references, and implementations matter. Prefer one agentq ts-nav overview or agentq inspect call; use lexical repo-exploration only for unknown names, strings/configuration, or semantic-project failure.
-license: MIT
-compatibility: Requires the bundled agent-toolkit, Node.js, and a TypeScript dependency resolvable from the repository. Uses only local project files.
-metadata:
-  version: "1.8.0"
-  mutation: "none"
 ---
 
 # Semantic Code Navigation

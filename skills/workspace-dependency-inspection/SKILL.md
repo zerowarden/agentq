@@ -1,11 +1,6 @@
 ---
 name: workspace-dependency-inspection
 description: Inspect local monorepo package dependencies and dependents from package.json and Cargo workspace manifests. Use to identify owning packages, package-level fan-in or fan-out, cycles, and downstream packages before cross-package changes. Do not use this as a source-import, runtime-loading, or semantic symbol graph.
-license: MIT
-compatibility: Requires the bundled agent-toolkit and Python 3.10+. Cargo metadata is used locally and offline when Cargo is available.
-metadata:
-  version: "1.8.0"
-  mutation: "none"
 ---
 
 # Workspace Dependency Inspection

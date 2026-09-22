@@ -1,11 +1,6 @@
 ---
 name: repo-exploration
 description: Use for repository structure, unknown symbols, literals/configuration, file discovery, and bounded source reads. MUST use agentq rather than raw broad tree/find/rg/grep/cat. For an exact TypeScript/JavaScript or Python symbol, use one agentq inspect overview operation rather than a lexical discovery ladder.
-license: MIT
-compatibility: Requires the bundled agent-toolkit plus Git, ripgrep, and Python 3.10+. TypeScript semantic inspection additionally requires Node.js and project TypeScript. ast-grep and Universal Ctags are optional.
-metadata:
-  version: "1.8.0"
-  mutation: "none"
 ---
 
 # Repository Exploration

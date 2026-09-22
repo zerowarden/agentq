@@ -1,11 +1,6 @@
 ---
 name: mechanical-refactor
 description: Execute controlled mechanical renames, literal or regex replacements, and syntax-aware ast-grep codemods with match counts, representative samples, dry runs, explicit mutation, bounded diffs, and targeted verification. Use only after the desired transformation and invariants are already decided; do not use to invent architecture or semantics.
-license: MIT
-compatibility: Requires the bundled agent-toolkit, Git, ripgrep, and Python 3.10+. ast-grep is required for syntax-aware transformations.
-metadata:
-  version: "1.8.0"
-  mutation: "explicit-only"
 ---
 
 # Mechanical Refactor

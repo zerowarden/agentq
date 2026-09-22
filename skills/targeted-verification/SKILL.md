@@ -1,11 +1,6 @@
 ---
 name: targeted-verification
 description: Use for tests, typechecks, lint, builds, and changed-code verification. MUST use workspace-aware agentq verify or bounded agentq run instead of raw verbose verification when covered. Canonical verify automatically uses the active task baseline when present; do not start watch mode, servers, or interactive prompts.
-license: MIT
-compatibility: Requires the bundled agent-toolkit and Python 3.10+. Project commands must already be installed. Node/pnpm workspaces and Vitest receive specialized local planning.
-metadata:
-  version: "1.8.0"
-  mutation: "command-dependent"
 ---
 
 # Targeted Verification
