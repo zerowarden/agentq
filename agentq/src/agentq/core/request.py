@@ -118,6 +118,7 @@ class SearchOptions:
     scan_cap: int = 5000
     coverage_policy: str = "auto"
     include_sensitive: bool = False
+    roles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         require_str(self.query, "search.query", allow_empty=True)
@@ -142,7 +143,7 @@ class SearchOptions:
             ("scan_cap", 1),
         ):
             require_int(getattr(self, name), f"search.{name}", minimum=minimum)
-        for name in ("globs", "types"):
+        for name in ("globs", "types", "roles"):
             values = cast("tuple[Any, ...]", getattr(self, name))
             if not is_instance_of(values, tuple) or not all(
                 is_instance_of(item, str) for item in values
@@ -150,7 +151,7 @@ class SearchOptions:
                 raise ContractError(f"search.{name} must be a tuple of strings")
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire: dict[str, Any] = {
             "query": self.query,
             "mode": self.mode,
             "word": self.word,
@@ -167,6 +168,9 @@ class SearchOptions:
             "coverage_policy": self.coverage_policy,
             "include_sensitive": self.include_sensitive,
         }
+        if self.roles:
+            wire["roles"] = list(self.roles)
+        return wire
 
     @classmethod
     def from_wire(cls, value: Any, *, what: str = "search options") -> SearchOptions:
@@ -174,10 +178,18 @@ class SearchOptions:
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
         globs_raw: Any = list_field(payload, "globs")
         types_raw: Any = list_field(payload, "types")
-        if not is_instance_of(globs_raw, list) or not is_instance_of(types_raw, list):
-            raise ContractError(f"{what}.globs and {what}.types must be arrays")
+        roles_raw: Any = list_field(payload, "roles")
+        if (
+            not is_instance_of(globs_raw, list)
+            or not is_instance_of(types_raw, list)
+            or not is_instance_of(roles_raw, list)
+        ):
+            raise ContractError(
+                f"{what}.globs, {what}.types, and {what}.roles must be arrays"
+            )
         globs = cast("list[Any]", globs_raw)
         types = cast("list[Any]", types_raw)
+        roles = cast("list[Any]", roles_raw)
         return cls(
             query=require_str(
                 payload.get("query", ""), f"{what}.query", allow_empty=True
@@ -210,6 +222,7 @@ class SearchOptions:
             include_sensitive=require_bool(
                 payload.get("include_sensitive", False), f"{what}.include_sensitive"
             ),
+            roles=tuple(str(item) for item in roles),
         )
 
 

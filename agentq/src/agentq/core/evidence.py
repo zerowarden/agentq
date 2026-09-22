@@ -116,10 +116,10 @@ class Coverage:
 
         Generic composition owns ``status`` and ``reasons``. Measurement
         metadata (``domain``, ``scope``, counts) survives only while every
-        operand describes the same measurement: counts are preserved only when
-        the count vectors are identical, so composition never fabricates a
-        cardinality. Aggregating counts across measurements belongs to
-        domain-specific aggregation, not to the generic lattice.
+        operand reports the same measurement identity *and* the same count
+        vector, so composition never fabricates a cardinality. Aggregating
+        counts across measurements belongs to domain-specific aggregation, not
+        to the generic lattice.
         """
         blocks = (self, *others)
         weakest = min(
@@ -129,7 +129,7 @@ class Coverage:
         for block in blocks:
             reasons.extend(block.reasons)
         domain, scope = _common_measurement(blocks)
-        identical = _identical_measurements(blocks)
+        identical = _identical_measurement_reports(blocks)
         return Coverage(
             status=weakest,
             reasons=tuple(reasons),
@@ -206,11 +206,18 @@ def _common_measurement(blocks: Sequence[Coverage]) -> tuple[str | None, str | N
     return None, None
 
 
-def _identical_measurements(blocks: Sequence[Coverage]) -> bool:
-    """Whether every operand reports the exact same count vector."""
+def _identical_measurement_reports(blocks: Sequence[Coverage]) -> bool:
+    """Whether every operand reports the same measurement identity and counts.
+
+    A count vector alone is not a measurement: the same number produced by
+    different domains or scopes is not the same observation. Counts may only be
+    preserved when ``domain``, ``scope``, and the count report all agree.
+    """
     first = blocks[0]
     return all(
-        block.count_quality == first.count_quality
+        block.domain == first.domain
+        and block.scope == first.scope
+        and block.count_quality == first.count_quality
         and all(getattr(block, name) == getattr(first, name) for name in _COUNT_FIELDS)
         for block in blocks
     )
@@ -219,7 +226,7 @@ def _identical_measurements(blocks: Sequence[Coverage]) -> bool:
 def _merged_counts(
     blocks: Sequence[Coverage], *, identical: bool
 ) -> dict[str, int | None]:
-    """Preserve counts only for identical measurements; never combine them.
+    """Preserve counts only for identical measurement reports; never combine them.
 
     Merging is idempotent either way, but maximum/sum combination invents a
     cardinality that no operand observed, so differing measurements drop counts

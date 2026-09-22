@@ -135,7 +135,9 @@ class BudgetTests(unittest.TestCase):
 
 class SearchOptionsTests(unittest.TestCase):
     def test_round_trip(self) -> None:
-        options = SearchOptions(query="needle", mode="regex", globs=("*.py",), limit=10)
+        options = SearchOptions(
+            query="needle", mode="regex", globs=("*.py",), limit=10, roles=("test",)
+        )
         self.assertEqual(SearchOptions.from_wire(options.to_wire()), options)
 
     def test_illegal_values(self) -> None:

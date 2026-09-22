@@ -73,10 +73,6 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _LANGS = {"typescript": {"typescript", "ts"}, "python": {"python", "py"}}
 
 _EDIT_CANDIDATE_DISPLAY_LIMIT = 12
-_EDIT_COMPLETE_ADVICE = (
-    "selected declaration, references, and verification scope are rendered; "
-    "proceed with the edit"
-)
 
 
 def _normalize_lang(lang: str | None) -> str | None:
@@ -244,28 +240,45 @@ def _references_coverage(references: tuple[ReferenceEvidence, ...]) -> Coverage:
 
 
 def _test_references(root: Path, target: str) -> tuple[tuple[SearchHit, ...], Coverage]:
+    """Lexical mentions of the target in files classified as tests.
+
+    The role constraint bounds the search population before counting, ranking,
+    and selection, so the returned coverage describes exactly the declared
+    test-file domain and the returned hits cannot be crowded out by source.
+    """
     result = search(
         SearchRequest(
             root=root,
             query=target,
             scopes=(),
+            roles=("test",),
             mode="fixed",
             word=True,
-            limit=24,
+            limit=12,
             per_file=4,
             include_sensitive=False,
             view="auto",
-            max_files=8,
+            max_files=12,
         )
     )
-    hits = tuple(hit for hit in result.hits if hit.role == "test")[:12]
-    return hits, result.coverage
+    coverage = replace(
+        result.coverage,
+        domain="lexical_test_mentions",
+        scope="path_role:test",
+    )
+    return result.hits, coverage
 
 
 def _tests_note(tests: tuple[SearchHit, ...]) -> str:
     if tests:
-        return f"{len(tests)} direct test reference(s) returned in the sampled scope"
-    return "no direct test reference was returned in the sampled scope"
+        return (
+            f"{len(tests)} lexical test mention(s) returned from classified "
+            "test files"
+        )
+    return (
+        "no lexical mention of the selected symbol was found in the searched "
+        "test-file scope"
+    )
 
 
 def _verification_advice(
@@ -273,7 +286,7 @@ def _verification_advice(
 ) -> tuple[str, ...]:
     advice: list[str] = []
     if tests:
-        advice.append("run the directly referenced tests")
+        advice.append("run tests containing the returned lexical mentions")
     if package:
         advice.append(
             f"run {package.kind} checks for {package.name or package.path} "
@@ -281,8 +294,8 @@ def _verification_advice(
         )
     if not tests:
         advice.append(
-            "no direct test references were returned in the sampled scope; verify "
-            "through owning-package typecheck and tests"
+            "no lexical test mentions were returned in the searched test-file "
+            "scope; verify through owning-package typecheck and tests"
         )
     return tuple(advice)
 
@@ -1064,10 +1077,15 @@ def _reference_record(references: tuple[ReferenceEvidence, ...]) -> str:
     return "references:\n" + "\n".join(lines)
 
 
-def _edit_records(bundle: EditBundle, *, budget: int) -> tuple[list[str], bool]:
-    """Ordered evidence records plus whether inner renderers dropped evidence."""
+def _edit_records(bundle: EditBundle, *, budget: int) -> list[str]:
+    """Ordered evidence records for one edit bundle.
+
+    Records describe what was observed. They never authorize an edit decision:
+    sufficiency is the caller's judgement, and no render state here establishes
+    that reference acquisition, test evidence, or impacted contracts are
+    complete.
+    """
     records: list[str] = []
-    unrendered = False
     if bundle.selected is not None:
         selected = bundle.selected
         scope = f" scope={selected.scope}" if selected.scope else ""
@@ -1082,7 +1100,6 @@ def _edit_records(bundle: EditBundle, *, budget: int) -> tuple[list[str], bool]:
     records.append(_coverage_record(bundle))
     if bundle.declaration is not None:
         declaration = render_read(bundle.declaration, budget=_share(budget, 2, 800))
-        unrendered = unrendered or bool(declaration.truncated)
         records.append("declaration:\n" + str(declaration))
     else:
         records.append(
@@ -1092,7 +1109,6 @@ def _edit_records(bundle: EditBundle, *, budget: int) -> tuple[list[str], bool]:
     if bundle.navigation is not None:
         provider = bundle.selected.provider if bundle.selected else "?"
         navigation = render_navigation(bundle.navigation, budget=_share(budget, 3, 600))
-        unrendered = unrendered or bool(navigation.truncated)
         records.append(f"navigation ({provider}):\n{navigation}")
     elif bundle.references:
         records.append(_reference_record(bundle.references))
@@ -1108,16 +1124,7 @@ def _edit_records(bundle: EditBundle, *, budget: int) -> tuple[list[str], bool]:
         )
     records.extend(f"verify: {item}" for item in bundle.verification)
     records.append("recovery:\n" + "\n".join(f"  {item}" for item in bundle.recovery))
-    # The completion advice is the last record: it can only survive the render
-    # budget when every earlier evidence record did, and it is withheld when an
-    # inner renderer already dropped declaration or navigation evidence.
-    if (
-        bundle.resolution == RESOLVED
-        and bundle.declaration is not None
-        and not unrendered
-    ):
-        records.append(_EDIT_COMPLETE_ADVICE)
-    return records, unrendered
+    return records
 
 
 def _edit_omission(bundle: EditBundle) -> str:
@@ -1138,7 +1145,7 @@ def _render_edit(result: EditInspection, *, budget: int) -> str:
         f"edit bundle {bundle.target.symbol} "
         f"[{bundle.resolution}; coverage {status_of(result.coverage)}]"
     )
-    records, _ = _edit_records(bundle, budget=budget)
+    records = _edit_records(bundle, budget=budget)
     rendered, _ = budget_text_records(
         header,
         records,

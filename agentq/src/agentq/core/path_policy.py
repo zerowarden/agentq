@@ -51,6 +51,9 @@ ROLE_PATTERNS = {
     ),
 }
 
+# The complete path-role vocabulary: every role ``classify_path`` can return.
+PATH_ROLES = frozenset((*ROLE_PATTERNS, "source"))
+
 
 def is_sensitive_path(path: str | Path) -> bool:
     p = Path(path)

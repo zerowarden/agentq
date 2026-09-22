@@ -315,6 +315,92 @@ class SearchCliTests(AgentQIntegrationHarness):
         self.assertEqual(by_path["vitest.config.ts"], "config")
         self.assertEqual(by_path["packages/a/src/database.generated.ts"], "generated")
 
+    def test_search_roles_constrain_population_before_selection(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            import importlib
+
+            search_module = importlib.import_module("agentq.discovery.search")
+
+        test_path = self.repo / "packages/a/tests/role_scope.test.ts"
+        test_path.write_text(
+            "".join(
+                f"export const roleHit{index} = 'ROLE_SCOPE'\n" for index in range(30)
+            ),
+            encoding="utf-8",
+        )
+        source_path = self.repo / "packages/a/src/role_scope.ts"
+        source_path.write_text(
+            "export const roleScope = 'ROLE_SCOPE'\n", encoding="utf-8"
+        )
+
+        scoped = search_module.search(
+            search_module.SearchRequest(
+                root=self.repo,
+                query="ROLE_SCOPE",
+                roles=("test",),
+                limit=2,
+                coverage_policy="exact",
+            )
+        )
+        self.assertEqual(
+            {hit.path for hit in scoped.hits},
+            {"packages/a/tests/role_scope.test.ts"},
+        )
+        self.assertEqual(scoped.total_matching_lines, 30)
+        self.assertEqual(scoped.matching_files, 1)
+        self.assertEqual(dict(scoped.counts_by_role), {"test": 1})
+
+        sampled = search_module.search(
+            search_module.SearchRequest(
+                root=self.repo,
+                query="ROLE_SCOPE",
+                roles=("test",),
+                limit=2,
+                coverage_policy="fast",
+            )
+        )
+        self.assertEqual(sampled.total_matching_lines, 30)
+        self.assertEqual(sampled.count_quality, "exact")
+        self.assertTrue(all(hit.role == "test" for hit in sampled.hits))
+
+        source_only = search_module.search(
+            search_module.SearchRequest(
+                root=self.repo,
+                query="ROLE_SCOPE",
+                roles=("source",),
+                limit=10,
+            )
+        )
+        self.assertEqual(
+            {hit.path for hit in source_only.hits},
+            {"packages/a/src/role_scope.ts"},
+        )
+
+        with self.assertRaises(search_module.AgentQError):
+            search_module.search(
+                search_module.SearchRequest(
+                    root=self.repo, query="ROLE_SCOPE", roles=("bogus",)
+                )
+            )
+
+    def test_role_scoped_request_identity_refuses_argv_widening(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq.core import ContractError, SearchOptions, new_operation_request
+            from agentq.requests import request_argv
+
+        options = SearchOptions(query="Needle", roles=("test",))
+        self.assertEqual(SearchOptions.from_wire(options.to_wire()), options)
+        self.assertIn("roles", options.to_wire())
+        self.assertNotIn("roles", SearchOptions(query="Needle").to_wire())
+        request = new_operation_request(
+            root=self.repo,
+            operation="search",
+            options=options,
+            encode_options=SearchOptions.to_wire,
+        )
+        with self.assertRaises(ContractError):
+            request_argv(request)
+
     def test_search_coverage_policies_control_counting_work(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             import importlib

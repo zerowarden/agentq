@@ -472,7 +472,7 @@ class EditRenderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_default_text_shows_target_declaration_and_references(self) -> None:
+    def test_resolved_text_reports_evidence_without_authorizing_an_edit(self) -> None:
         self.assertEqual(self.data["edit"]["resolution"], "resolved")
         rendered = str(render_inspect(self.result, budget=12000))
         self.assertIn("selected declaration: python pkg/def.py:1:1", rendered)
@@ -481,9 +481,13 @@ class EditRenderTests(unittest.TestCase):
         self.assertIn("navigation (python):", rendered)
         self.assertIn("pkg/use.py", rendered)
         self.assertIn(
-            "no direct test reference was returned in the sampled scope", rendered
+            "no lexical mention of the selected symbol was found in the searched "
+            "test-file scope",
+            rendered,
         )
-        self.assertIn("proceed with the edit", rendered)
+        self.assertIn("coverage: resolution complete", rendered)
+        self.assertIn("verify: run python checks", rendered)
+        self.assertNotIn("proceed with the edit", rendered)
         self.assertIs(self.result.python, self.result.edit.navigation)
         self.assertEqual(
             self.data["edit"]["declaration"]["items"][0]["path"], "pkg/def.py"
@@ -507,6 +511,87 @@ class EditRenderTests(unittest.TestCase):
             self.assertIn("--candidate", rendered)
             self.assertIn("recovery:", rendered)
             self.assertNotIn("proceed with the edit", rendered)
+        finally:
+            temp.cleanup()
+
+
+_AUTHORIZATION_PHRASES = (
+    "proceed with the edit",
+    "safe to edit",
+    "safe to proceed",
+)
+
+
+class EvidenceAuthorizationGuardTests(unittest.TestCase):
+    """Evidence output must never authorize the caller's edit decision.
+
+    The guard scans package sources rather than rendered output: authorization
+    language reappearing on an untested render path should still require an
+    explicit design change.
+    """
+
+    def test_package_sources_do_not_emit_authorization_phrases(self) -> None:
+        package_root = Path(navigation_module.__file__).resolve().parents[1]
+        for path in sorted(package_root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for phrase in _AUTHORIZATION_PHRASES:
+                with self.subTest(source=str(path), phrase=phrase):
+                    self.assertNotIn(phrase, text)
+
+
+def scoped_evidence_repo(
+    test_files: dict[str, str],
+) -> tuple[tempfile.TemporaryDirectory, Path]:
+    """A repo whose source matches dwarf the old broad-search result limit."""
+    files = {"src/decl.py": "def Foo():\n    return 1\n"}
+    files.update({f"src/a{index:02d}.py": "value = Foo()\n" for index in range(30)})
+    files.update(test_files)
+    return make_repo(files)
+
+
+class ScopedEvidenceAcquisitionTests(unittest.TestCase):
+    def test_test_evidence_is_not_crowded_out_by_source_matches(self) -> None:
+        temp, root = scoped_evidence_repo(
+            {"tests/test_foo.py": "def test_foo():\n    assert Foo() == 1\n"}
+        )
+        try:
+            bundle = edit_data(root, "Foo", ["src"], lang="python")["edit"]
+            self.assertEqual(bundle["resolution"], "resolved")
+            self.assertTrue(
+                any(hit["path"] == "tests/test_foo.py" for hit in bundle["tests"])
+            )
+            self.assertEqual(bundle["coverage"]["tests"]["status"], "complete")
+            self.assertEqual(
+                bundle["coverage"]["tests"]["domain"], "lexical_test_mentions"
+            )
+            self.assertEqual(bundle["coverage"]["tests"]["scope"], "path_role:test")
+        finally:
+            temp.cleanup()
+
+    def test_complete_test_scan_with_zero_mentions_is_not_unknown(self) -> None:
+        temp, root = scoped_evidence_repo({})
+        try:
+            bundle = edit_data(root, "Foo", ["src"], lang="python")["edit"]
+            self.assertEqual(bundle["tests"], [])
+            self.assertEqual(bundle["coverage"]["tests"]["status"], "complete")
+            self.assertIn("no lexical mention", bundle["tests_note"])
+        finally:
+            temp.cleanup()
+
+    def test_test_evidence_result_limit_is_visible_in_coverage(self) -> None:
+        test_files = {
+            f"tests/test_foo_{index}.py": (
+                f"def test_foo_{index}():\n"
+                + "".join(f"    assert Foo() == {line}\n" for line in range(4))
+            )
+            for index in range(4)
+        }
+        temp, root = scoped_evidence_repo(test_files)
+        try:
+            bundle = edit_data(root, "Foo", ["src"], lang="python")["edit"]
+            self.assertEqual(len(bundle["tests"]), 12)
+            self.assertEqual(bundle["coverage"]["tests"]["status"], "sampled")
+            self.assertIn("result_limit", bundle["coverage"]["tests"]["reason"])
         finally:
             temp.cleanup()
 

@@ -125,6 +125,16 @@ class CoverageMergeLawTests(unittest.TestCase):
         self.assertIsNone(unknown.matched)
         self.assertEqual(unknown.count_quality, evidence.UNKNOWN_COUNT)
 
+    def test_identical_measurements_with_shared_identity_preserve_counts(self) -> None:
+        measured = evidence.typed_coverage(
+            evidence.COMPLETE,
+            domain="references",
+            scope="package-a",
+            matched=12,
+            count_quality=evidence.EXACT,
+        )
+        self.assertEqual(evidence.merge_typed(measured, measured), measured)
+
     def test_counts_are_never_combined_across_measurements(self) -> None:
         merged = evidence.merge_typed(
             evidence.typed_coverage(
@@ -137,6 +147,52 @@ class CoverageMergeLawTests(unittest.TestCase):
             evidence.typed_coverage(
                 evidence.COMPLETE,
                 domain="files",
+                scope="package-b",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+        )
+        self.assertIsNone(merged.domain)
+        self.assertIsNone(merged.scope)
+        self.assertIsNone(merged.matched)
+        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
+
+    def test_equal_counts_from_different_measurements_are_not_preserved(
+        self,
+    ) -> None:
+        merged = evidence.merge_typed(
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
+                scope="package-a",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="files",
+                scope="package-b",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+        )
+        self.assertIsNone(merged.domain)
+        self.assertIsNone(merged.scope)
+        self.assertIsNone(merged.matched)
+        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
+
+    def test_equal_counts_from_different_scopes_are_not_preserved(self) -> None:
+        merged = evidence.merge_typed(
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
+                scope="package-a",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
                 scope="package-b",
                 matched=12,
                 count_quality=evidence.EXACT,

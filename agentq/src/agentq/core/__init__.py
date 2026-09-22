@@ -50,6 +50,7 @@ from .evidence import (
     with_failure,
 )
 from .path_policy import (
+    PATH_ROLES,
     classify_path,
     is_sensitive_path,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "OperationRequest",
     "PARSE_ERROR",
     "PARTIAL",
+    "PATH_ROLES",
     "PROVIDER_ERROR",
     "PROVIDER_UNAVAILABLE",
     "ProviderResult",

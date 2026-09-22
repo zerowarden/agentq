@@ -209,6 +209,7 @@ def run_search(args: argparse.Namespace, root: Path) -> Outcome:
         coverage_policy=options.coverage_policy,
         output_format=str(args.format),
         budget=args.budget,
+        roles=options.roles,
     )
     request = SearchRequest(
         root=root,
@@ -228,6 +229,7 @@ def run_search(args: argparse.Namespace, root: Path) -> Outcome:
         max_files=options.max_files,
         scan_cap=options.scan_cap,
         coverage_policy=options.coverage_policy,
+        roles=options.roles,
         resume=resume if args.format != "json" else None,
     )
     cache_options = {
@@ -247,6 +249,7 @@ def run_search(args: argparse.Namespace, root: Path) -> Outcome:
         "max_files": options.max_files,
         "scan_cap": options.scan_cap,
         "coverage_policy": options.coverage_policy,
+        "roles": list(options.roles),
     }
     compact = args.format == "compact-json"
     return emit_cached(

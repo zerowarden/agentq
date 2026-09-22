@@ -187,10 +187,21 @@ def _presentation_args(request: OperationRequest[Any]) -> list[str]:
     return args
 
 
+def _reject_role_scoped_search(options: SearchOptions) -> None:
+    # There is no CLI surface for roles yet; refuse loudly instead of replaying
+    # a role-scoped search as an unrestricted one.
+    if options.roles:
+        raise ContractError(
+            "role-scoped search continuations are not supported; rerun the "
+            "search without a stored continuation"
+        )
+
+
 def _search_argv(request: OperationRequest[Any]) -> list[str]:
     options = request.options
     if not isinstance(options, SearchOptions) or not options.query:
         raise ContractError("a search continuation requires a non-empty query")
+    _reject_role_scoped_search(options)
     argv = ["agentq", "search", options.query]
     if options.mode == "regex":
         argv.append("--regex")

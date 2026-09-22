@@ -19,6 +19,7 @@ from agentq.continuations import QueryFollowUp
 from agentq.core import (
     COMPLETE,
     LEXICAL,
+    PATH_ROLES,
     RESULT_LIMIT,
     SAMPLED,
     SCAN_CAP,
@@ -296,6 +297,7 @@ class SearchResume:
     coverage_policy: str
     output_format: str
     budget: int
+    roles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -372,6 +374,7 @@ class SearchRequest:
     max_files: int = 40
     scan_cap: int = 5000
     coverage_policy: str = "auto"
+    roles: tuple[str, ...] = ()
     resume: SearchResume | None = None
 
 
@@ -671,6 +674,7 @@ def _matching_line_counts(
     globs: tuple[str, ...],
     types: tuple[str, ...],
     include_sensitive: bool,
+    roles: tuple[str, ...] = (),
 ) -> dict[str, int]:
     args = [
         rg,
@@ -703,6 +707,8 @@ def _matching_line_counts(
         while path.startswith("./"):
             path = path[2:]
         if not path or (not include_sensitive and is_sensitive_path(path)):
+            continue
+        if roles and classify_path(path) not in roles:
             continue
         try:
             count = int(raw_count)
@@ -850,6 +856,9 @@ def _validate_search_request(request: SearchRequest) -> None:
         raise AgentQError(
             f"unsupported search coverage policy: {request.coverage_policy}"
         )
+    unknown_roles = sorted(set(request.roles) - PATH_ROLES)
+    if unknown_roles:
+        raise AgentQError(f"unsupported search roles: {', '.join(unknown_roles)}")
 
 
 def _byte_column(line: str, byte_start: int) -> int:
@@ -906,6 +915,9 @@ class _HitCollector:
             path = path[2:]
         if not path or (not self.request.include_sensitive and is_sensitive_path(path)):
             return True
+        role = classify_path(path)
+        if self.request.roles and role not in self.request.roles:
+            return True
         line_number = safe_int(payload.get("line_number"))
         line = ((dict_field(payload, "lines")).get("text") or "").rstrip("\r\n")
         self.candidate_chars += len(line)
@@ -922,7 +934,7 @@ class _HitCollector:
                 line=line_number,
                 column=_byte_column(line, byte_start),
                 text=_match_window(line, byte_start, byte_end, self.request.max_chars),
-                role=classify_path(path),
+                role=role,
                 kind=_hit_kind(line.lstrip(), is_relevant_decl=is_relevant_decl),
                 declared_symbol=declared if is_relevant_decl else None,
             )
@@ -1127,6 +1139,7 @@ def search(request: SearchRequest) -> SearchResult:
             globs=globs,
             types=types,
             include_sensitive=request.include_sensitive,
+            roles=request.roles,
         )
         if not counts_by_file:
             return _none_found(request, root, scopes)
@@ -1307,6 +1320,7 @@ def _search_follow_up(
         scan_cap=scan_cap,
         coverage_policy=resume.coverage_policy,
         view=view,
+        roles=resume.roles,
     )
     request = new_operation_request(
         root=root,
