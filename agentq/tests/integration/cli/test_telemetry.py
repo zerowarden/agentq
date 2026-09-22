@@ -160,6 +160,34 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         self.assertEqual(sum(event["output_attribution"].values()), len(visible))
         self.assertGreater(event["output_attribution"]["unique_evidence_chars"], 0)
 
+    def test_compatibility_alias_events_are_labeled(self) -> None:
+        self.data("files", "index", "--max-results", "2")
+        events = [
+            json.loads(line)
+            for line in (self.telemetry / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        alias_event = next(
+            event for event in reversed(events) if event.get("command") == "files"
+        )
+        self.assertEqual(alias_event["compatibility_alias"], "files-max-results")
+
+    def test_verification_events_record_mode_and_affected_packages(self) -> None:
+        self.change_a()
+        self.data("verify-changed", "--skip-lint")
+        events = [
+            json.loads(line)
+            for line in (self.telemetry / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        event = events[-1]
+        self.assertEqual(event["command"], "verify-changed")
+        self.assertEqual(event["metrics"]["verification_mode"], "standard")
+        self.assertGreaterEqual(event["metrics"]["affected_packages"], 2)
+
     def test_telemetry_is_private_minimized_and_stats_are_aggregated(self) -> None:
         secret_query = "SENSITIVE_QUERY_VALUE_91fdb"
         self.data("search", secret_query)

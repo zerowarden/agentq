@@ -8,14 +8,12 @@ from agentq.core import ContractError, evidence
 
 
 class CoverageWireTests(unittest.TestCase):
-    def test_legacy_wire_shape_is_preserved(self) -> None:
+    def test_legacy_wire_shape_and_reasons_are_preserved(self) -> None:
         self.assertEqual(evidence.complete(), {"status": "complete", "reason": []})
         self.assertEqual(
             evidence.coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
             {"status": "partial", "reason": ["parse_error"]},
         )
-
-    def test_reasons_are_ordered_and_unique(self) -> None:
         block = evidence.typed_coverage(
             evidence.PARTIAL,
             evidence.PARSE_ERROR,
@@ -60,7 +58,7 @@ class CoverageWireTests(unittest.TestCase):
 
 
 class CoverageMergeLawTests(unittest.TestCase):
-    def test_merge_is_idempotent(self) -> None:
+    def test_merge_is_idempotent_and_without_input_is_unknown(self) -> None:
         complete = evidence.typed_coverage(evidence.COMPLETE)
         self.assertEqual(evidence.merge_typed(complete, complete), complete)
         sampled = evidence.typed_coverage(
@@ -69,164 +67,10 @@ class CoverageMergeLawTests(unittest.TestCase):
         self.assertEqual(
             evidence.merge_typed(sampled, sampled).to_wire(), sampled.to_wire()
         )
-
-    def test_merge_never_promotes(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(evidence.COMPLETE),
-            evidence.typed_coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
-        )
-        self.assertEqual(merged.status, evidence.PARTIAL)
-        self.assertEqual(merged.reasons, (evidence.PARSE_ERROR,))
-        unknown = evidence.merge_typed(
-            evidence.typed_coverage(evidence.UNKNOWN), merged
-        )
-        self.assertEqual(unknown.status, evidence.UNKNOWN)
-
-    def test_merge_without_input_is_unknown(self) -> None:
         self.assertEqual(evidence.merge_typed().status, evidence.UNKNOWN)
         self.assertEqual(evidence.merge_coverage(), {"status": "unknown", "reason": []})
 
-    def test_merge_unions_reasons_in_order(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(evidence.SAMPLED, evidence.RESULT_LIMIT),
-            evidence.typed_coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
-            evidence.typed_coverage(evidence.UNKNOWN, evidence.PROVIDER_UNAVAILABLE),
-        )
-        self.assertEqual(
-            merged.reasons,
-            (
-                evidence.RESULT_LIMIT,
-                evidence.PARSE_ERROR,
-                evidence.PROVIDER_UNAVAILABLE,
-            ),
-        )
-        self.assertEqual(merged.status, evidence.UNKNOWN)
-
-    def test_merge_preserves_known_failures(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(evidence.COMPLETE),
-            evidence.typed_coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
-            evidence.typed_coverage(evidence.PARTIAL, evidence.PROVIDER_UNAVAILABLE),
-        )
-        self.assertIn(evidence.PARSE_ERROR, merged.reasons)
-        self.assertIn(evidence.PROVIDER_UNAVAILABLE, merged.reasons)
-
-    def test_identical_measurements_preserve_counts(self) -> None:
-        measured = evidence.typed_coverage(
-            evidence.COMPLETE, matched=2, count_quality=evidence.EXACT
-        )
-        self.assertEqual(evidence.merge_typed(measured, measured), measured)
-        unknown = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE, matched=2, count_quality=evidence.EXACT
-            ),
-            evidence.typed_coverage(evidence.COMPLETE),
-        )
-        self.assertIsNone(unknown.matched)
-        self.assertEqual(unknown.count_quality, evidence.UNKNOWN_COUNT)
-
-    def test_identical_measurements_with_shared_identity_preserve_counts(self) -> None:
-        measured = evidence.typed_coverage(
-            evidence.COMPLETE,
-            domain="references",
-            scope="package-a",
-            matched=12,
-            count_quality=evidence.EXACT,
-        )
-        self.assertEqual(evidence.merge_typed(measured, measured), measured)
-
-    def test_counts_are_never_combined_across_measurements(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-a",
-                matched=50,
-                count_quality=evidence.EXACT,
-            ),
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="files",
-                scope="package-b",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-        )
-        self.assertIsNone(merged.domain)
-        self.assertIsNone(merged.scope)
-        self.assertIsNone(merged.matched)
-        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
-
-    def test_equal_counts_from_different_measurements_are_not_preserved(
-        self,
-    ) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-a",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="files",
-                scope="package-b",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-        )
-        self.assertIsNone(merged.domain)
-        self.assertIsNone(merged.scope)
-        self.assertIsNone(merged.matched)
-        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
-
-    def test_equal_counts_from_different_scopes_are_not_preserved(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-a",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-b",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-        )
-        self.assertIsNone(merged.domain)
-        self.assertIsNone(merged.scope)
-        self.assertIsNone(merged.matched)
-        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
-
-    def test_shared_scope_keeps_scope_but_drops_disagreeing_counts(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-a",
-                matched=50,
-                count_quality=evidence.EXACT,
-            ),
-            evidence.typed_coverage(
-                evidence.COMPLETE,
-                domain="references",
-                scope="package-a",
-                matched=12,
-                count_quality=evidence.EXACT,
-            ),
-        )
-        self.assertEqual(merged.domain, "references")
-        self.assertEqual(merged.scope, "package-a")
-        self.assertIsNone(merged.matched)
-        self.assertIsNone(merged.scanned)
-        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
-
-    def test_sampled_plus_parse_error_keeps_both_causes(self) -> None:
+    def test_merge_takes_the_weakest_status_and_unions_reasons_in_order(self) -> None:
         merged = evidence.merge_typed(
             evidence.typed_coverage(
                 evidence.SAMPLED,
@@ -239,9 +83,103 @@ class CoverageMergeLawTests(unittest.TestCase):
         self.assertEqual(merged.status, evidence.PARTIAL)
         self.assertEqual(merged.reasons, (evidence.RESULT_LIMIT, evidence.PARSE_ERROR))
         self.assertFalse(merged.is_complete())
+        union = evidence.merge_typed(
+            evidence.typed_coverage(evidence.SAMPLED, evidence.RESULT_LIMIT),
+            evidence.typed_coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
+            evidence.typed_coverage(evidence.UNKNOWN, evidence.PROVIDER_UNAVAILABLE),
+        )
+        self.assertEqual(union.status, evidence.UNKNOWN)
+        self.assertEqual(
+            union.reasons,
+            (
+                evidence.RESULT_LIMIT,
+                evidence.PARSE_ERROR,
+                evidence.PROVIDER_UNAVAILABLE,
+            ),
+        )
+        # A stronger operand never repairs a weaker one.
+        self.assertEqual(
+            evidence.merge_typed(
+                evidence.typed_coverage(evidence.COMPLETE),
+                evidence.typed_coverage(evidence.PARTIAL, evidence.PARSE_ERROR),
+            ).status,
+            evidence.PARTIAL,
+        )
+
+    def test_measurement_identity_matrix(self) -> None:
+        """Counts survive only under an identical measurement identity and report."""
+        cases = (
+            ("same", "same", "same", "preserve"),
+            ("same", "same", "different", "counts"),
+            ("same", "different", "same", "measurement"),
+            ("different", "same", "same", "measurement"),
+            ("different", "different", "same", "measurement"),
+        )
+        for domain, scope, counts, expected in cases:
+            with self.subTest(domain=domain, scope=scope, counts=counts):
+                left = self._measurement(
+                    domain="references", scope="package-a", matched=12
+                )
+                right = self._measurement(
+                    domain="references" if domain == "same" else "files",
+                    scope="package-a" if scope == "same" else "package-b",
+                    matched=12 if counts == "same" else 7,
+                )
+                merged = evidence.merge_typed(left, right)
+                if expected == "preserve":
+                    self.assertEqual(merged.to_wire(), left.to_wire())
+                    continue
+                if expected == "counts":
+                    self.assertEqual(merged.domain, "references")
+                    self.assertEqual(merged.scope, "package-a")
+                else:
+                    self.assertIsNone(merged.domain)
+                    self.assertIsNone(merged.scope)
+                self.assertIsNone(merged.matched)
+                self.assertIsNone(merged.scanned)
+                self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
+
+    @staticmethod
+    def _measurement(*, domain: str, scope: str, matched: int) -> evidence.Coverage:
+        return evidence.typed_coverage(
+            evidence.COMPLETE,
+            domain=domain,
+            scope=scope,
+            matched=matched,
+            count_quality=evidence.EXACT,
+        )
 
 
 class CoverageFailureAndOmissionTests(unittest.TestCase):
+    def test_failure_and_omission_never_promote_their_input(self) -> None:
+        complete = evidence.typed_from_wire(evidence.complete())
+        failed = evidence.with_failure(complete, evidence.PARSE_ERROR)
+        self.assertEqual(failed.status, evidence.PARTIAL)
+        still_partial = evidence.with_failure(failed, evidence.PROVIDER_UNAVAILABLE)
+        self.assertEqual(still_partial.status, evidence.PARTIAL)
+        self.assertEqual(
+            still_partial.reasons,
+            (evidence.PARSE_ERROR, evidence.PROVIDER_UNAVAILABLE),
+        )
+        omitted = evidence.with_omission(complete, evidence.RESULT_LIMIT, omitted=4)
+        self.assertEqual(omitted.status, evidence.SAMPLED)
+        self.assertEqual(omitted.omitted, 4)
+        kept_partial = evidence.with_omission(failed, evidence.RENDER_OMISSION)
+        self.assertEqual(kept_partial.status, evidence.PARTIAL)
+        self.assertEqual(
+            kept_partial.reasons, (evidence.PARSE_ERROR, evidence.RENDER_OMISSION)
+        )
+        current = evidence.coverage(evidence.PARTIAL, evidence.PARSE_ERROR)
+        self.assertEqual(
+            evidence.downgrade(current, evidence.COMPLETE)["status"], evidence.PARTIAL
+        )
+        self.assertEqual(
+            evidence.downgrade(
+                current, evidence.PARTIAL, evidence.PROVIDER_UNAVAILABLE
+            )["reason"],
+            [evidence.PARSE_ERROR, evidence.PROVIDER_UNAVAILABLE],
+        )
+
     def test_partial_empty_is_not_complete(self) -> None:
         empty_partial = evidence.typed_from_wire(
             {"status": "partial", "reason": ["parse_error"]}
@@ -250,32 +188,6 @@ class CoverageFailureAndOmissionTests(unittest.TestCase):
         self.assertEqual(empty_partial.reasons, (evidence.PARSE_ERROR,))
         self.assertIsNone(empty_partial.retained)
         self.assertFalse(empty_partial.is_complete())
-
-    def test_omission_downgrades_and_records_reason(self) -> None:
-        omitted = evidence.with_omission(
-            evidence.complete(), evidence.RESULT_LIMIT, omitted=4
-        )
-        self.assertEqual(omitted.status, evidence.SAMPLED)
-        self.assertEqual(omitted.reasons, (evidence.RESULT_LIMIT,))
-        self.assertEqual(omitted.omitted, 4)
-
-    def test_omission_never_upgrades_a_weaker_status(self) -> None:
-        failed = evidence.with_failure(evidence.complete(), evidence.PARSE_ERROR)
-        omitted = evidence.with_omission(failed, evidence.RENDER_OMISSION)
-        self.assertEqual(omitted.status, evidence.PARTIAL)
-        self.assertEqual(
-            omitted.reasons, (evidence.PARSE_ERROR, evidence.RENDER_OMISSION)
-        )
-
-    def test_failure_never_promotes(self) -> None:
-        failed = evidence.with_failure(evidence.complete(), evidence.PARSE_ERROR)
-        self.assertEqual(failed.status, evidence.PARTIAL)
-        still_partial = evidence.with_failure(failed, evidence.PROVIDER_UNAVAILABLE)
-        self.assertEqual(still_partial.status, evidence.PARTIAL)
-        self.assertEqual(
-            still_partial.reasons,
-            (evidence.PARSE_ERROR, evidence.PROVIDER_UNAVAILABLE),
-        )
 
     def test_is_complete_requires_complete_status(self) -> None:
         self.assertTrue(evidence.typed_from_wire(evidence.complete()).is_complete())
@@ -286,7 +198,7 @@ class CoverageFailureAndOmissionTests(unittest.TestCase):
 
 
 class CoverageDecodeTests(unittest.TestCase):
-    def test_decodes_legacy_string_and_dict(self) -> None:
+    def test_decodes_legacy_string_dict_and_garbage(self) -> None:
         self.assertEqual(evidence.typed_from_wire("sampled").status, evidence.SAMPLED)
         self.assertEqual(
             evidence.typed_from_wire(
@@ -294,8 +206,6 @@ class CoverageDecodeTests(unittest.TestCase):
             ).status,
             evidence.PARTIAL,
         )
-
-    def test_garbage_status_becomes_unknown_not_complete(self) -> None:
         self.assertEqual(evidence.typed_from_wire("finished").status, evidence.UNKNOWN)
         self.assertEqual(
             evidence.typed_from_wire({"status": 7}).status, evidence.UNKNOWN
@@ -330,17 +240,14 @@ class CoverageDecodeTests(unittest.TestCase):
         wire["reason"].append("tampered")
         self.assertEqual(decoded.reasons, (evidence.RESULT_LIMIT,))
 
-    def test_downgrade_still_never_upgrades(self) -> None:
-        current = evidence.coverage(evidence.PARTIAL, evidence.PARSE_ERROR)
+
+class ProvenanceVocabularyTests(unittest.TestCase):
+    def test_best_provenance_prefers_strongest_evidence(self) -> None:
         self.assertEqual(
-            evidence.downgrade(current, evidence.COMPLETE)["status"], evidence.PARTIAL
+            evidence.best_provenance("lexical", "semantic", "syntactic"), "semantic"
         )
-        self.assertEqual(
-            evidence.downgrade(
-                current, evidence.PARTIAL, evidence.PROVIDER_UNAVAILABLE
-            )["reason"],
-            [evidence.PARSE_ERROR, evidence.PROVIDER_UNAVAILABLE],
-        )
+        self.assertEqual(evidence.best_provenance("heuristic"), "heuristic")
+        self.assertIsNone(evidence.best_provenance(None, None))
 
 
 if __name__ == "__main__":

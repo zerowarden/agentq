@@ -24,13 +24,6 @@ class TaskCliTests(AgentQIntegrationHarness):
         )
         self.assertEqual(finished["action"], "accept")
 
-        stats = self.data("stats", "--since", "all")
-        self.assertEqual(stats["tasks"]["started"], 2)
-        self.assertEqual(stats["tasks"]["accepted"], 2)
-        self.assertEqual(stats["tasks"]["active"], 0)
-        self.assertEqual(stats["tasks"]["attributed_calls"], 2)
-        self.assertEqual(stats["threads"], 1)
-
     def test_task_without_action_reports_status(self) -> None:
         status = self.data("task")
         self.assertFalse(status["active"])
@@ -44,10 +37,6 @@ class TaskCliTests(AgentQIntegrationHarness):
         self.data("search", "OldName", extra_env={"CODEX_THREAD_ID": "thread-a"})
         self.data("search", "Wrapped", extra_env={"CODEX_THREAD_ID": "thread-b"})
         self.data("task", "accept")
-        stats = self.data("stats", "--since", "all")
-        self.assertEqual(stats["tasks"]["accepted"], 1)
-        self.assertEqual(stats["tasks"]["attributed_calls"], 2)
-        self.assertEqual(stats["threads"], 2)
 
     def test_task_changes_excludes_unchanged_preexisting_dirty_files(self) -> None:
         self.change_a("\nexport const beforeTask = true\n")

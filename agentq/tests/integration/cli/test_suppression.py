@@ -266,6 +266,43 @@ class SuppressionCliTests(AgentQIntegrationHarness):
         refreshed = self.data("search", "OldName")
         self.assertFalse(refreshed.get("repeat_suppressed", False))
 
+    def test_inspect_caches_only_source_lines_visible_inside_the_wrapper(self) -> None:
+        path = self.repo / "packages/a/src/budgeted_inspect.py"
+        path.write_text(
+            "".join(f"line_{index:02d} = {'x' * 32!r}\n" for index in range(1, 21)),
+            encoding="utf-8",
+        )
+        self.data("task", "begin")
+
+        first = self.data(
+            "inspect",
+            "packages/a/src/budgeted_inspect.py",
+            "--lines",
+            "1:20",
+            "--budget",
+            "1200",
+        )
+        first_lines = [
+            line["line"] for item in first["source"]["items"] for line in item["lines"]
+        ]
+        self.assertTrue(first_lines)
+        self.assertNotIn("_agentq", first)
+
+        resumed = self.data(
+            "inspect",
+            "packages/a/src/budgeted_inspect.py",
+            "--lines",
+            "1:20",
+            "--budget",
+            "100000",
+        )
+        resumed_lines = [
+            line["line"]
+            for item in resumed["source"]["items"]
+            for line in item["lines"]
+        ]
+        self.assertEqual(sorted(first_lines + resumed_lines), list(range(1, 21)))
+
     def test_identical_git_diff_is_suppressed_inside_context_unless_repeated(
         self,
     ) -> None:

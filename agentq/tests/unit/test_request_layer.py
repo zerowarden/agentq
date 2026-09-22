@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import unittest
 from argparse import Namespace
+from pathlib import Path
 
 from agentq.cli.emit import invocation_request_id
 from agentq.continuations import QueryFollowUp
-from agentq.core import Budget, ContractError, OperationRequest, request_identity
-from agentq.requests import request_codec
+from agentq.core import (
+    Budget,
+    ContractError,
+    OperationRequest,
+    SearchOptions,
+    new_operation_request,
+    request_identity,
+)
+from agentq.requests import request_argv, request_codec
 
 
 def _search_args(query: str, *, output_format: str = "text") -> Namespace:
@@ -113,6 +121,17 @@ class ContinuationCodecTests(unittest.TestCase):
         )
         with self.assertRaises(ContractError):
             QueryFollowUp(request=request)
+
+    def test_role_scoped_search_continuation_refuses_argv_widening(self) -> None:
+        options = SearchOptions(query="Needle", roles=("test",))
+        request = new_operation_request(
+            root=Path("/tmp/agentq-repo"),
+            operation="search",
+            options=options,
+            encode_options=SearchOptions.to_wire,
+        )
+        with self.assertRaises(ContractError):
+            request_argv(request)
 
 
 if __name__ == "__main__":

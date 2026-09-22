@@ -116,6 +116,25 @@ class PolicyExclusionTests(MutationSafetyTestCase):
         self.assertEqual((self.repo / ".env").read_text(encoding="utf-8"), "target\n")
 
 
+class SensitiveOverrideTests(MutationSafetyTestCase):
+    def test_sensitive_files_change_only_with_the_explicit_override(self) -> None:
+        (self.repo / "main.txt").write_text("secret123\n")
+        (self.repo / ".env").write_text("password=secret123\n")
+        self.apply_now(
+            pattern="secret123", rewrite="REDACTED", mode="fixed", apply=True
+        )
+        self.assertEqual((self.repo / "main.txt").read_text(), "REDACTED\n")
+        self.assertEqual((self.repo / ".env").read_text(), "password=secret123\n")
+        self.apply_now(
+            pattern="secret123",
+            rewrite="REDACTED",
+            mode="fixed",
+            include_sensitive=True,
+            apply=True,
+        )
+        self.assertEqual((self.repo / ".env").read_text(), "password=REDACTED\n")
+
+
 class TargetSafetyTests(MutationSafetyTestCase):
     def test_directory_is_not_mutation_file(self) -> None:
         sub = self.repo / "sub"

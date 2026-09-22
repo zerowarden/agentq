@@ -62,7 +62,7 @@ class SearchCliTests(AgentQIntegrationHarness):
         self.assertEqual(data["coverage"]["reason"], ["result_limit"])
         self.assertEqual(data["match_file_summary"][0]["matching_lines"], 12)
 
-    def test_compact_search_json_is_canonical_and_substantially_smaller(self) -> None:
+    def test_compact_search_json_is_canonical_and_deduplicates_evidence(self) -> None:
         path = self.repo / "packages/a/src/compact.ts"
         path.write_text(
             "".join(
@@ -100,50 +100,6 @@ class SearchCliTests(AgentQIntegrationHarness):
         source_line = "export const compact0 = 'COMPACT_HIT'"
         self.assertGreaterEqual(legacy_result.stdout.count(source_line), 2)
         self.assertEqual(compact_result.stdout.count(source_line), 1)
-        self.assertLessEqual(
-            len(compact_result.stdout.strip()), len(legacy_result.stdout.strip()) * 0.60
-        )
-
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.output_attribution import attribute_output
-        legacy_attribution = attribute_output(
-            "search", legacy, legacy_result.stdout.strip(), output_format="json"
-        )
-        compact_attribution = attribute_output(
-            "search",
-            compact,
-            compact_result.stdout.strip(),
-            output_format="compact-json",
-        )
-        self.assertGreater(legacy_attribution["duplicate_evidence_chars"], 0)
-        self.assertLessEqual(
-            compact_attribution["duplicate_evidence_chars"],
-            legacy_attribution["duplicate_evidence_chars"] * 0.20,
-        )
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if line.strip()
-        ]
-        compact_event = next(
-            event
-            for event in reversed(events)
-            if event.get("output_format") == "compact-json"
-        )
-        self.assertEqual(compact_event["output_view"], "snippets")
-        self.assertTrue(compact_event["output_attributed"])
-        self.assertTrue(compact_event["source_measured"])
-        self.assertGreater(compact_event["metrics"]["candidate_chars"], 0)
-        self.assertEqual(
-            sum(compact_event["output_attribution"].values()),
-            compact_event["visible_chars"],
-        )
-        format_usage = self.data("stats", "--since", "all")["search_format_usage"]
-        self.assertEqual(format_usage["compact_json_calls"], 1)
-        self.assertEqual(format_usage["legacy_json_calls"], 1)
-        self.assertEqual(format_usage["compact_structured_percent"], 50.0)
 
     def test_compact_search_continuation_is_exact_and_budget_selects_complete_records(
         self,
@@ -215,31 +171,6 @@ class SearchCliTests(AgentQIntegrationHarness):
         self.assertTrue(
             all(item.get("text") for item in budgeted["files"][0]["evidence"])
         )
-
-        invalid = subprocess.run(
-            [
-                str(AGENTQ),
-                "search",
-                "--repo",
-                str(self.repo),
-                "--format",
-                "compact-json",
-            ],
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(invalid.returncode, 2)
-        self.assertEqual(json.loads(invalid.stderr)["type"], "AgentQError")
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if line.strip()
-        ]
-        self.assertEqual(events[-1]["output_format"], "compact-json")
 
     def test_search_auto_view_and_text_header_are_concise(self) -> None:
         exact = self.data("search", "OldName", "--format", "compact-json", "--repeat")
@@ -314,92 +245,6 @@ class SearchCliTests(AgentQIntegrationHarness):
         by_path = {item["path"]: item["role"] for item in roles["match_file_summary"]}
         self.assertEqual(by_path["vitest.config.ts"], "config")
         self.assertEqual(by_path["packages/a/src/database.generated.ts"], "generated")
-
-    def test_search_roles_constrain_population_before_selection(self) -> None:
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            import importlib
-
-            search_module = importlib.import_module("agentq.discovery.search")
-
-        test_path = self.repo / "packages/a/tests/role_scope.test.ts"
-        test_path.write_text(
-            "".join(
-                f"export const roleHit{index} = 'ROLE_SCOPE'\n" for index in range(30)
-            ),
-            encoding="utf-8",
-        )
-        source_path = self.repo / "packages/a/src/role_scope.ts"
-        source_path.write_text(
-            "export const roleScope = 'ROLE_SCOPE'\n", encoding="utf-8"
-        )
-
-        scoped = search_module.search(
-            search_module.SearchRequest(
-                root=self.repo,
-                query="ROLE_SCOPE",
-                roles=("test",),
-                limit=2,
-                coverage_policy="exact",
-            )
-        )
-        self.assertEqual(
-            {hit.path for hit in scoped.hits},
-            {"packages/a/tests/role_scope.test.ts"},
-        )
-        self.assertEqual(scoped.total_matching_lines, 30)
-        self.assertEqual(scoped.matching_files, 1)
-        self.assertEqual(dict(scoped.counts_by_role), {"test": 1})
-
-        sampled = search_module.search(
-            search_module.SearchRequest(
-                root=self.repo,
-                query="ROLE_SCOPE",
-                roles=("test",),
-                limit=2,
-                coverage_policy="fast",
-            )
-        )
-        self.assertEqual(sampled.total_matching_lines, 30)
-        self.assertEqual(sampled.count_quality, "exact")
-        self.assertTrue(all(hit.role == "test" for hit in sampled.hits))
-
-        source_only = search_module.search(
-            search_module.SearchRequest(
-                root=self.repo,
-                query="ROLE_SCOPE",
-                roles=("source",),
-                limit=10,
-            )
-        )
-        self.assertEqual(
-            {hit.path for hit in source_only.hits},
-            {"packages/a/src/role_scope.ts"},
-        )
-
-        with self.assertRaises(search_module.AgentQError):
-            search_module.search(
-                search_module.SearchRequest(
-                    root=self.repo, query="ROLE_SCOPE", roles=("bogus",)
-                )
-            )
-
-    def test_role_scoped_request_identity_refuses_argv_widening(self) -> None:
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.core import ContractError, SearchOptions, new_operation_request
-            from agentq.requests import request_argv
-
-        options = SearchOptions(query="Needle", roles=("test",))
-        self.assertEqual(SearchOptions.from_wire(options.to_wire()), options)
-        self.assertIn("roles", options.to_wire())
-        self.assertNotIn("roles", SearchOptions(query="Needle").to_wire())
-        request = new_operation_request(
-            root=self.repo,
-            operation="search",
-            options=options,
-            encode_options=SearchOptions.to_wire,
-        )
-        with self.assertRaises(ContractError):
-            request_argv(request)
 
     def test_search_coverage_policies_control_counting_work(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):

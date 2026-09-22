@@ -188,12 +188,6 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         self.assertIn("did you mean search?", invalid_command.stderr)
         self.assertLess(len(invalid_command.stderr), 600)
 
-        stats = self.data("stats", "--since", "all", "--detail")
-        signatures = {
-            item["signature"] for item in stats["failures_detail"]["signatures"]
-        }
-        self.assertIn("invalid-option:inspect:source-inclusion", signatures)
-
     def test_invalid_contract_input_is_a_structured_error_not_a_traceback(self) -> None:
         invalid = self.aq("inspect", "OldName", "--path", "", expect=2)
         payload = json.loads(invalid.stderr)
@@ -245,23 +239,3 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         canonical_files = self.data("files", "index", "--limit", "2")
         alias_files = self.data("files", "index", "--max-results", "2")
         self.assertEqual(alias_files["files"], canonical_files["files"])
-
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        alias_event = next(
-            event for event in reversed(events) if event.get("command") == "files"
-        )
-        self.assertEqual(alias_event["compatibility_alias"], "files-max-results")
-        recovery_event = next(
-            event
-            for event in events
-            if event.get("recovery_hint") == "search-path-form"
-        )
-        self.assertEqual(recovery_event["error_category"], "invalid-arguments")
-        self.assertEqual(
-            recovery_event["error_signature"], "unexpected-positional:search"
-        )

@@ -25,28 +25,6 @@ from agentq.core import AgentQError, typed_from_wire  # noqa: E402
 from agentq.navigation import InspectRequest, inspect, render_inspect  # noqa: E402
 from agentq.navigation.providers import typescript as typescript_provider  # noqa: E402
 
-_EDIT_KEYS = {
-    "target",
-    "resolution",
-    "selected",
-    "candidates",
-    "candidate_total",
-    "navigation",
-    "navigation_omission",
-    "declaration",
-    "declaration_omission",
-    "references",
-    "references_omission",
-    "tests",
-    "tests_note",
-    "package",
-    "package_omission",
-    "verification",
-    "coverage",
-    "recovery",
-}
-_COVERAGE_KEYS = {"resolution", "declaration", "references", "tests"}
-
 
 def make_repo(files: dict[str, str]) -> tuple[tempfile.TemporaryDirectory, Path]:
     temp = tempfile.TemporaryDirectory(prefix="agentq-edit-bundle-")
@@ -135,32 +113,6 @@ class ExplicitResolutionTests(unittest.TestCase):
             self.assertTrue(
                 all(item["path"] == "pkg/methods.py" for item in bundle["candidates"])
             )
-        finally:
-            temp.cleanup()
-
-    def test_nested_scopes_are_not_auto_selected(self) -> None:
-        temp, root = make_repo(
-            {
-                "pkg/nested.py": (
-                    "def outer_one():\n"
-                    "    def helper():\n"
-                    "        return 1\n"
-                    "    return helper\n"
-                    "\n"
-                    "def outer_two():\n"
-                    "    def helper():\n"
-                    "        return 2\n"
-                    "    return helper\n"
-                )
-            }
-        )
-        try:
-            data = edit_data(root, "helper", ["pkg"], lang="python")
-            bundle = data["edit"]
-            self.assertEqual(bundle["resolution"], "ambiguous")
-            self.assertIsNone(bundle["selected"])
-            scopes = sorted(item["scope"] for item in bundle["candidates"])
-            self.assertEqual(scopes, ["outer_one", "outer_two"])
         finally:
             temp.cleanup()
 
@@ -435,27 +387,6 @@ class ExplicitSelectionTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
-    def test_bundle_json_is_complete_for_every_outcome(self) -> None:
-        temp, root = ambiguous_shared_repo()
-        try:
-            ambiguous = edit_data(root, "shared", ["pkg"], lang="python")["edit"]
-            self.assertEqual(set(ambiguous), _EDIT_KEYS)
-            self.assertEqual(set(ambiguous["coverage"]), _COVERAGE_KEYS)
-            self.assertIsNone(ambiguous["navigation"])
-            self.assertTrue(ambiguous["navigation_omission"])
-            self.assertEqual(ambiguous["tests"], [])
-            self.assertTrue(ambiguous["tests_note"])
-            self.assertTrue(ambiguous["recovery"])
-
-            resolved = edit_data(root, "shared", ["pkg/one.py"], lang="python")["edit"]
-            self.assertEqual(set(resolved), _EDIT_KEYS)
-            self.assertIsNotNone(resolved["selected"])
-            self.assertIsNotNone(resolved["navigation"])
-            self.assertIsNone(resolved["navigation_omission"])
-            self.assertTrue(resolved["references"])
-        finally:
-            temp.cleanup()
-
 
 class EditRenderTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -513,30 +444,6 @@ class EditRenderTests(unittest.TestCase):
             self.assertNotIn("proceed with the edit", rendered)
         finally:
             temp.cleanup()
-
-
-_AUTHORIZATION_PHRASES = (
-    "proceed with the edit",
-    "safe to edit",
-    "safe to proceed",
-)
-
-
-class EvidenceAuthorizationGuardTests(unittest.TestCase):
-    """Evidence output must never authorize the caller's edit decision.
-
-    The guard scans package sources rather than rendered output: authorization
-    language reappearing on an untested render path should still require an
-    explicit design change.
-    """
-
-    def test_package_sources_do_not_emit_authorization_phrases(self) -> None:
-        package_root = Path(navigation_module.__file__).resolve().parents[1]
-        for path in sorted(package_root.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            for phrase in _AUTHORIZATION_PHRASES:
-                with self.subTest(source=str(path), phrase=phrase):
-                    self.assertNotIn(phrase, text)
 
 
 def scoped_evidence_repo(

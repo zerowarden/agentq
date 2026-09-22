@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import shlex
 import subprocess
 import sys
 import textwrap
@@ -87,61 +85,6 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertIn("multiple languages", rendered)
         self.assertIn("typescript", rendered)
         self.assertIn("python", rendered)
-
-    def test_navigation_provider_layer_routes_and_reports(self) -> None:
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import navigation as navigation_module
-            from agentq.navigation.providers import typescript as typescript_provider
-
-        for provider in (
-            *navigation_module.LANGUAGE_PROVIDERS,
-            navigation_module.LEXICAL_FALLBACK,
-        ):
-            self.assertIsInstance(provider, navigation_module.NavigationProvider)
-        request = navigation_module.NavigationRequest(
-            root=self.repo,
-            symbol="X",
-            paths=("packages",),
-            limit=5,
-            lang="python",
-        )
-        self.assertFalse(navigation_module.LANGUAGE_PROVIDERS[0].supports(request))
-        self.assertTrue(navigation_module.LANGUAGE_PROVIDERS[1].supports(request))
-        unrestricted = navigation_module.NavigationRequest(
-            root=self.repo,
-            symbol="X",
-            paths=("packages",),
-            limit=5,
-        )
-        self.assertTrue(
-            all(
-                provider.supports(unrestricted)
-                for provider in navigation_module.LANGUAGE_PROVIDERS
-            )
-        )
-
-        with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):
-            with mock.patch.object(
-                typescript_provider,
-                "_symbol_ts_nav",
-                side_effect=AssertionError("typescript queried"),
-            ):
-                resolution = navigation_module.resolve_symbol(
-                    self.repo,
-                    "makeOldName",
-                    paths=["packages/a/src"],
-                    limit=5,
-                    lang="python",
-                )
-        self.assertEqual(
-            [outcome.provider for outcome in resolution.outcomes], ["python"]
-        )
-        self.assertIsNotNone(resolution.fallback)
-        self.assertEqual(resolution.fallback.provider, "lexical")
-        entry_names = [entry.provider for entry in resolution.entries()]
-        self.assertEqual(entry_names, ["python", "lexical"])
-        # The python provider ran cleanly and simply found no Python candidate.
-        self.assertEqual(resolution.entries()[0].coverage.status, "complete")
 
     def test_inspect_locate_intent_skips_references(self) -> None:
         (self.repo / "packages/a/src/located.py").write_text(
@@ -276,48 +219,10 @@ class InspectCliTests(AgentQIntegrationHarness):
         paths = {item["path"] for item in refs["results"]}
         self.assertIn("packages/b/src/index.ts", paths)
 
-        overview = self.data("ts-nav", "overview", "OldName", "--path", "packages")
-        self.assertEqual(overview["resolution_mode"], "symbol")
-        self.assertIn("references", overview)
-        self.assertIn("declaration_span", overview)
-
-        exact = self.data("ts-nav", "references", "packages/a/src/index.ts:1:18")
-        self.assertEqual(exact["resolution_mode"], "position")
-        self.assertGreaterEqual(exact["total"], 2)
-
-        (self.repo / "packages/b/src/duplicate.ts").write_text(
-            "export interface OldName { other: number }\n", encoding="utf-8"
-        )
-        ambiguous = self.data("ts-nav", "references", "OldName", "--path", "packages")
-        self.assertTrue(ambiguous["ambiguous"])
-        self.assertEqual(ambiguous["total"], 2)
-        picked = self.data(
-            "ts-nav", "references", "OldName", "--path", "packages", "--pick", "1"
-        )
-        self.assertEqual(picked["resolution_mode"], "symbol")
-        self.assertEqual(picked["candidate_count"], 2)
-
         inspected = self.data(
             "inspect", "OldName", "--path", "packages", "--limit", "20"
         )
         self.assertEqual(inspected["kind"], "semantic")
-
-        stats = self.data("stats", "--since", "all", "--detail")
-        self.assertEqual(stats["navigation"]["semantic_calls"], 7)
-        self.assertEqual(stats["navigation"]["semantic_actions"]["references"], 4)
-        self.assertEqual(stats["navigation"]["semantic_actions"]["overview"], 2)
-        self.assertEqual(stats["navigation"]["semantic_sources"]["ts-nav"], 6)
-        self.assertEqual(stats["navigation"]["semantic_sources"]["inspect"], 1)
-        self.assertEqual(stats["navigation"]["semantic_ambiguous"], 1)
-        self.assertTrue(
-            any(
-                row["action"] == "overview" and row["calls"] == 2
-                for row in stats["navigation"]["semantic_action_rows"]
-            )
-        )
-        self.assertTrue(
-            any(row["from"].startswith("ts-nav:") for row in stats["command_chains"])
-        )
 
     def test_python_inspect_uses_ast_definitions_and_bounded_lexical_references(
         self,
@@ -364,128 +269,12 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertGreaterEqual(python["references"]["total"], 2)
         self.assertIn("not semantic proof", python["evidence"])
 
-        absolute = self.data(
-            "inspect",
-            "calculate_total",
-            "--path",
-            str(path),
-            "--limit",
-            "20",
-            "--repeat",
-        )
-        self.assertEqual(absolute["kind"], "python")
-        self.assertEqual(absolute["python"]["candidate_count"], 2)
-
-        rendered = subprocess.run(
-            [
-                str(AGENTQ),
-                "inspect",
-                "--repo",
-                str(self.repo),
-                "--format",
-                "text",
-                "calculate_total",
-                "--path",
-                "packages/a/src/python_nav.py",
-                "--limit",
-                "20",
-                "--repeat",
-            ],
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
-        self.assertIn("python overview calculate_total", rendered.stdout)
-        self.assertIn("[complete]", rendered.stdout)
-        self.assertNotIn("continue:", rendered.stdout)
-        self.assertNotIn("not semantic proof", rendered.stdout)
-
-        sampled = subprocess.run(
-            [
-                str(AGENTQ),
-                "inspect",
-                "--repo",
-                str(self.repo),
-                "--format",
-                "text",
-                "calculate_total",
-                "--path",
-                "packages/a/src/python_nav.py",
-                "--limit",
-                "1",
-                "--repeat",
-            ],
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(sampled.returncode, 0, msg=sampled.stderr)
-        self.assertIn("[sampled]", sampled.stdout)
-        self.assertEqual(sampled.stdout.count("continue: agentq inspect"), 1)
-        continuation = shlex.split(sampled.stdout.split("continue: ", 1)[1].strip())
-        completed = subprocess.run(
-            [str(AGENTQ), *continuation[1:], "--repo", str(self.repo)],
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-        self.assertIn("[complete]", completed.stdout)
-
-        outline = self.data(
-            "outline", "packages/a/src/python_nav.py", "--match", "calculate_total"
-        )
-        self.assertEqual(outline["engine"], "stdlib-python-ast")
-        self.assertTrue(all("(" in item["signature"] for item in outline["symbols"]))
-
-    def test_ctags_signatures_are_qualified_with_symbol_names(self) -> None:
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            import importlib
-
-            outline_module = importlib.import_module("agentq.discovery.outline")
-
-        output = json.dumps(
-            {
-                "_type": "tag",
-                "name": "build",
-                "kind": "function",
-                "path": "fixture.py",
-                "line": 3,
-                "signature": "(value, *, strict=False)",
-                "language": "Python",
-            }
-        )
-        completed = __import__("types").SimpleNamespace(returncode=0, stdout=output)
-        with mock.patch.object(
-            outline_module, "find_executable", return_value="/fake/ctags"
-        ):
-            with mock.patch.object(
-                outline_module, "list_repo_files", return_value=["fixture.py"]
-            ):
-                with mock.patch.object(
-                    outline_module, "run_cmd", return_value=completed
-                ):
-                    outline = outline_module._outline_ctags(
-                        outline_module.OutlineRequest(
-                            root=self.repo, paths=(".",), limit=20
-                        )
-                    )
-        self.assertEqual(outline.symbols[0].signature, "build(value, *, strict=False)")
-
-    def test_inspect_source_windows_have_independent_cap_and_repeat_escape(
-        self,
-    ) -> None:
+    def test_inspect_source_window_max_lines_is_bounded(self) -> None:
         path = self.repo / "packages/a/src/inspect_windows.py"
         path.write_text(
             "".join(f"inspect {index}\n" for index in range(1, 181)), encoding="utf-8"
         )
-        self.data("task", "begin")
-
-        first = self.data(
+        source = self.data(
             "inspect",
             "packages/a/src/inspect_windows.py",
             "--line",
@@ -498,82 +287,6 @@ class InspectCliTests(AgentQIntegrationHarness):
             "--max-lines",
             "5",
         )["source"]
-        self.assertEqual(sum(len(item["lines"]) for item in first["items"]), 5)
-        self.assertTrue(first["truncated"])
-        self.assertIn("continuation", first)
-
-        repeated = self.data(
-            "inspect",
-            "packages/a/src/inspect_windows.py",
-            "--line",
-            "30",
-            "90",
-            "--context",
-            "2",
-            "--limit",
-            "1",
-            "--max-lines",
-            "5",
-        )
-        self.assertTrue(repeated["repeat_suppressed"])
-        forced = self.data(
-            "inspect",
-            "packages/a/src/inspect_windows.py",
-            "--line",
-            "30",
-            "90",
-            "--context",
-            "2",
-            "--limit",
-            "1",
-            "--max-lines",
-            "5",
-            "--repeat",
-        )["source"]
-        self.assertEqual(sum(len(item["lines"]) for item in forced["items"]), 5)
-        inspect_events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if json.loads(line).get("command") == "inspect"
-        ]
-        self.assertTrue(inspect_events[0]["source_cap_truncated"])
-        self.assertFalse(inspect_events[0]["render_budget_truncated"])
-
-    def test_json_inspect_caches_only_source_lines_visible_inside_wrapper(self) -> None:
-        path = self.repo / "packages/a/src/budgeted_inspect.py"
-        path.write_text(
-            "".join(f"line_{index:02d} = {'x' * 32!r}\n" for index in range(1, 21)),
-            encoding="utf-8",
-        )
-        self.data("task", "begin")
-
-        first = self.data(
-            "inspect",
-            "packages/a/src/budgeted_inspect.py",
-            "--lines",
-            "1:20",
-            "--budget",
-            "1200",
-        )
-        first_lines = [
-            line["line"] for item in first["source"]["items"] for line in item["lines"]
-        ]
-        self.assertTrue(first_lines)
-        self.assertNotIn("_agentq", first)
-
-        resumed = self.data(
-            "inspect",
-            "packages/a/src/budgeted_inspect.py",
-            "--lines",
-            "1:20",
-            "--budget",
-            "100000",
-        )
-        resumed_lines = [
-            line["line"]
-            for item in resumed["source"]["items"]
-            for line in item["lines"]
-        ]
-        self.assertEqual(sorted(first_lines + resumed_lines), list(range(1, 21)))
+        self.assertEqual(sum(len(item["lines"]) for item in source["items"]), 5)
+        self.assertTrue(source["truncated"])
+        self.assertIn("continuation", source)

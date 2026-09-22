@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import textwrap
 
@@ -274,14 +273,6 @@ class VerifyCliTests(AgentQIntegrationHarness):
                 for result in data["results"]
             )
         )
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl").read_text().splitlines()
-        ]
-        event = events[-1]
-        self.assertEqual(event["command"], "verify-changed")
-        self.assertEqual(event["metrics"]["verification_mode"], "standard")
-        self.assertGreaterEqual(event["metrics"]["affected_packages"], 2)
 
     def test_verify_changed_propagates_failure_and_stops(self) -> None:
         self.change_a()
@@ -358,9 +349,7 @@ class VerifyCliTests(AgentQIntegrationHarness):
         self.assertIn("step_limit", data["coverage"]["reason"])
         self.assertEqual(data["coverage"]["status"], "sampled")
 
-    def test_canonical_verify_uses_task_scope_and_stats_render_scope_distribution(
-        self,
-    ) -> None:
+    def test_canonical_verify_uses_task_scope(self) -> None:
         self.change_a("\nexport const beforeVerifyTask = true\n")
         self.data("task", "begin")
         self.change_a("\nexport const duringVerifyTask = true\n")
@@ -368,18 +357,6 @@ class VerifyCliTests(AgentQIntegrationHarness):
         self.assertEqual(plan["verification_scope"], "task")
         self.assertEqual(plan["status"], "planned")
         self.assertIn("packages/a/src/index.ts", plan["changed_files"])
-
-        summary = self.data("stats", "--since", "all")
-        self.assertEqual(summary["verification"]["checks_instrumented_runs"], 1)
-        self.assertEqual(summary["verification"]["files_instrumented_runs"], 1)
-        self.assertEqual(summary["verification"]["packages_instrumented_runs"], 1)
-
-        stats = self.data("stats", "--since", "all", "--detail")
-        scope = next(
-            row for row in stats["verification"]["scope_rows"] if row["scope"] == "task"
-        )
-        self.assertEqual(scope["dry_runs"], 1)
-        self.assertEqual(stats["verification"]["recent"][0]["status"], "dry-run")
 
         argv = [
             str(AGENTQ),

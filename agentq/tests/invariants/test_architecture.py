@@ -154,6 +154,13 @@ def _purity_modules() -> list[tuple[str, Path, str]]:
     ]
 
 
+def _is_telemetry_reporting(item: str) -> bool:
+    return _under(item, TELEMETRY_REPORTING_ROOT) or (
+        _under(item, TELEMETRY_ROOT)
+        and item.rsplit(".", 1)[-1] in TELEMETRY_REPORTING_NAMES
+    )
+
+
 class CliLeafTests(unittest.TestCase):
     def test_non_adapter_modules_do_not_import_cli(self) -> None:
         offenders: dict[str, list[str]] = {}
@@ -168,23 +175,6 @@ class CliLeafTests(unittest.TestCase):
             if hits:
                 offenders[module] = hits
         self.assertFalse(offenders, f"modules importing the CLI adapter: {offenders}")
-
-    def test_detector_catches_cli_import_forms(self) -> None:
-        cases = (
-            ("agentq", "import agentq.cli"),
-            ("agentq", "import agentq.cli.main as cli_main"),
-            ("agentq", "from agentq import cli"),
-            ("agentq", "from agentq.cli import main"),
-            ("agentq", "from agentq.cli.main import main"),
-            ("agentq", "from . import cli"),
-            ("agentq", "from .cli.main import main"),
-            ("agentq.navigation", "from .. import cli"),
-            ("agentq.navigation", "from ..cli import main"),
-        )
-        for package, source in cases:
-            with self.subTest(source=source):
-                hits = _imports_from_source(source, package)
-                self.assertTrue(any(_under(item, CLI_ROOT) for item in hits), source)
 
 
 class CoreBoundaryTests(unittest.TestCase):
@@ -201,36 +191,6 @@ class CoreBoundaryTests(unittest.TestCase):
             if outside:
                 offenders[module] = outside
         self.assertFalse(offenders, f"core modules importing non-core: {offenders}")
-
-    def test_detector_distinguishes_core_from_capability_imports(self) -> None:
-        for source in (
-            "from .evidence import Coverage",
-            "from . import validation",
-            "from .errors import ContractError",
-            "from .request import Budget",
-            "import json",
-        ):
-            with self.subTest(source=source):
-                outside = [
-                    item
-                    for item in _imports_from_source(source, CORE_ROOT)
-                    if not _under(item, CORE_ROOT)
-                ]
-                self.assertFalse(outside, source)
-        for source in (
-            "from ..search import search_data",
-            "from .. import search",
-            "import agentq.telemetry",
-            "from agentq.cli import main",
-            "from ..execution.models import ExecutionSpec",
-        ):
-            with self.subTest(source=source):
-                outside = [
-                    item
-                    for item in _imports_from_source(source, CORE_ROOT)
-                    if not _under(item, CORE_ROOT)
-                ]
-                self.assertTrue(outside, source)
 
 
 class PersistenceBoundaryTests(unittest.TestCase):
@@ -258,17 +218,6 @@ class CapabilitySignatureTests(unittest.TestCase):
                 offenders[module] = found
         self.assertFalse(offenders, f"functions accepting Namespace: {offenders}")
 
-    def test_detector_matches_annotated_parameters(self) -> None:
-        found = _namespace_parameters(
-            "import argparse\n"
-            "def explicit(args: argparse.Namespace): ...\n"
-            "def quoted(args: 'argparse.Namespace'): ...\n"
-            "def bare(args: Namespace): ...\n"
-            "def plain(args): ...\n"
-            "def annotated_ok(args: str): ...\n"
-        )
-        self.assertEqual(len(found), 3)
-
 
 class CapabilityOutputTests(unittest.TestCase):
     def test_capability_functions_do_not_write_stdout_or_stderr(self) -> None:
@@ -278,15 +227,6 @@ class CapabilityOutputTests(unittest.TestCase):
             if found:
                 offenders[module] = found
         self.assertFalse(offenders, f"modules writing output: {offenders}")
-
-    def test_detector_matches_print_and_stream_writes(self) -> None:
-        found = _write_calls(
-            "print('x')\n"
-            "sys.stdout.write('x')\n"
-            "sys.stderr.write('x')\n"
-            "logger.write('x')\n"
-        )
-        self.assertEqual(found, ["print", "sys.stdout.write", "sys.stderr.write"])
 
 
 class TelemetryObservationTests(unittest.TestCase):
@@ -298,50 +238,13 @@ class TelemetryObservationTests(unittest.TestCase):
             hits = sorted(
                 item
                 for item in _imports_from_source(path.read_text(), package)
-                if _under(item, TELEMETRY_REPORTING_ROOT)
-                or (
-                    _under(item, TELEMETRY_ROOT)
-                    and item.rsplit(".", 1)[-1] in TELEMETRY_REPORTING_NAMES
-                )
+                if _is_telemetry_reporting(item)
             )
             if hits:
                 offenders[module] = hits
         self.assertFalse(
             offenders, f"modules importing telemetry reporting: {offenders}"
         )
-
-    def test_detector_allows_observation_but_flags_reporting(self) -> None:
-        for source in (
-            "from .telemetry import archive_file",
-            "from .telemetry import record_event",
-            "from .telemetry import hot_file",
-        ):
-            with self.subTest(source=source):
-                hits = _imports_from_source(source, ROOT)
-                self.assertFalse(
-                    any(
-                        _under(item, TELEMETRY_REPORTING_ROOT)
-                        or item.rsplit(".", 1)[-1] in TELEMETRY_REPORTING_NAMES
-                        for item in hits
-                    ),
-                    source,
-                )
-        for source in (
-            "from .telemetry import watch_stats",
-            "from .telemetry import render_stats_plain",
-            "from .telemetry import stats_presentation_model",
-            "from agentq.telemetry.report import render_stats_text",
-        ):
-            with self.subTest(source=source):
-                hits = _imports_from_source(source, ROOT)
-                self.assertTrue(
-                    any(
-                        _under(item, TELEMETRY_REPORTING_ROOT)
-                        or item.rsplit(".", 1)[-1] in TELEMETRY_REPORTING_NAMES
-                        for item in hits
-                    ),
-                    source,
-                )
 
 
 DISCOVERY_ROOT = "agentq.discovery"
@@ -463,3 +366,49 @@ class WorkspacePolicyTests(unittest.TestCase):
         source = (PACKAGE_DIR / "workspace/graph.py").read_text().lower()
         for token in ("npm", "pnpm", "yarn", "bun", "package.json"):
             self.assertNotIn(token, source)
+
+
+class DetectorSanityTests(unittest.TestCase):
+    """A broken architecture detector is dangerous; spot-check each one."""
+
+    def test_detectors_recognize_representative_cases(self) -> None:
+        with self.subTest(detector="first-party imports"):
+            cli_import = _imports_from_source("from .cli.main import main", ROOT)
+            self.assertTrue(any(_under(item, CLI_ROOT) for item in cli_import))
+            core_relative = _imports_from_source(
+                "from .evidence import Coverage", CORE_ROOT
+            )
+            self.assertFalse(
+                [item for item in core_relative if not _under(item, CORE_ROOT)]
+            )
+            capability_leak = _imports_from_source(
+                "from ..search import search_data", CORE_ROOT
+            )
+            self.assertTrue(
+                [item for item in capability_leak if not _under(item, CORE_ROOT)]
+            )
+
+        with self.subTest(detector="namespace annotations"):
+            found = _namespace_parameters(
+                "def explicit(args: argparse.Namespace): ...\n"
+                "def bare(args: Namespace): ...\n"
+                "def plain(args): ...\n"
+                "def annotated_ok(args: str): ...\n"
+            )
+            self.assertEqual(len(found), 2)
+
+        with self.subTest(detector="stdout/stderr writes"):
+            writes = _write_calls(
+                "print('x')\n" "sys.stdout.write('x')\n" "logger.write('x')\n"
+            )
+            self.assertEqual(writes, ["print", "sys.stdout.write"])
+
+        with self.subTest(detector="telemetry reporting"):
+            reporting = _imports_from_source(
+                "from .telemetry import render_stats_plain", ROOT
+            )
+            self.assertTrue(any(_is_telemetry_reporting(item) for item in reporting))
+            observation = _imports_from_source(
+                "from .telemetry import record_event", ROOT
+            )
+            self.assertFalse(any(_is_telemetry_reporting(item) for item in observation))

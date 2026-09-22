@@ -70,6 +70,14 @@ class MutationCliTests(AgentQIntegrationHarness):
         self.assertEqual(applied["remaining_matches"], 0)
         self.assertEqual(applied["matches"], scanned["matches"])
 
+    def test_impact_refuses_outside_manifest(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        manifest = outside / "package.json"
+        manifest.write_text("{}", encoding="utf-8")
+        result = self.aq("impact", str(manifest), expect=2)
+        self.assertIn("outside repository", result.stdout + result.stderr)
+
     def test_impact_reports_observations_and_rules(self) -> None:
         self.change_a("\nexport const fanout = true\n")
         impact = self.data("impact", "makeOldName", "--path", "packages")

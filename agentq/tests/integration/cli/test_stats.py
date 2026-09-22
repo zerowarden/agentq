@@ -170,6 +170,36 @@ class StatsCliTests(AgentQIntegrationHarness):
             row["rendering_overhead_chars"],
         )
 
+    def test_stats_aggregates_budget_removal_and_search_formats_from_events(
+        self,
+    ) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq.telemetry.analytics.efficiency import (
+                command_rows,
+                search_format_usage,
+            )
+
+        events = [
+            {
+                "command": "inspect",
+                "tool_status": "ok",
+                "visible_chars": 40,
+                "prebudget_chars": 100,
+            },
+            {"command": "search", "output_format": "json"},
+            {"command": "search", "output_format": "compact-json"},
+            {"command": "search", "output_format": "text"},
+        ]
+        rows, _ = command_rows(events)
+        inspect_row = next(row for row in rows if row["command"] == "inspect")
+        self.assertEqual(inspect_row["budget_removed_chars"], 60)
+
+        usage = search_format_usage(events)
+        self.assertEqual(usage["calls"], 3)
+        self.assertEqual(usage["compact_json_calls"], 1)
+        self.assertEqual(usage["legacy_json_calls"], 1)
+        self.assertEqual(usage["compact_structured_percent"], 50.0)
+
     def test_stats_summary_without_evidence_reports_overhead_not_reduction(
         self,
     ) -> None:
@@ -272,6 +302,7 @@ class StatsCliTests(AgentQIntegrationHarness):
         self.assertEqual(accepted["status"], "accepted")
 
         stats = self.data("stats", "--since", "all")
+        self.assertEqual(stats["tasks"]["started"], 1)
         self.assertEqual(stats["tasks"]["accepted"], 1)
         self.assertEqual(stats["tasks"]["active"], 0)
         self.assertEqual(stats["tasks"]["attributed_calls"], 2)
@@ -585,6 +616,26 @@ class StatsCliTests(AgentQIntegrationHarness):
         self.assertEqual(measured_zero["checks_instrumented_runs"], 1)
         self.assertEqual(measured_zero["checks_executed"], 0)
         self.assertEqual(measured_zero["files_distribution"]["p50"], 0)
+
+    def test_verification_scope_rows_and_recent_status(self) -> None:
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq.telemetry import verification_stats
+
+        stats = verification_stats(
+            [
+                {
+                    "subject_status": "planned",
+                    "metrics": {
+                        "verification_scope": "task",
+                        "verification_mode": "standard",
+                    },
+                }
+            ],
+            detailed=True,
+        )
+        row = next(row for row in stats["scope_rows"] if row["scope"] == "task")
+        self.assertEqual(row["dry_runs"], 1)
+        self.assertEqual(stats["recent"][0]["status"], "dry-run")
 
     def test_stats_ansi_renderer_colors_headers_and_only_status_numbers_within_budget(
         self,

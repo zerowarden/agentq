@@ -97,21 +97,6 @@ class BudgetCliTests(AgentQIntegrationHarness):
         self.assertLessEqual(len(result.stdout.strip()), 320)
         self.assertIn("complete Python records omitted", result.stdout)
 
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if json.loads(line).get("command") == "inspect"
-        ]
-        event = events[-1]
-        self.assertTrue(event["render_budget_truncated"])
-        self.assertGreater(event["prebudget_chars"], event["visible_chars"])
-
-        stats = self.data("stats", "--since", "all")
-        inspect = next(row for row in stats["commands"] if row["command"] == "inspect")
-        self.assertGreater(inspect["budget_removed_chars"], 0)
-
     def test_structural_budgeting_is_valid_bounded_and_preserves_complete_records(
         self,
     ) -> None:
