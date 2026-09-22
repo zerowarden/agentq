@@ -15,15 +15,15 @@ from unittest import mock
 from agentq import navigation as navigation_module
 from agentq.core import (
     SYNTACTIC,
+    Coverage,
     ProviderResult,
     ProviderStatus,
     status_of,
     typed_coverage,
     typed_from_wire,
 )
-from agentq.discovery import OutlineRequest
+from agentq.discovery import OutlineRequest, python_outline
 from agentq.navigation import (
-    python_outline,
     python_symbol_overview,
     query_provider,
     render_python_overview,
@@ -139,19 +139,18 @@ class ProviderCoverageTests(unittest.TestCase):
 
         # A provider outside the requested domain is excluded from the merged
         # coverage, so it can never downgrade (or upgrade) the visible status.
-        payload = navigation_module.TypeScriptNav(
-            action="locate",
-            resolution_mode="symbol",
+        evidence = navigation_module.SymbolEvidence(
+            provider="python",
+            provenance=SYNTACTIC,
+            coverage=typed_coverage("complete"),
             candidates=(
-                navigation_module.TypeScriptLocation(
-                    path="a.ts",
+                navigation_module.SymbolCandidate(
+                    path="a.py",
                     line=1,
                     column=1,
                     end_line=1,
-                    end_column=10,
-                    preview="function A",
-                    external=False,
                     kind="function",
+                    signature="def A()",
                 ),
             ),
             candidate_count=1,
@@ -161,7 +160,7 @@ class ProviderCoverageTests(unittest.TestCase):
                 ProviderResult(
                     provider="python",
                     status=ProviderStatus.OK,
-                    payload=payload,
+                    payload=evidence,
                     provenance=SYNTACTIC,
                     candidate_count=1,
                     coverage=typed_coverage("complete"),
@@ -239,7 +238,7 @@ class ProviderCoverageTests(unittest.TestCase):
                 ],
                 "coverage": {"status": "complete", "reason": []},
             }
-            nav = navigation_module.TypeScriptNav.from_payload(
+            nav = navigation_module.ts_nav_from_payload(
                 ts_data, coverage=typed_from_wire(ts_data["coverage"])
             )
             ts_rendered = render_ts_nav(nav, budget=10)
@@ -257,16 +256,13 @@ class ProviderCoverageTests(unittest.TestCase):
         )
         try:
             with mock.patch.object(
-                navigation_module.TypeScriptProvider, "locate", return_value=None
+                navigation_module.TypeScriptProvider,
+                "inspect_symbol",
+                return_value=None,
             ):
-                with mock.patch.object(
-                    navigation_module.TypeScriptProvider,
-                    "overview",
-                    return_value=None,
-                ):
-                    resolution = navigation_module.resolve_symbol(
-                        root, "Wanted", paths=["."], limit=10
-                    )
+                resolution = navigation_module.resolve_symbol(
+                    root, "Wanted", paths=["."], limit=10
+                )
             entries = {entry.provider: entry for entry in resolution.entries()}
             # Semantic failure stays partial/unavailable; lexical success cannot
             # promote the merged coverage to complete.
@@ -343,23 +339,17 @@ class ProviderCoverageTests(unittest.TestCase):
             name = "null-test"
             provenance = "lexical"
 
-            def locate(self, _request):
-                return None
-
-            def overview(self, _request):
+            def inspect_symbol(self, _request, *, include_references):
                 return None
 
         class NoCoverageProvider:
             name = "no-coverage"
             provenance = "lexical"
 
-            def locate(self, _request):
-                return navigation_module.TypeScriptNav(
-                    action="locate", resolution_mode="symbol"
+            def inspect_symbol(self, _request, *, include_references):
+                return navigation_module.SymbolEvidence(
+                    provider=self.name, provenance=self.provenance, coverage=Coverage()
                 )
-
-            def overview(self, _request):
-                return self.locate(_request)
 
         self.assertEqual(
             query_provider(NullProvider(), request, True).status,

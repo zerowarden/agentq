@@ -1,15 +1,14 @@
-"""Go verification provider: module units and package-level test targets."""
+"""Go verification provider: module units and module-wide test targets."""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 from agentq.core import relpath
-from agentq.workspace import ChangeSet, DependencyGraph, Package, manifest_units
+from agentq.workspace import ChangeSet, ProjectUnit, UnitId, discover_go
 
-from ..models import CheckKind, CheckSpec, ProviderPlan, VerifyConfig
+from ..models import CheckKind, CheckSpec, PackageRow, ProviderPlan, VerifyConfig
 from ..planning import (
     dependent_depth,
     group_by_units,
@@ -38,56 +37,51 @@ class GoVerificationProvider:
         mode: str,
         dependents: str,
         include_build: bool,
-        contract_changed: bool,
         config: VerifyConfig,
     ) -> ProviderPlan:
-        units = self._packages(root, repo_files)
-        graph = DependencyGraph.from_packages(units)
+        workspace = discover_go(root, repo_files)
+        graph = workspace.graph
+        units = graph.units
         depth = dependent_depth(mode, dependents)
         grouped, unowned = group_by_units(changes.files, units, config)
-        direct_changed_keys = set(grouped)
+        direct_changed = set(grouped)
         docs_only = changes.docs_only
-        distances = (
-            {}
-            if depth == 0
-            else graph.dependents(set(direct_changed_keys), depth=depth)
-        )
-        ordered = graph.dependency_order(set(direct_changed_keys))
-        order_rank = {key: index for index, key in enumerate(ordered)}
+        distances = {} if depth == 0 else graph.dependents(direct_changed, depth=depth)
+        ordered = graph.dependency_order(direct_changed | set(distances))
+        order_rank = {unit_id.path: index for index, unit_id in enumerate(ordered)}
 
-        rows = []
+        rows: list[PackageRow] = []
         checks: list[CheckSpec] = []
-        for key in ordered:
-            unit = units[key]
-            unit_dir = root if key == "." else root / key
-            owned_files = sorted(grouped.get(key, []))
+        for unit_id in ordered:
+            unit = units[unit_id]
+            unit_dir = root if unit_id.path == "." else root / unit_id.path
+            owned_files = sorted(grouped.get(unit_id, []))
             local_files = [relpath(unit_dir, root / path) for path in owned_files]
             module_changed = any(
                 PurePosixPath(path).name == "go.mod"
-                and (PurePosixPath(path).parent.as_posix() or ".") == key
+                and (PurePosixPath(path).parent.as_posix() or ".") == unit_id.path
                 for path in owned_files
             )
             scope = (
                 "global"
                 if module_changed
-                else "changed"
-                if key in direct_changed_keys
-                else "dependent"
+                else "changed" if unit_id in direct_changed else "dependent"
             )
-            distance = int(distances.get(key, 0))
+            distance = int(distances.get(unit_id, 0))
             rows.append(
                 package_row(
-                    unit.name, key, scope, distance, local_files, limit, ()
+                    unit.name, unit_id.path, scope, distance, local_files, limit, ()
                 )
             )
             if docs_only:
                 continue
             checks.extend(
-                self._module_checks(unit, key, scope, local_files, module_changed)
+                self._module_checks(unit, unit_id, scope, local_files, module_changed)
             )
 
         notes = [
-            "Go checks run package-level tests; cross-package effects are not inferred."
+            "Go checks run module-wide (go test ./...) because package reverse "
+            "dependencies are not inferred yet."
         ]
         if docs_only:
             notes.append(
@@ -105,47 +99,35 @@ class GoVerificationProvider:
             global_changes=(),
             unowned=tuple(unowned),
             changed_packages=tuple(
-                sorted(units[key].name for key in direct_changed_keys)
+                sorted(units[unit_id].name for unit_id in direct_changed)
             ),
-            dependent_packages=tuple(sorted(units[key].name for key in distances)),
-            affected_packages=tuple(
-                units[key].name for key in ordered if key in units
+            dependent_packages=tuple(
+                sorted(units[unit_id].name for unit_id in distances)
             ),
+            affected_packages=tuple(units[unit_id].name for unit_id in ordered),
             packages=tuple(rows),
             checks=sorted_checks(checks, order_rank),
             notes=tuple(notes),
             workspace_packages=len(units),
-            workspace_edges=graph.edges(),
+            workspace_edges=graph.edge_count(),
         )
-
-    def _packages(self, root: Path, repo_files: Sequence[str]) -> dict[str, Package]:
-        units: dict[str, Package] = {}
-        for manifest in manifest_units(root, repo_files, "go.mod"):
-            try:
-                content = manifest.path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                content = ""
-            match = re.search(r"(?m)^module\s+(\S+)\s*$", content)
-            name = (
-                match.group(1)
-                if match
-                else (
-                    root.name
-                    if manifest.key == "."
-                    else PurePosixPath(manifest.key).name
-                )
-            )
-            units[manifest.key] = Package(path=manifest.key, name=name)
-        return units
 
     def _module_checks(
         self,
-        unit: Package,
-        key: str,
+        unit: ProjectUnit,
+        unit_id: UnitId,
         scope: str,
         local_files: Sequence[str],
         module_changed: bool,
     ) -> list[CheckSpec]:
+        """Plan module-wide Go tests.
+
+        Package reverse dependencies are not inferred yet, so a narrower
+        ``go test ./pkg/...`` could miss consumers of a changed exported
+        identifier. Until package dependencies are derived (for example from
+        ``go list``), the sound fallback is to test the whole module.
+        """
+        key = unit_id.path
         if module_changed:
             return [
                 make_check(
@@ -157,22 +139,10 @@ class GoVerificationProvider:
                     reason=(
                         "the module definition changed, so the whole module is verified"
                     ),
-                    priority=30,
                     scope="global",
                 )
             ]
-        package_dirs = sorted(
-            {
-                str(PurePosixPath(path).parent)
-                for path in local_files
-                if path.endswith(".go")
-            }
-        )
-        targets = [
-            "./..." if directory == "." else f"./{directory.removeprefix('./')}/..."
-            for directory in package_dirs
-        ]
-        if not targets:
+        if not any(path.endswith(".go") for path in local_files):
             return []
         return [
             make_check(
@@ -180,9 +150,12 @@ class GoVerificationProvider:
                 package=unit.name,
                 package_key=key,
                 cwd=key,
-                command=["go", "test", *targets],
-                reason="changed Go files belong to these packages",
-                priority=20,
+                command=["go", "test", "./..."],
+                reason=(
+                    "changed Go files can alter exported identifiers; package "
+                    "reverse dependencies are not inferred, so the whole module "
+                    "is tested"
+                ),
                 scope=scope,
             )
         ]

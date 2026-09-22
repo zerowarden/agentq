@@ -1,9 +1,15 @@
 """Verification planning: changed files to provider analysis to plan.
 
 ``plan_verification`` is the ecosystem-agnostic orchestrator. It loads the
-optional ``.agentq.toml`` configuration, detects applicable providers, merges
-their typed :class:`~agentq.verification.models.ProviderPlan` contributions,
-and returns the single :class:`VerificationPlan` the runner executes.
+optional ``.agentq.toml`` configuration, detects applicable providers, and
+aggregates their typed :class:`~agentq.verification.models.ProviderPlan`
+contributions into one :class:`VerificationPlan`. Each provider keeps its own
+workspace and package facts; the merged plan holds the complete logical check
+plan plus cross-provider change facts.
+
+``limit`` bounds per-check argument selection inside providers. Display
+truncation is a separate ``display_limit`` applied only when projecting the
+plan to the wire, and execution selects a bounded subset later in the runner.
 """
 
 from __future__ import annotations
@@ -11,30 +17,27 @@ from __future__ import annotations
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import tomllib
+import tomllib  # pyright: ignore[reportMissingTypeStubs]
 
 from agentq.core import (
     COMPLETE,
-    RESULT_LIMIT,
-    SAMPLED,
-    STEP_LIMIT,
+    PARTIAL,
+    PROVIDER_UNAVAILABLE,
+    UNATTRIBUTED,
     AgentQError,
+    Coverage,
     typed_coverage,
 )
 from agentq.discovery import list_repo_files
-from agentq.workspace import (
-    ChangeSet,
-    changed_files,
-    is_public_contract_change,
-    matches_pattern,
-    package_manager,
-)
+from agentq.workspace import ChangeSet, changed_files, matches_pattern
 
 from .models import (
     EMPTY_CONFIG,
+    ChangeSummary,
     CheckKind,
+    CheckSpec,
     ProviderPlan,
     VerificationPlan,
     VerifyConfig,
@@ -43,19 +46,19 @@ from .models import (
 from .planning import make_check
 from .providers import PROVIDER_NAMES, VERIFICATION_PROVIDERS
 
-_CONFIGURED_PRIORITY = 5
-
 
 def load_verify_config(root: Path) -> VerifyConfig:
     path = root / ".agentq.toml"
     if not path.is_file():
         return EMPTY_CONFIG
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise AgentQError(f"invalid .agentq.toml: {exc}") from exc
     verify_raw = data.get("verify")
-    verify: dict[str, Any] = verify_raw if isinstance(verify_raw, dict) else {}
+    verify: dict[str, Any] = (
+        cast("dict[str, Any]", verify_raw) if isinstance(verify_raw, dict) else {}
+    )
     return VerifyConfig(
         providers=_provider_selection(verify),
         commands=_configured_commands(verify),
@@ -70,18 +73,19 @@ def _provider_selection(verify: dict[str, Any]) -> tuple[str, ...] | None:
     if providers is None:
         return None
     if not isinstance(providers, list) or not all(
-        isinstance(item, str) for item in providers
+        isinstance(item, str) for item in cast("list[Any]", providers)
     ):
         raise AgentQError(
             ".agentq.toml [verify] providers must be a list of provider names"
         )
-    unknown = [item for item in providers if item not in PROVIDER_NAMES]
+    known: list[str] = cast("list[str]", providers)
+    unknown = [item for item in known if item not in PROVIDER_NAMES]
     if unknown:
         raise AgentQError(
             f".agentq.toml names unknown verification providers: {', '.join(unknown)}; "
             f"known providers: {', '.join(PROVIDER_NAMES)}"
         )
-    return tuple(providers)
+    return tuple(known)
 
 
 def _configured_commands(verify: dict[str, Any]) -> tuple[tuple[str, ...], ...]:
@@ -89,13 +93,13 @@ def _configured_commands(verify: dict[str, Any]) -> tuple[tuple[str, ...], ...]:
     if commands_raw is None:
         return ()
     if not isinstance(commands_raw, list) or not all(
-        isinstance(item, str) for item in commands_raw
+        isinstance(item, str) for item in cast("list[Any]", commands_raw)
     ):
         raise AgentQError(
             ".agentq.toml [verify] commands must be a list of command strings"
         )
     commands: list[tuple[str, ...]] = []
-    for command in commands_raw:
+    for command in cast("list[str]", commands_raw):
         argv = shlex.split(command)
         if not argv:
             raise AgentQError(
@@ -110,12 +114,12 @@ def _pattern_list(verify: dict[str, Any], field: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list) or not all(
-        isinstance(item, str) for item in value
+        isinstance(item, str) for item in cast("list[Any]", value)
     ):
         raise AgentQError(
             f".agentq.toml [verify] {field} must be a list of glob patterns"
         )
-    return tuple(value)
+    return tuple(cast("list[str]", value))
 
 
 def _ownership(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
@@ -127,7 +131,7 @@ def _ownership(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
             ".agentq.toml [ownership] must be a table of path prefixes to package names"
         )
     ownership: list[tuple[str, str]] = []
-    for prefix, name in ownership_raw.items():
+    for prefix, name in cast("dict[str, Any]", ownership_raw).items():
         if not isinstance(name, str):
             raise AgentQError(".agentq.toml [ownership] values must be package names")
         ownership.append((str(prefix), name))
@@ -139,12 +143,17 @@ def plan_verification(
     *,
     base: str | None = None,
     limit: int = 60,
+    display_limit: int = 0,
     mode: str = "standard",
     dependents: str = "auto",
     include_build: bool = False,
     changed_override: Sequence[str] | None = None,
 ) -> VerificationPlan:
-    """Build the merged verification plan for the current change set."""
+    """Build the merged verification plan for the current change set.
+
+    ``limit`` bounds provider-level file selection inside check arguments.
+    ``display_limit`` bounds only the wire projection; zero means unbounded.
+    """
     config = load_verify_config(root)
     changes = (
         ChangeSet.from_paths(changed_override)
@@ -163,14 +172,6 @@ def plan_verification(
                 kept.append(path)
         changes = ChangeSet(files=tuple(kept))
 
-    contract_changed = any(
-        is_public_contract_change(path)
-        or any(
-            matches_pattern(path.strip("/"), pattern)
-            for pattern in config.contract_patterns
-        )
-        for path in changes.files
-    )
     repo_files = list_repo_files(root)
     providers = [
         provider
@@ -187,7 +188,6 @@ def plan_verification(
             mode=mode,
             dependents=dependents,
             include_build=include_build,
-            contract_changed=contract_changed,
             config=config,
         )
         for provider in providers
@@ -202,8 +202,10 @@ def plan_verification(
             f"{len(ignored)} changed file(s) ignored via .agentq.toml [verify] ignore: {summary}"
         )
     if not plans:
-        return _empty_plan(root, changes, mode, dependents, base, limit, notes)
-    return _merge_plans(root, plans, config, mode, dependents, base, limit, notes)
+        return _empty_plan(root, changes, mode, dependents, base, display_limit, notes)
+    return _merge_plans(
+        root, plans, config, changes, mode, dependents, base, display_limit, notes
+    )
 
 
 def _empty_plan(
@@ -212,26 +214,26 @@ def _empty_plan(
     mode: str,
     dependents: str,
     base: str | None,
-    limit: int,
+    display_limit: int,
     notes: list[str],
 ) -> VerificationPlan:
     """No applicable ecosystem: report the change set for manual planning."""
     return VerificationPlan(
         plan_id=verification_plan_id((), mode),
         checks=(),
+        providers=(),
+        changes=ChangeSummary(
+            files=changes.files,
+            docs_only=changes.docs_only,
+            global_files=changes.global_files,
+        ),
         repo_root=str(root),
-        provider=None,
-        package_manager=package_manager(root).value,
         mode=mode,
         dependents=dependents,
         base=base,
-        changed_files=tuple(changes.files[:limit]),
-        changed_truncated=len(changes.files) > limit,
-        unowned=tuple(sorted(changes.files)[:limit]),
-        notes=tuple(
-            [*notes, "no verification provider applies to this repository"]
-        ),
-        coverage=typed_coverage(SAMPLED, STEP_LIMIT),
+        display_limit=display_limit,
+        notes=tuple([*notes, "no verification provider applies to this repository"]),
+        coverage=typed_coverage(PARTIAL, PROVIDER_UNAVAILABLE),
     )
 
 
@@ -239,25 +241,20 @@ def _merge_plans(
     root: Path,
     plans: Sequence[ProviderPlan],
     config: VerifyConfig,
+    changes: ChangeSet,
     mode: str,
     dependents: str,
     base: str | None,
-    limit: int,
+    display_limit: int,
     notes: list[str],
 ) -> VerificationPlan:
-    """Merge provider checks behind the primary ladder, then configured checks."""
-    primary = plans[0]
-    emitted = list(primary.checks[:limit])
-    seen = {(check.cwd, check.command) for check in emitted}
-    pre_cut_total = len(primary.checks) - len(emitted)
-    for plan in plans[1:]:
-        for check in plan.checks:
-            identity = (check.cwd, check.command)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            emitted.append(check)
-            pre_cut_total += 1
+    """Aggregate provider contributions into one complete logical plan.
+
+    Configured commands occupy ``CheckPhase.CONFIGURED``, the earliest phase,
+    so an explicit user command is never ordered behind inferred checks.
+    """
+    emitted: list[CheckSpec] = []
+    seen: set[tuple[str | None, tuple[str, ...]]] = set()
     for argv in config.commands:
         check = make_check(
             kind=CheckKind.CONFIGURED,
@@ -266,50 +263,64 @@ def _merge_plans(
             cwd=".",
             command=argv,
             reason="explicitly configured in .agentq.toml [verify] commands",
-            priority=_CONFIGURED_PRIORITY,
             scope="configured",
         )
         if (check.cwd, check.command) in seen:
             continue
         seen.add((check.cwd, check.command))
         emitted.append(check)
-        pre_cut_total += 1
-    total = pre_cut_total + len(emitted)
-    checks = tuple(emitted[:limit])
-    sampled = (
-        len(primary.changed_files) > limit
-        or len(primary.packages) > limit
-        or len(primary.checks) > limit
-    )
+    for plan in plans:
+        for check in plan.checks:
+            identity = (check.cwd, check.command)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            emitted.append(check)
+    checks = tuple(emitted)
+    summary = _change_summary(plans, changes)
     return VerificationPlan(
-        plan_id=verification_plan_id(tuple(emitted), mode),
+        plan_id=verification_plan_id(checks, mode),
         checks=checks,
+        providers=tuple(plans),
+        changes=summary,
         repo_root=str(root),
-        provider=primary.provider,
-        package_manager=primary.manager,
-        workspace_packages=primary.workspace_packages,
-        workspace_edges=primary.workspace_edges,
         mode=mode,
         dependents=dependents,
         base=base,
-        docs_only=primary.docs_only,
-        changed_files=tuple(primary.changed_files[:limit]),
-        changed_truncated=len(primary.changed_files) > limit,
-        global_changes=tuple(primary.global_changes[:limit]),
-        unowned=tuple(primary.unowned[:limit]),
-        changed_packages=primary.changed_packages,
-        dependent_packages=primary.dependent_packages,
-        affected_packages=primary.affected_packages,
-        packages=tuple(primary.packages[:limit]),
-        packages_truncated=len(primary.packages) > limit,
-        checks_total=total,
-        checks_truncated=total > len(checks),
-        providers=tuple(plan.summary() for plan in plans),
-        ecosystems=tuple(plan.summary() for plan in plans[1:]),
-        notes=tuple([*notes, *primary.notes]),
-        coverage=(
-            typed_coverage(SAMPLED, RESULT_LIMIT, STEP_LIMIT)
-            if sampled
-            else typed_coverage(COMPLETE)
-        ),
+        display_limit=display_limit,
+        notes=tuple([*notes, *_provider_notes(plans)]),
+        coverage=_inference_coverage(summary),
     )
+
+
+def _change_summary(plans: Sequence[ProviderPlan], changes: ChangeSet) -> ChangeSummary:
+    """Cross-provider change facts; unowned means every provider disowned it."""
+    unowned_sets = [set(plan.unowned) for plan in plans]
+    unowned: set[str] = (
+        unowned_sets[0].intersection(*unowned_sets[1:]) if unowned_sets else set()
+    )
+    global_files: set[str] = set()
+    for plan in plans:
+        global_files.update(plan.global_changes)
+    return ChangeSummary(
+        files=changes.files,
+        docs_only=changes.docs_only,
+        global_files=tuple(sorted(global_files)),
+        unowned=tuple(sorted(unowned)),
+    )
+
+
+def _inference_coverage(summary: ChangeSummary) -> Coverage:
+    """How completely the change set could be attributed to verification units."""
+    if summary.docs_only:
+        return typed_coverage(COMPLETE)
+    if summary.unowned:
+        return typed_coverage(PARTIAL, UNATTRIBUTED)
+    return typed_coverage(COMPLETE)
+
+
+def _provider_notes(plans: Sequence[ProviderPlan]) -> list[str]:
+    notes: list[str] = []
+    for plan in plans:
+        notes.extend(plan.notes)
+    return list(dict.fromkeys(notes))

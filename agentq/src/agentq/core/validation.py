@@ -36,6 +36,28 @@ def canonical_digest(payload: Any, *, length: int | None = None) -> str:
     return digest if length is None else digest[:length]
 
 
+def as_dict(value: Any) -> dict[str, Any]:
+    """A JSON-boundary object: non-object values become an empty object."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
+def as_list(value: Any) -> list[Any]:
+    """A JSON-boundary array: non-array values become an empty array."""
+    return cast("list[Any]", value) if isinstance(value, list) else []
+
+
+def list_field(value: Mapping[str, Any], key: str) -> list[Any]:
+    """A JSON-boundary list field: absent or wrong-typed values are empty."""
+    item = value.get(key)
+    return cast("list[Any]", item) if isinstance(item, list) else []
+
+
+def dict_field(value: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """A JSON-boundary object field: absent or wrong-typed values are empty."""
+    item = value.get(key)
+    return cast("dict[str, Any]", item) if isinstance(item, dict) else {}
+
+
 def require_mapping(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError(f"{what} must be a JSON object")

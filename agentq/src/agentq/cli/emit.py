@@ -12,10 +12,17 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.continuations import attach_continuation_cursors
-from agentq.core import repo_id, session_id
+from agentq.core import (
+    as_dict,
+    dict_field,
+    list_field,
+    repo_id,
+    request_identity,
+    session_id,
+)
 from agentq.delivery import (
     DeliveryContext,
     DispatchResult,
@@ -27,13 +34,51 @@ from agentq.delivery import (
     mark_operation_delivery,
     project_output,
     record_delivery,
-    request_identity,
     require_usable_budget,
     suppression_identity,
 )
 from agentq.output_attribution import attribute_output, output_view
 
 from .transport import sink_encoding, write_stdout
+
+_PRESENTATION_ARGS = frozenset(
+    {"command", "repo", "format", "budget", "repeat", "color", "plain", "utc", "watch"}
+)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_safe(item) for item in cast("list[Any] | tuple[Any, ...]", value)
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in cast("dict[str, Any]", value).items()
+        }
+    return str(value)
+
+
+def invocation_request_id(args: argparse.Namespace) -> str:
+    """The one semantic identity for a CLI emission.
+
+    Presentation flags are excluded so the identity depends on what the
+    operation asked for, not how it was displayed.
+    """
+    values = {
+        key: _json_safe(value)
+        for key, value in sorted(vars(args).items())
+        if key not in _PRESENTATION_ARGS and value is not None
+    }
+    scopes: list[Any] = list_field(vars(args), "paths")
+    return request_identity(
+        root=str(getattr(args, "repo", ".")),
+        operation=str(getattr(args, "command", "unknown")),
+        options_wire=values,
+        scopes=tuple(str(item) for item in scopes),
+    )
 
 
 def _truncation_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -51,15 +96,9 @@ def emit(
     root: Path | None = None,
     result: Any | None = None,
 ) -> DispatchResult:
-    internal = (
-        data.pop("_agentq_internal", {})
-        if isinstance(data.get("_agentq_internal"), dict)
-        else {}
-    )
-    telemetry_data = (
-        internal.get("telemetry_data")
-        if isinstance(internal.get("telemetry_data"), dict)
-        else data
+    internal: dict[str, Any] = as_dict(data.pop("_agentq_internal", None))
+    telemetry_data: dict[str, Any] = (
+        dict_field(internal, "telemetry_data") or dict(data)
     )
     command = str(getattr(args, "command", "unknown"))
     repo_text = str(getattr(args, "repo", "."))
@@ -107,7 +146,7 @@ def emit(
         data,
         rendered=rendered,
         context=DeliveryContext(
-            request_id=request_identity(command, repo_text, output_format, budget),
+            request_id=invocation_request_id(args),
             repo_id=repo_id(Path(repo_text)),
             context_id=identity[0] if identity is not None else None,
             consumer_id=(identity[1] or None) if identity is not None else session_id(),

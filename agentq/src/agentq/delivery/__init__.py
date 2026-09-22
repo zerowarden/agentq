@@ -23,20 +23,16 @@ from .receipts import (
     finalize_output,
     mark_operation_delivery,
     record_delivery,
-    request_identity,
 )
 from .rendering import (
     RenderedOutput,
     Renderer,
     bound_output,
-    compact_line,
     human_bytes,
     project_output,
     read_item_header,
     read_line_text,
     require_usable_budget,
-    strip_ansi,
-    truncate_line,
 )
 from .suppression import (
     CachedOperation,
@@ -71,7 +67,6 @@ __all__ = [
     "begin_cached_operation",
     "bound_output",
     "build_receipt",
-    "compact_line",
     "context_cache_enabled",
     "diff_cache_key",
     "diff_payload",
@@ -88,11 +83,8 @@ __all__ = [
     "read_ranges",
     "read_repeat_advice",
     "record_delivery",
-    "request_identity",
     "require_usable_budget",
-    "strip_ansi",
     "suppression_active",
     "suppression_identity",
-    "truncate_line",
     "workspace_identity",
 ]

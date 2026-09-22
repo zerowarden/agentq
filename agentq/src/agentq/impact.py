@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from agentq.discovery import (
     search,
 )
 
+from .core.languages import MANIFEST_PATTERN
 from .workspace import nearest_manifest
 
 SHARED_RISK_RE = re.compile(
@@ -29,7 +31,7 @@ SHARED_RISK_RE = re.compile(
     re.I,
 )
 PUBLIC_NAME_RE = re.compile(
-    r"(^|/)(index\.[^.]+|package\.json|cargo\.toml|pyproject\.toml|.*\.d\.ts)$", re.I
+    r"(^|/)(index\.[^.]+|" + MANIFEST_PATTERN + r"|.*\.d\.ts)$", re.I
 )
 
 
@@ -138,62 +140,76 @@ def _impact_observations(
     }
 
 
-def _source_fanout_score(source_fanout: int) -> tuple[int, list[str]]:
-    """Manually weighted score and rules for lexical source fan-out."""
-    if source_fanout >= 20:
-        return 4, ["referenced by at least 20 source files"]
-    if source_fanout >= 6:
-        return 2, ["referenced by multiple source files"]
-    if source_fanout:
-        return 1, []
-    return 0, []
+@dataclass(frozen=True)
+class ImpactSignals:
+    """Observable impact facts; risk is classified by explicit rules below."""
+
+    shared_surface: bool
+    source_fanout: int
+    import_fanout: int
+    has_docs_config: bool
+    has_tests: bool
+    has_reference_evidence: bool
+    scan_capped: bool
 
 
-def _import_fanout_score(import_fanout: int) -> tuple[int, list[str]]:
-    """Manually weighted score and rules for lexical import fan-out."""
-    if import_fanout >= 10:
-        return 3, ["high import/export fan-out"]
-    if import_fanout:
-        return 1, []
-    return 0, []
+@dataclass(frozen=True)
+class ImpactAssessment:
+    """Rule-based risk level and the reasons that produced it."""
+
+    level: str
+    reasons: tuple[str, ...]
 
 
-def _risk_level(score: int) -> str:
-    if score >= 6:
-        return "high"
-    if score >= 3:
-        return "medium"
-    return "low"
+_SHARED_REASON = "target appears to be shared/public/config/schema surface"
 
 
-def _heuristic_risk(
-    *,
-    shared_surface: bool,
-    source_fanout: int,
-    import_fanout: int,
-    has_docs_config: bool,
-    has_tests: bool,
-    has_reference_evidence: bool,
-    scan_capped: bool,
-) -> tuple[str, list[str]]:
-    """Manually weighted rules, not an empirically calibrated risk model."""
-    source_score, rules = _source_fanout_score(source_fanout)
-    import_score, import_rules = _import_fanout_score(import_fanout)
-    score = source_score + import_score
-    rules.extend(import_rules)
-    if shared_surface:
-        score += 3
-        rules.append("target appears to be shared/public/config/schema surface")
-    if has_docs_config:
-        score += 1
-        rules.append("document/config references exist")
-    if not has_tests and has_reference_evidence:
-        score += 1
-        rules.append("no direct lexical test reference found")
-    if scan_capped:
-        score += 2
-        rules.append("reference discovery reached scan safety cap")
-    return _risk_level(score), rules
+def assess_impact(signals: ImpactSignals) -> ImpactAssessment:
+    """Classify impact with explicit rules, never an additive score.
+
+    HIGH requires both a broad surface and substantial observed fan-out.
+    MEDIUM covers a broad surface alone, multiple source dependents, or a
+    complete-looking scan that was actually capped.
+    """
+    reasons: list[str] = []
+    if signals.shared_surface:
+        reasons.append(_SHARED_REASON)
+    if signals.source_fanout >= 20:
+        reasons.append("referenced by at least 20 source files")
+    elif signals.source_fanout >= 6:
+        reasons.append("referenced by multiple source files")
+    if signals.import_fanout >= 10:
+        reasons.append("high import/export fan-out")
+    if signals.scan_capped:
+        reasons.append("reference discovery reached scan safety cap")
+    if signals.has_docs_config:
+        reasons.append("document/config references exist")
+    if not signals.has_tests and signals.has_reference_evidence:
+        reasons.append("no direct lexical test reference found")
+
+    substantial_fanout = signals.source_fanout >= 20 or signals.import_fanout >= 10
+    high = (signals.shared_surface or signals.scan_capped) and substantial_fanout
+    medium = (
+        high
+        or signals.shared_surface
+        or signals.source_fanout >= 6
+        or signals.import_fanout >= 10
+        or (
+            signals.scan_capped and bool(signals.source_fanout or signals.import_fanout)
+        )
+        or (
+            bool(signals.source_fanout)
+            and not signals.has_tests
+            and signals.has_reference_evidence
+        )
+    )
+    if high:
+        level = "high"
+    elif medium:
+        level = "medium"
+    else:
+        level = "low"
+    return ImpactAssessment(level=level, reasons=tuple(reasons))
 
 
 def _validation_steps(
@@ -254,20 +270,22 @@ def impact_data(
         owning_package=(package.name or package.path) if package else None,
         scan_capped=scan_capped,
     )
-    level, rules = _heuristic_risk(
-        shared_surface=shared_surface,
-        source_fanout=len(unique_source_files),
-        import_fanout=len(unique_import_files),
-        has_docs_config=bool(docs_config),
-        has_tests=bool(tests),
-        has_reference_evidence=bool(source_refs or import_hits),
-        scan_capped=scan_capped,
+    assessment = assess_impact(
+        ImpactSignals(
+            shared_surface=shared_surface,
+            source_fanout=len(unique_source_files),
+            import_fanout=len(unique_import_files),
+            has_docs_config=bool(docs_config),
+            has_tests=bool(tests),
+            has_reference_evidence=bool(source_refs or import_hits),
+            scan_capped=scan_capped,
+        )
     )
     validation = _validation_steps(
         has_tests=bool(tests),
         package=package,
         has_docs_config=bool(docs_config),
-        level=level,
+        level=assessment.level,
     )
 
     return {
@@ -276,7 +294,11 @@ def impact_data(
         "target_exists": exists,
         "variants": variants,
         "observations": observations,
-        "heuristic_summary": {"level": level, "calibrated": False, "rules": rules},
+        "heuristic_summary": {
+            "level": assessment.level,
+            "calibrated": False,
+            "rules": list(assessment.reasons),
+        },
         "package": package.to_wire() if package is not None else None,
         "tests": [hit.to_wire() for hit in tests[:25]],
         "docs_config": [hit.to_wire() for hit in docs_config[:25]],

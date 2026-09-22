@@ -21,6 +21,7 @@ from .evidence import (
 )
 from .validation import (
     is_instance_of,
+    list_field,
     optional_int,
     optional_str,
     reject_unknown_keys,
@@ -148,11 +149,11 @@ class ProviderResult(Generic[PayloadT]):
             raise ContractError(
                 f"{what}.status is not a provider outcome: {status_text!r}"
             ) from exc
-        diagnostics_raw: Any = payload.get("diagnostics") or []
+        diagnostics_raw: Any = list_field(payload, "diagnostics")
         if not is_instance_of(diagnostics_raw, list):
             raise ContractError(f"{what}.diagnostics must be an array")
         diagnostics = cast("list[Any]", diagnostics_raw)
-        evidence_raw: Any = payload.get("evidence") or []
+        evidence_raw: Any = list_field(payload, "evidence")
         if not is_instance_of(evidence_raw, list):
             raise ContractError(f"{what}.evidence must be an array")
         evidence_entries = cast("list[Any]", evidence_raw)

@@ -13,30 +13,29 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from agentq.core import AgentQError
+from agentq.core.languages import ECOSYSTEMS, WORKSPACE_NAMES
 from agentq.execution import run_cmd
 
 DOC_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".adoc", ".txt"})
-GLOBAL_BASENAMES = frozenset(
-    {
-        "package.json",
-        "pnpm-workspace.yaml",
-        "pnpm-workspace.yml",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "package-lock.json",
-        "bun.lock",
-        "bun.lockb",
-        "turbo.json",
-        "nx.json",
-        "tsconfig.json",
-        "tsconfig.base.json",
-        "eslint.config.js",
-        "eslint.config.mjs",
-        "eslint.config.cjs",
-        "eslint.config.ts",
-        "vitest.workspace.ts",
-        "vitest.workspace.js",
-    }
+_NODE = next(profile for profile in ECOSYSTEMS if profile.id == "node")
+GLOBAL_BASENAMES = (
+    frozenset(_NODE.manifests)
+    | frozenset(_NODE.locks)
+    | WORKSPACE_NAMES
+    | frozenset(
+        {
+            "turbo.json",
+            "nx.json",
+            "tsconfig.json",
+            "tsconfig.base.json",
+            "eslint.config.js",
+            "eslint.config.mjs",
+            "eslint.config.cjs",
+            "eslint.config.ts",
+            "vitest.workspace.ts",
+            "vitest.workspace.js",
+        }
+    )
 )
 _GLOBAL_CONFIG_RE = re.compile(
     r"(?:tsconfig|eslint|vitest|vite|jest)[^/]*\.(?:json|js|cjs|mjs|ts)",

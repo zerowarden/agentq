@@ -17,6 +17,8 @@ from agentq.core import (
 )
 from agentq.core import complete as complete_coverage
 from agentq.core import coverage as coverage_block
+from agentq.core.languages import LOCK_NAMES, WORKSPACE_NAMES
+from agentq.core.languages import MANIFEST_NAMES as _MANIFEST_NAMES
 from agentq.git import (
     DiffFile,
     DiffRequest,
@@ -78,23 +80,7 @@ SECRET_CONTEXT_RE = re.compile(
 GENERATED_BAD_RE = re.compile(
     r"(^|/)(__pycache__|\.cache|coverage|dist|build|target)(/|$)|\.pyc$", re.I
 )
-MANIFEST_NAMES = {
-    "package.json",
-    "pyproject.toml",
-    "Cargo.toml",
-    "pnpm-workspace.yaml",
-    "pnpm-workspace.yml",
-}
-LOCK_NAMES = {
-    "pnpm-lock.yaml",
-    "package-lock.json",
-    "yarn.lock",
-    "bun.lock",
-    "bun.lockb",
-    "Cargo.lock",
-    "uv.lock",
-    "poetry.lock",
-}
+MANIFEST_NAMES = _MANIFEST_NAMES | WORKSPACE_NAMES
 
 
 def _added_lines(
@@ -316,9 +302,7 @@ def _is_secret_like_addition(text: str) -> bool:
     return bool(SECRET_SIGNAL_RE.search(text)) and not SECRET_CONTEXT_RE.search(text)
 
 
-def _add_content_findings(
-    findings: _FindingCollector, diff_result: DiffResult
-) -> None:
+def _add_content_findings(findings: _FindingCollector, diff_result: DiffResult) -> None:
     """Record findings from added patch lines."""
     for path, line, text in _added_lines(diff_result.patch or "", diff_result.files):
         if _is_secret_like_addition(text):

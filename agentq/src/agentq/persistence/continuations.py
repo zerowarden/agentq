@@ -1,4 +1,4 @@
-"""Continuation cursor and artifact persistence.
+"""Continuation cursor persistence.
 
 Cursor metadata is typed Python data; only its stored form is JSON text. A
 cursor row without a typed payload is never returned, so pre-v4 command-only
@@ -94,65 +94,3 @@ def load_continuation(
     if not row:
         return None
     return StoredContinuation(payload=str(row[0]), expires_at=float(row[1]))
-
-
-def store_artifact(
-    repo_id: str,
-    artifact_id: str,
-    payload: bytes,
-    *,
-    expires_at: float,
-    quota_bytes: int,
-    now: float,
-) -> bool:
-    """Store artifact bytes and enforce the per-repository byte quota."""
-    try:
-        with connection() as conn:
-            conn.execute(
-                "DELETE FROM continuation_artifacts WHERE expires_at < ?", (now,)
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO continuation_artifacts "
-                "(repo_id, artifact_id, payload, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (repo_id, artifact_id, payload, now, expires_at),
-            )
-            rows = conn.execute(
-                "SELECT artifact_id, LENGTH(payload) FROM continuation_artifacts "
-                "WHERE repo_id = ? ORDER BY created_at DESC, artifact_id DESC",
-                (repo_id,),
-            ).fetchall()
-            total = 0
-            excess: list[str] = []
-            for identifier, size in rows:
-                total += int(size or 0)
-                if total > quota_bytes:
-                    excess.append(str(identifier))
-            for identifier in excess:
-                conn.execute(
-                    "DELETE FROM continuation_artifacts "
-                    "WHERE repo_id = ? AND artifact_id = ?",
-                    (repo_id, identifier),
-                )
-    except sqlite3.Error:
-        return False
-    return True
-
-
-def load_artifact(repo_id: str, artifact_id: str, *, now: float) -> bytes | None:
-    """Return retained artifact bytes, or ``None`` when absent or expired."""
-    try:
-        row = (
-            connection()
-            .execute(
-                "SELECT payload FROM continuation_artifacts "
-                "WHERE repo_id = ? AND artifact_id = ? AND expires_at > ?",
-                (repo_id, artifact_id, now),
-            )
-            .fetchone()
-        )
-    except sqlite3.Error:
-        return None
-    if not row or row[0] is None:
-        return None
-    return bytes(row[0])

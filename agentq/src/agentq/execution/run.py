@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from agentq.core import AgentQError, cache_dir, require_int, require_str
-from agentq.delivery import truncate_line
 from agentq.redaction import StreamingRedactor, redact_text
+from agentq.text import truncate_line
 
 from .models import ExecutionOutcome, ExecutionSpec, StdinPolicy, StopReason, StreamMode
 from .supervisor import (

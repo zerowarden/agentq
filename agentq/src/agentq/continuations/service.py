@@ -1,4 +1,4 @@
-"""Continuation cursor storage, page handlers, and artifact retention.
+"""Continuation cursor storage and replay.
 
 Cursor records are persisted by :mod:`agentq.persistence`; this service only
 validates producer blocks, resolves cursors, and renders display commands.
@@ -10,35 +10,29 @@ from __future__ import annotations
 import json
 import shlex
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import (
     AgentQError,
     ContractError,
+    as_dict,
+    as_list,
     repo_id,
     require_str,
-    require_tag,
     session_id,
 )
 from agentq.persistence import (
-    load_artifact as _load_artifact,
-)
-from agentq.persistence import (
     load_continuation as _load_continuation,
-)
-from agentq.persistence import (
-    store_artifact as _store_artifact,
 )
 from agentq.persistence import (
     store_continuation as _store_continuation,
 )
 
 from .models import (
-    ArtifactPage,
     ContinuationRecord,
     QueryFollowUp,
     display_fields,
@@ -46,10 +40,6 @@ from .models import (
     parse_block,
     record_from_payload,
 )
-
-ARTIFACT_TTL_SECONDS = 60 * 60
-ARTIFACT_MAX_BYTES = 2_000_000
-ARTIFACT_QUOTA_BYTES = 32_000_000
 
 
 @dataclass(frozen=True)
@@ -67,25 +57,6 @@ class ResolvedCursor:
     cursor: str
     record: ContinuationRecord
     expires_at: float
-
-
-PageHandler = Callable[[Any, Path, ArtifactPage], Any]
-
-_PAGE_HANDLERS: dict[str, PageHandler] = {}
-
-
-def register_page_handler(operation: str, handler: PageHandler) -> None:
-    """Register how one operation serves a retained artifact page.
-
-    Called by the operation's producer; the CLI dispatches artifact-page
-    cursors through the registered handler instead of rebuilding argv.
-    """
-    require_tag(operation, "page handler operation")
-    _PAGE_HANDLERS[operation] = handler
-
-
-def resolve_page_handler(operation: str) -> PageHandler | None:
-    return _PAGE_HANDLERS.get(operation)
 
 
 def _consumer_context(root: Path) -> str:
@@ -174,10 +145,11 @@ def _nested_continuation_scopes(data: dict[str, Any]) -> Iterator[dict[str, Any]
     for value in data.values():
         if not isinstance(value, dict):
             continue
-        yield value
-        for inner in value.values():
+        nested = cast("dict[str, Any]", value)
+        yield nested
+        for inner in nested.values():
             if isinstance(inner, dict):
-                yield inner
+                yield cast("dict[str, Any]", inner)
 
 
 def iter_continuation_blocks(data: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -193,21 +165,18 @@ def iter_continuation_blocks(data: dict[str, Any]) -> Iterator[dict[str, Any]]:
             block = scope.get(key)
             if isinstance(block, dict):
                 yield block
-    hunks = data.get("hunks")
-    if isinstance(hunks, list):
-        for hunk in hunks:
-            block = hunk.get("follow_up") if isinstance(hunk, dict) else None
-            if isinstance(block, dict):
-                yield block
+    for hunk in as_list(data.get("hunks")):
+        block = as_dict(hunk).get("follow_up")
+        if isinstance(block, dict):
+            yield cast("dict[str, Any]", block)
 
 
 def attach_continuation_cursors(root: Path, data: dict[str, Any]) -> None:
     """Replace producer continuation blocks with short local cursor tokens.
 
-    Typed blocks are validated and stored as typed records; legacy command
-    blocks from unmigrated producers are validated into argv records. Both
-    become ``agentq continue CURSOR`` for display, and typed records are only
-    ever executed from their stored request, never from command text.
+    Typed blocks are validated and stored as typed records that become
+    ``agentq continue CURSOR`` for display. A stored record is only ever
+    executed from its request, never from command text.
     """
     for block in iter_continuation_blocks(data):
         try:
@@ -247,8 +216,7 @@ def load_cursor(
 def dispatch_argv(record: ContinuationRecord) -> list[str]:
     """Render the executable argv for a typed record.
 
-    Query follow-ups render from their typed request; artifact pages have no
-    argv and must go through their page handler.
+    Follow-ups render from their typed request through its registered codec.
     """
     # Imported here because the request codec registry imports capability
     # request options while this module is already loaded.
@@ -263,43 +231,7 @@ def dispatch_argv(record: ContinuationRecord) -> list[str]:
 
 def display_command(record: ContinuationRecord) -> str | None:
     """Human-readable command text for display; never an execution source."""
-    if isinstance(record, ArtifactPage):
-        return None
     try:
         return shlex.join(dispatch_argv(record))
     except ContractError:
         return None
-
-
-def store_artifact(
-    repo_id_value: str,
-    artifact_id: str,
-    payload: bytes,
-    *,
-    now: float | None = None,
-    ttl_seconds: int = ARTIFACT_TTL_SECONDS,
-    max_bytes: int = ARTIFACT_MAX_BYTES,
-    quota_bytes: int = ARTIFACT_QUOTA_BYTES,
-) -> bool:
-    """Persist one bounded, private artifact; ``False`` when it cannot be kept."""
-    require_tag(artifact_id, "artifact id")
-    require_str(repo_id_value, "artifact repo id")
-    if not isinstance(payload, bytes) or len(payload) > max_bytes:
-        return False
-    moment = time.time() if now is None else now
-    return _store_artifact(
-        repo_id_value,
-        artifact_id,
-        payload,
-        expires_at=moment + ttl_seconds,
-        quota_bytes=quota_bytes,
-        now=moment,
-    )
-
-
-def load_artifact(
-    repo_id_value: str, artifact_id: str, *, now: float | None = None
-) -> bytes | None:
-    """Load a retained artifact, or ``None`` when absent or expired."""
-    moment = time.time() if now is None else now
-    return _load_artifact(repo_id_value, artifact_id, now=moment)

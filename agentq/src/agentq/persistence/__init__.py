@@ -10,9 +10,7 @@ from .continuations import (
     CONTINUATION_TTL_SECONDS,
     ContinuationCursor,
     StoredContinuation,
-    load_artifact,
     load_continuation,
-    store_artifact,
     store_continuation,
 )
 from .database import connection, database_path
@@ -40,12 +38,10 @@ __all__ = [
     "connection",
     "database_path",
     "delete_task",
-    "load_artifact",
     "load_continuation",
     "load_task",
     "receipt_fragment_hits",
     "receipt_fragment_payloads",
-    "store_artifact",
     "store_continuation",
     "store_receipt",
     "store_task",

@@ -7,8 +7,9 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from statistics import median
-from typing import Any
+from typing import Any, cast
 
+from agentq.core import as_list
 from agentq.output_attribution import (
     OUTPUT_ATTRIBUTION_KEYS,
     attribution_total,
@@ -17,7 +18,7 @@ from agentq.output_attribution import (
 
 from ..recorder import MEASURED_COMMANDS
 from ..storage import SCHEMA, mapping_field
-from . import _distribution, _fallback_session_contexts, _percent
+from . import distribution, fallback_session_contexts, percent
 
 
 def _interval_stats(
@@ -74,11 +75,12 @@ def _cross_context_overlap(
 def _read_range_fields(item: Any) -> tuple[str, str, int, int] | None:
     if not isinstance(item, dict):
         return None
+    fields = cast("dict[str, Any]", item)
     file_id, version, start, end = (
-        item.get("file"),
-        item.get("version"),
-        item.get("start"),
-        item.get("end"),
+        fields.get("file"),
+        fields.get("version"),
+        fields.get("start"),
+        fields.get("end"),
     )
     if (
         not isinstance(file_id, str)
@@ -122,7 +124,7 @@ def read_efficiency(
     calls = total_lines = range_count = reread_ranges = tracked_events = (
         online_overlap_lines
     ) = online_observed_calls = 0
-    fallback_contexts = _fallback_session_contexts(events)
+    fallback_contexts = fallback_session_contexts(events)
 
     for event_index, event in enumerate(events):
         if event.get("command") != "read":
@@ -133,8 +135,7 @@ def read_efficiency(
         online_observed_calls += metrics.get("online_cache_measured") is True or bool(
             metrics.get("same_context_overlap_lines")
         )
-        raw_ranges = metrics.get("read_ranges")
-        ranges = raw_ranges if isinstance(raw_ranges, list) else []
+        ranges = as_list(metrics.get("read_ranges"))
         if ranges:
             tracked_events += 1
         task = str(event.get("task_id") or "")
@@ -191,7 +192,7 @@ def read_efficiency(
         cross_task_overlap += task_overlap
         cross_thread_overlap += thread_overlap
 
-    result = {
+    result: dict[str, Any] = {
         "calls": calls,
         "tracked_calls": tracked_events,
         "ranges": range_count,
@@ -201,9 +202,9 @@ def read_efficiency(
         "total_lines": total_lines,
         "unique_lines": max(0, total_lines - overlap_lines),
         "overlap_lines": overlap_lines,
-        "overlap_percent": _percent(overlap_lines, total_lines),
+        "overlap_percent": percent(overlap_lines, total_lines),
         "same_context_overlap_lines": overlap_lines,
-        "same_context_overlap_percent": _percent(overlap_lines, total_lines),
+        "same_context_overlap_percent": percent(overlap_lines, total_lines),
         "cross_task_overlap_lines": cross_task_overlap,
         "cross_thread_overlap_lines": cross_thread_overlap,
         "fully_redundant_ranges": fully_redundant,
@@ -261,14 +262,14 @@ def _measurement_result(
     return {
         "instrumented_calls": instrumented_calls,
         "total_calls": total_calls,
-        "instrumented_call_percent": _percent(instrumented_calls, total_calls),
+        "instrumented_call_percent": percent(instrumented_calls, total_calls),
         "candidate_chars": source,
         "candidate_visible_chars": measured_visible,
         "candidate_delta_chars": measured_visible - source,
         "measured_source_chars": source,
         "measured_visible_chars": measured_visible,
         "total_visible_chars": all_visible,
-        "instrumented_visible_percent": _percent(measured_visible, all_visible),
+        "instrumented_visible_percent": percent(measured_visible, all_visible),
         "avoided_chars": 0,
         "overhead_chars": 0,
         "reduction_percent": None,
@@ -300,7 +301,7 @@ def _add_rendering_overhead(
             "rendering_evidence_chars": evidence,
             "rendering_overhead_chars": overhead,
             "rendering_overhead_percent": (
-                _percent(overhead, attributed_visible) if attributed_calls else None
+                percent(overhead, attributed_visible) if attributed_calls else None
             ),
             "rendering_overhead_components": components,
             # Compatibility alias. This no longer contains the candidate-to-visible delta.
@@ -371,7 +372,7 @@ def _update_command_summary(summary: dict[str, Any], event: dict[str, Any]) -> N
         summary["measured_visible"] += visible
 
 
-def _command_rows(
+def command_rows(
     events: Iterable[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     summaries: dict[str, dict[str, Any]] = {}
@@ -395,7 +396,7 @@ def _command_rows(
         measurement.update(
             {
                 "attributed_calls": int(summary["attributed_calls"]),
-                "attributed_call_percent": _percent(
+                "attributed_call_percent": percent(
                     int(summary["attributed_calls"]), calls
                 ),
                 "attributed_visible_chars": int(summary["attributed_visible_chars"]),
@@ -428,7 +429,7 @@ def _command_rows(
                 # v1.2.0 JSON aliases; semantics now explicitly mean agentq/tool health.
                 "successes": tool_ok,
                 "failures": calls - tool_ok,
-                "success_rate": _percent(tool_ok, calls),
+                "success_rate": percent(tool_ok, calls),
                 "source_chars": measurement["measured_source_chars"],
                 "suppressed_chars": None,
             }
@@ -460,7 +461,7 @@ def _command_rows(
     measurement.update(
         {
             "attributed_calls": attributed_calls,
-            "attributed_call_percent": _percent(attributed_calls, calls),
+            "attributed_call_percent": percent(attributed_calls, calls),
             "attributed_visible_chars": sum(
                 int(summary["attributed_visible_chars"])
                 for summary in summaries.values()
@@ -494,7 +495,7 @@ def _command_rows(
     )
 
 
-def _output_profile_rows(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def output_profile_rows(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     profiles: dict[tuple[str, str, str], dict[str, Any]] = {}
     for event in events:
         identity = (
@@ -560,7 +561,7 @@ def _output_profile_rows(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
                 "calls": calls,
                 "visible_chars": int(profile["visible_chars"]),
                 "attributed_calls": int(profile["attributed_calls"]),
-                "attributed_call_percent": _percent(
+                "attributed_call_percent": percent(
                     int(profile["attributed_calls"]), calls
                 ),
                 "attributed_visible_chars": int(profile["attributed_visible_chars"]),
@@ -579,7 +580,7 @@ def _output_profile_rows(events: Iterable[dict[str, Any]]) -> list[dict[str, Any
     )
 
 
-def _search_format_usage(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def search_format_usage(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     formats = Counter(
         str(event.get("output_format", "unknown"))
         for event in events
@@ -592,14 +593,14 @@ def _search_format_usage(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "compact_json_calls": formats.get("compact-json", 0),
         "legacy_json_calls": formats.get("json", 0),
         "unknown_calls": formats.get("unknown", 0),
-        "compact_structured_percent": _percent(
+        "compact_structured_percent": percent(
             formats.get("compact-json", 0), structured
         ),
-        "legacy_structured_percent": _percent(formats.get("json", 0), structured),
+        "legacy_structured_percent": percent(formats.get("json", 0), structured),
     }
 
 
-_COHORT_WINDOW_SECONDS = 7 * 86400
+COHORT_WINDOW_SECONDS = 7 * 86400
 _COHORT_MIN_COVERAGE_PERCENT = 95.0
 _COHORT_FORMATS = {"text", "json", "compact-json"}
 
@@ -636,15 +637,15 @@ def _cohort_window(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {
         "calls": total,
         "eligible_calls": len(eligible),
-        "eligible_percent": _percent(len(eligible), total),
+        "eligible_percent": percent(len(eligible), total),
         "excluded": dict(sorted(excluded.items())),
         "events": eligible,
     }
 
 
-def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str, Any]:
-    current_start = now - _COHORT_WINDOW_SECONDS
-    previous_start = current_start - _COHORT_WINDOW_SECONDS
+def cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str, Any]:
+    current_start = now - COHORT_WINDOW_SECONDS
+    previous_start = current_start - COHORT_WINDOW_SECONDS
     values = [event for event in events if event.get("command") != "task"]
     current = _cohort_window(
         event for event in values if current_start <= float(event.get("time", 0)) <= now
@@ -699,9 +700,9 @@ def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str
             "visible_chars_per_call": (
                 round(sum(visible) / len(visible), 1) if visible else None
             ),
-            "visible_chars_distribution": _distribution(visible),
+            "visible_chars_distribution": distribution(visible),
             "tool_errors": failures,
-            "tool_failure_percent": _percent(failures, len(items)),
+            "tool_failure_percent": percent(failures, len(items)),
         }
 
     rows: list[dict[str, Any]] = []
@@ -722,7 +723,7 @@ def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str
                 "matched_fingerprints": int(profile["fingerprints"]),
                 "current": current_profile,
                 "previous": previous_profile,
-                "visible_reduction_percent": _percent(
+                "visible_reduction_percent": percent(
                     float(previous_profile["visible_chars_per_call"] or 0)
                     - float(current_profile["visible_chars_per_call"] or 0),
                     float(previous_profile["visible_chars_per_call"] or 0),
@@ -730,8 +731,8 @@ def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str
             }
         )
 
-    current_matched_percent = _percent(len(matched_current), int(current["calls"]))
-    previous_matched_percent = _percent(len(matched_previous), int(previous["calls"]))
+    current_matched_percent = percent(len(matched_current), int(current["calls"]))
+    previous_matched_percent = percent(len(matched_previous), int(previous["calls"]))
     claim_eligible = bool(matched) and all(
         value is not None and value >= _COHORT_MIN_COVERAGE_PERCENT
         for value in (current_matched_percent, previous_matched_percent)
@@ -740,7 +741,7 @@ def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str
     previous_summary = profile_window(matched_previous)
     reduction = None
     if claim_eligible:
-        reduction = _percent(
+        reduction = percent(
             float(previous_summary["visible_chars_per_call"] or 0)
             - float(current_summary["visible_chars_per_call"] or 0),
             float(previous_summary["visible_chars_per_call"] or 0),
@@ -750,7 +751,7 @@ def _cohort_comparison(events: Iterable[dict[str, Any]], now: float) -> dict[str
         if not claim_eligible:
             row["visible_reduction_percent"] = None
     return {
-        "window_seconds": _COHORT_WINDOW_SECONDS,
+        "window_seconds": COHORT_WINDOW_SECONDS,
         "minimum_coverage_percent": _COHORT_MIN_COVERAGE_PERCENT,
         "current": {"start": current_start, "end": now, **current},
         "previous": {"start": previous_start, "end": current_start, **previous},

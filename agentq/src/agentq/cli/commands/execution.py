@@ -12,7 +12,7 @@ from ..registry import Outcome
 from .task_scope import attach_task_scope
 
 
-def _run_run(args: argparse.Namespace, root: Path) -> Outcome:
+def run_run(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.execution import RunProfile, RunRequest, render_run, run
 
     argv = list(args.argv)
@@ -40,7 +40,7 @@ def _run_run(args: argparse.Namespace, root: Path) -> Outcome:
     )
 
 
-def _run_test_plan(args: argparse.Namespace, root: Path) -> Outcome:
+def run_test_plan(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.tasking import task_changes
     from agentq.verification import plan_verification, render_plan
 
@@ -49,6 +49,7 @@ def _run_test_plan(args: argparse.Namespace, root: Path) -> Outcome:
         root,
         base=args.base,
         limit=args.limit,
+        display_limit=args.limit,
         mode=args.mode,
         dependents=args.dependents,
         include_build=args.include_build,
@@ -60,7 +61,7 @@ def _run_test_plan(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, data, render_plan, result=plan)
 
 
-def _run_verify(args: argparse.Namespace, root: Path) -> Outcome:
+def run_verify(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.tasking import current_task_state, task_changes
     from agentq.verification import (
         RunSettings,
@@ -85,6 +86,8 @@ def _run_verify(args: argparse.Namespace, root: Path) -> Outcome:
         include_build=args.include_build,
         changed_override=list(scoped["files"]) if scoped else None,
     )
+    # The run wire reports the executed selection; the plan document is not
+    # rendered here, so no display truncation applies.
     result = run_verification(
         plan,
         RunSettings(
@@ -107,7 +110,7 @@ def _run_verify(args: argparse.Namespace, root: Path) -> Outcome:
     )
 
 
-def _run_benchmark(args: argparse.Namespace, root: Path) -> Outcome:
+def run_benchmark(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.benchmark import benchmark_data, render_benchmark
 
     return emit(

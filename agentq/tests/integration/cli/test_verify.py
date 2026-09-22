@@ -12,6 +12,10 @@ from tests.support.cli_harness import (
 )
 
 
+def _provider(plan: dict, name: str) -> dict:
+    return next(item for item in plan["providers"] if item["name"] == name)
+
+
 class VerifyCliTests(AgentQIntegrationHarness):
     def test_test_plan_is_workspace_aware_and_includes_direct_dependent(self) -> None:
         self.change_a()
@@ -24,10 +28,14 @@ class VerifyCliTests(AgentQIntegrationHarness):
             step for step in plan["steps"] if step["kind"] == "related-tests"
         )
         self.assertIn("--reporter=minimal", related["argv"])
-        self.assertEqual(plan["changed_packages"], ["@test/a"])
-        self.assertEqual(plan["dependent_packages"], ["@test/b"])
-        self.assertEqual(plan["workspace_packages"], 3)
-        self.assertEqual(plan["workspace_edges"], 1)
+        node = _provider(plan, "node")
+        self.assertEqual(node["changed_packages"], ["@test/a"])
+        self.assertEqual(node["dependent_packages"], ["@test/b"])
+        self.assertEqual(node["workspace_packages"], 3)
+        self.assertEqual(node["workspace_edges"], 1)
+        self.assertEqual(plan["total_units"], 3)
+        self.assertEqual(plan["total_edges"], 1)
+        self.assertEqual(plan["steps_total"], len(plan["steps"]))
 
     def test_python_verification_provider(self) -> None:
         self._make_single_ecosystem()
@@ -62,10 +70,11 @@ class VerifyCliTests(AgentQIntegrationHarness):
         )
 
         plan = self.data("test-plan")
-        self.assertEqual(plan["package_manager"], "python")
         self.assertIn("python", [provider["name"] for provider in plan["providers"]])
         self.assertNotIn("node", [provider["name"] for provider in plan["providers"]])
-        self.assertEqual(plan["changed_packages"], ["pyapp"])
+        python = _provider(plan, "python")
+        self.assertEqual(python["manager"], "python")
+        self.assertEqual(python["changed_packages"], ["pyapp"])
         kinds = [step["kind"] for step in plan["steps"]]
         self.assertIn("candidate-tests", kinds)
         self.assertIn("lint", kinds)
@@ -82,7 +91,7 @@ class VerifyCliTests(AgentQIntegrationHarness):
 
         dry = self.data("verify", "--dry-run")
         self.assertEqual(dry["status"], "planned")
-        self.assertEqual(dry["changed_packages"], ["pyapp"])
+        self.assertEqual(_provider(dry, "python")["changed_packages"], ["pyapp"])
 
         (self.repo / "tests" / "test_core.py").write_text(
             "from pkg.core import add\n\ndef test_add_broken():\n    assert add(1, 2) == 4\n",
@@ -118,9 +127,10 @@ class VerifyCliTests(AgentQIntegrationHarness):
         )
 
         plan = self.data("test-plan")
-        self.assertEqual(plan["package_manager"], "cargo")
-        self.assertEqual(plan["changed_packages"], ["core"])
-        self.assertEqual(plan["dependent_packages"], ["app"])
+        cargo = _provider(plan, "cargo")
+        self.assertEqual(cargo["manager"], "cargo")
+        self.assertEqual(cargo["changed_packages"], ["core"])
+        self.assertEqual(cargo["dependent_packages"], ["app"])
         kinds = [step["kind"] for step in plan["steps"]]
         self.assertIn("package-tests", kinds)
         self.assertIn("typecheck", kinds)
@@ -157,11 +167,14 @@ class VerifyCliTests(AgentQIntegrationHarness):
         )
 
         plan = self.data("test-plan")
-        self.assertEqual(plan["package_manager"], "go")
-        self.assertEqual(plan["changed_packages"], ["example.com/app"])
+        go = _provider(plan, "go")
+        self.assertEqual(go["manager"], "go")
+        self.assertEqual(go["changed_packages"], ["example.com/app"])
         steps = [step for step in plan["steps"] if step["kind"] == "package-tests"]
         self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0]["argv"], ["go", "test", "./util/..."])
+        # Package reverse dependencies are not inferred, so Go stays
+        # module-wide until dependency discovery exists.
+        self.assertEqual(steps[0]["argv"], ["go", "test", "./..."])
 
         (self.repo / "go.mod").write_text(
             "module example.com/app\n\ngo 1.23\n", encoding="utf-8"
@@ -192,12 +205,12 @@ class VerifyCliTests(AgentQIntegrationHarness):
         self.change_a("\nexport const configured = true\n")
 
         plan = self.data("test-plan")
-        self.assertNotIn("generated/thing.ts", plan["changed_files"])
+        self.assertNotIn("generated/thing.ts", plan["changes"]["files"])
         configured = [step for step in plan["steps"] if step["kind"] == "configured"]
         self.assertEqual(len(configured), 1)
         self.assertEqual(configured[0]["argv"], ["make", "check"])
         # The ownership override attributes packages/a/src files to @test/b.
-        self.assertEqual(plan["changed_packages"], ["@test/b"])
+        self.assertEqual(_provider(plan, "node")["changed_packages"], ["@test/b"])
 
         (self.repo / ".agentq.toml").write_text(
             '[verify]\nproviders = ["node", "nope"]\n',
@@ -211,7 +224,7 @@ class VerifyCliTests(AgentQIntegrationHarness):
         plan = self.data("verify-changed", "--dry-run", "--skip-lint")
         self.assertEqual(plan["status"], "planned")
         self.assertEqual(plan["executed_steps"], 0)
-        self.assertIn("@test/b", plan["dependent_packages"])
+        self.assertIn("@test/b", _provider(plan, "node")["dependent_packages"])
         self.assertGreater(plan["planned_steps"], 0)
 
     def test_verify_changed_executes_bounded_ladder(self) -> None:
@@ -256,14 +269,63 @@ class VerifyCliTests(AgentQIntegrationHarness):
         path = self.repo / "tsconfig.json"
         path.write_text(path.read_text() + "\n", encoding="utf-8")
         plan = self.data("test-plan", "--mode", "standard")
-        self.assertIn("tsconfig.json", plan["global_changes"])
-        self.assertIn("@test/a", plan["affected_packages"])
-        self.assertIn("@test/b", plan["affected_packages"])
+        self.assertIn("tsconfig.json", plan["changes"]["global_changes"])
+        node = _provider(plan, "node")
+        self.assertIn("@test/a", node["affected_packages"])
+        self.assertIn("@test/b", node["affected_packages"])
 
     def test_verify_changed_clean_tree(self) -> None:
         data = self.data("verify-changed")
         self.assertEqual(data["status"], "clean")
         self.assertEqual(data["executed_steps"], 0)
+
+    def test_polyglot_plan_aggregates_every_provider(self) -> None:
+        (self.repo / "pyproject.toml").write_text(
+            '[project]\nname = "pyapp"\n\n[tool.ruff]\nline-length = 100\n',
+            encoding="utf-8",
+        )
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (self.repo / "pkg" / "core.py").write_text(
+            "def add(a, b):\n    return a + b\n", encoding="utf-8"
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "polyglot fixture")
+        self.change_a()
+        (self.repo / "pkg" / "core.py").write_text(
+            "def add(a, b):\n    return a + b + 1\n", encoding="utf-8"
+        )
+
+        plan = self.data("test-plan")
+        self.assertEqual(
+            [item["name"] for item in plan["providers"]], ["node", "python"]
+        )
+        node = _provider(plan, "node")
+        python = _provider(plan, "python")
+        self.assertIn("@test/a", node["changed_packages"])
+        self.assertEqual(python["changed_packages"], ["pyapp"])
+        self.assertEqual(
+            plan["total_units"],
+            node["workspace_packages"] + python["workspace_packages"],
+        )
+        # Provider checks are merged, not appended after a privileged primary.
+        self.assertEqual(plan["steps_total"], len(plan["steps"]))
+        kinds = [step["kind"] for step in plan["steps"]]
+        self.assertIn("related-tests", kinds)
+        self.assertIn("lint", kinds)
+        self.assertEqual(plan["inference_coverage"]["status"], "complete")
+        self.assertEqual(plan["coverage"]["status"], "complete")
+
+    def test_verify_reports_partial_when_selection_is_bounded(self) -> None:
+        self.change_a()
+        data = self.data("verify-changed", "--skip-lint", "--max-steps", "1", expect=3)
+        self.assertEqual(data["status"], "partial")
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["steps_limited"])
+        self.assertGreater(data["omitted_steps"], 0)
+        self.assertEqual(data["selection_coverage"]["status"], "sampled")
+        self.assertIn("step_limit", data["coverage"]["reason"])
+        self.assertEqual(data["coverage"]["status"], "sampled")
 
     def test_canonical_verify_uses_task_scope_and_stats_render_scope_distribution(
         self,

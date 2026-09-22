@@ -39,7 +39,7 @@ def _search_file_block(item: SearchFile, *, view: str, samples: int) -> str:
     role_suffix = f" [{item.role}]" if item.role != "source" else ""
     shown = item.shown
     total = item.matching_lines
-    tags = []
+    tags: list[str] = []
     for key, label in (("definition", "D"), ("import", "I"), ("reference", "R")):
         if item.kind_counts.get(key):
             tags.append(f"{label}{item.kind_counts[key]}")

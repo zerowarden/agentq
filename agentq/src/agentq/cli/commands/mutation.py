@@ -12,7 +12,7 @@ from ..emit import emit
 from ..registry import Outcome
 
 
-def _run_codemod_scan(args: argparse.Namespace, root: Path) -> Outcome:
+def run_codemod_scan(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.mutation import (
         PlanReference,
         PlanRequest,
@@ -58,7 +58,7 @@ def _run_codemod_scan(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, result.to_wire(), render_scan, result=result)
 
 
-def _run_codemod_apply(args: argparse.Namespace, root: Path) -> Outcome:
+def run_codemod_apply(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.mutation import ApplyRequest, ScanMode, apply, render_apply
 
     if args.plan is None and (args.pattern is None or args.rewrite is None):

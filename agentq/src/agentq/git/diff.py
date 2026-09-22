@@ -36,10 +36,11 @@ from agentq.core import (
     session_id,
     with_failure,
 )
-from agentq.delivery import compact_line, diff_cache_key, diff_repeat_advice
+from agentq.delivery import diff_cache_key, diff_repeat_advice
 from agentq.execution import Completed, ExecutionSpec, StopReason, StreamMode
 from agentq.redaction import redact_text
 from agentq.requests import request_for
+from agentq.text import compact_line
 
 from .models import (
     DiffFile,
@@ -544,7 +545,7 @@ def _hunk_symbol(line: str) -> str | None:
 
 
 def _path_risk_flags(item: DiffFile | None, sensitive: bool) -> set[str]:
-    flags = {"sensitive"} if sensitive else set()
+    flags: set[str] = {"sensitive"} if sensitive else set()
     if item is None:
         return flags
     if item.role == "test":
@@ -578,7 +579,7 @@ class _HunkBuilder:
     symbol: str | None
     added: int = 0
     deleted: int = 0
-    risks: set[str] = field(default_factory=set)
+    risks: set[str] = field(default_factory=set[str])
 
     def build(self) -> DiffHunk:
         return DiffHunk(

@@ -13,9 +13,16 @@ import secrets
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from agentq.core import repo_id, secure_dir, telemetry_enabled, thread_id
+from agentq.core import (
+    dict_field,
+    list_field,
+    repo_id,
+    secure_dir,
+    telemetry_enabled,
+    thread_id,
+)
 from agentq.core import status_of as coverage_status
 from agentq.delivery import context_cache_enabled, diff_payload, read_ranges
 from agentq.output_attribution import (
@@ -25,7 +32,7 @@ from agentq.output_attribution import (
 )
 from agentq.tasking import current_task_id
 
-from .storage import SCHEMA, _append_jsonl, hot_dir, hot_file, mapping_field
+from .storage import SCHEMA, append_jsonl, hot_dir, hot_file, mapping_field
 
 KNOWN_FAILURE_OPTION_CATEGORIES = {
     "--include-source": "source-inclusion",
@@ -66,7 +73,7 @@ EXPANSION_OPTIONS = {
 
 
 @lru_cache(maxsize=8)
-def _fingerprint_key_at(path_value: str) -> bytes:
+def fingerprint_key_at(path_value: str) -> bytes:
     path = Path(path_value)
     try:
         if path.exists():
@@ -87,14 +94,14 @@ def _fingerprint_key_at(path_value: str) -> bytes:
         return hashlib.sha256(f"agentq:{os.getpid()}".encode()).digest()
 
 
-def _fingerprint_key() -> bytes:
+def fingerprint_key() -> bytes:
     path = secure_dir(hot_dir()) / "fingerprint.key"
-    return _fingerprint_key_at(str(path))
+    return fingerprint_key_at(str(path))
 
 
 def _fingerprint(value: str) -> str:
     return hmac.new(
-        _fingerprint_key(), value.encode("utf-8", "replace"), hashlib.sha256
+        fingerprint_key(), value.encode("utf-8", "replace"), hashlib.sha256
     ).hexdigest()[:20]
 
 
@@ -244,13 +251,14 @@ def _metric_int(data: dict[str, Any], key: str) -> int:
     if isinstance(value, (int, float)):
         return int(value)
     if isinstance(value, list):
-        return len(value)
+        return len(cast("list[Any]", value))
     return 0
 
 
 def _records_measurement(records: Any) -> dict[str, int]:
     if not isinstance(records, list):
         return {"candidate_chars": 0, "candidate_lines": 0}
+    records_list = cast("list[Any]", records)
     return {
         "candidate_chars": sum(
             (
@@ -258,9 +266,9 @@ def _records_measurement(records: Any) -> dict[str, int]:
                 if isinstance(item, str)
                 else len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
             )
-            for item in records
+            for item in records_list
         ),
-        "candidate_lines": len(records),
+        "candidate_lines": len(records_list),
     }
 
 
@@ -295,19 +303,15 @@ def _command_measurement(command: str, data: dict[str, Any]) -> dict[str, Any]:
         if nested and isinstance(data.get(nested[1]), dict):
             measured = _command_measurement(nested[0], data[nested[1]])
         elif kind == "python" and isinstance(data.get("python"), dict):
-            python = data["python"]
-            references = (
-                python.get("references")
-                if isinstance(python.get("references"), dict)
-                else {}
-            )
+            python: dict[str, Any] = dict_field(data, "python")
+            references: dict[str, Any] = dict_field(python, "references")
             measured = _records_measurement(
-                [*(python.get("candidates") or []), *(references.get("results") or [])]
+                [*(list_field(python, "candidates")), *(list_field(references, "results"))]
             )
         elif kind == "semantic" and isinstance(data.get("semantic"), dict):
             semantic = data["semantic"]
             measured = _records_measurement(
-                [*(semantic.get("candidates") or []), *(semantic.get("results") or [])]
+                [*(list_field(semantic, "candidates")), *(list_field(semantic, "results"))]
             )
         else:
             measured = _records_measurement([])
@@ -422,8 +426,8 @@ def _search_inspect_metrics(
             metrics[target] = coverage_status(value)
     if bool(data.get("semantic_candidate")):
         metrics["semantic_candidate"] = True
-    candidates = data.get("symbol_candidates")
-    if isinstance(candidates, list):
+    candidates: list[Any] = list_field(data, "symbol_candidates")
+    if candidates:
         metrics["prefix_candidate_count"] = len(candidates)
     if command == "inspect":
         _inspect_metrics(root, data, metrics)
@@ -452,10 +456,25 @@ def _verification_metrics(
         )
     )
     metrics["verification_files_measured"] = "changed_files" in data
-    metrics["verification_packages_measured"] = any(
-        key in data
-        for key in ("changed_packages", "dependent_packages", "affected_packages")
-    )
+    providers = data.get("providers")
+    if not isinstance(providers, list):
+        return
+    contributions = [
+        cast("dict[str, Any]", item)
+        for item in cast("list[Any]", providers)
+        if isinstance(item, dict)
+    ]
+    if not contributions:
+        return
+    metrics["verification_packages_measured"] = True
+    for source, target in (
+        ("changed_packages", "changed_packages"),
+        ("dependent_packages", "dependent_packages"),
+        ("affected_packages", "affected_packages"),
+    ):
+        total = sum(len(item.get(source) or []) for item in contributions)
+        if total:
+            metrics[target] = total
 
 
 def _run_metrics(command: str, data: dict[str, Any], metrics: dict[str, Any]) -> None:
@@ -469,7 +488,9 @@ def _run_metrics(command: str, data: dict[str, Any], metrics: dict[str, Any]) ->
         metrics["child_timed_out"] = True
     argv = data.get("command")
     if isinstance(argv, list):
-        metrics["command_fingerprint"] = _fingerprint("\0".join(str(x) for x in argv))
+        metrics["command_fingerprint"] = _fingerprint(
+            "\0".join(str(x) for x in cast("list[Any]", argv))
+        )
     elif isinstance(argv, str):
         metrics["command_fingerprint"] = _fingerprint(argv)
 
@@ -486,14 +507,14 @@ def _read_metrics(
         metrics["read_lines"] = sum(int(item["lines"]) for item in ranges)
         metrics["read_windowed"] = bool(data.get("windowed"))
         metrics["online_cache_measured"] = context_cache_enabled()
-    overlap = (
-        data.get("read_overlap") if isinstance(data.get("read_overlap"), dict) else {}
-    )
+    overlap = dict_field(data, "read_overlap")
     if overlap:
         metrics["same_context_overlap_lines"] = _metric_int(overlap, "overlap_lines")
-    raw_items = data.get("items")
-    items = raw_items if isinstance(raw_items, list) else []
-    if any(isinstance(item, dict) and item.get("suppressed") for item in items):
+    items = list_field(data, "items")
+    if any(
+        isinstance(item, dict) and cast("dict[str, Any]", item).get("suppressed")
+        for item in items
+    ):
         metrics["exact_repeat_suppressed"] = True
 
 
@@ -699,6 +720,6 @@ def record_event(
         recovery_hint = _recovery_hint(error_message)
         if recovery_hint:
             event["recovery_hint"] = recovery_hint
-        _append_jsonl(hot_file(), event)
+        append_jsonl(hot_file(), event)
     except Exception:
         return

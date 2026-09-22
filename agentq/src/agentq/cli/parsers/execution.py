@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 
 from ..commands.execution import (
-    _run_benchmark,
-    _run_run,
-    _run_test_plan,
-    _run_verify,
+    run_benchmark,
+    run_run,
+    run_test_plan,
+    run_verify,
 )
 from ..registry import CommandSpec, Group
 from .options import (
@@ -17,7 +17,7 @@ from .options import (
 )
 
 
-def _run_options(p: argparse.ArgumentParser) -> None:
+def run_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cwd")
     p.add_argument("--timeout", type=positive_int, default=900)
     p.add_argument("--label", default="command")
@@ -100,7 +100,7 @@ def _verify_commands() -> tuple[CommandSpec, ...]:
         CommandSpec(
             name,
             help="plan and execute workspace-aware affected verification",
-            execute=_run_verify,
+            execute=run_verify,
             groups=(Group.COMMON, Group.PLAN),
             configure=_verify_options,
         )
@@ -112,21 +112,21 @@ COMMANDS = (
     CommandSpec(
         "run",
         help="run argv without a shell; return diagnostics and a local redacted log",
-        execute=_run_run,
+        execute=run_run,
         groups=(Group.COMMON,),
-        configure=_run_options,
+        configure=run_options,
     ),
     CommandSpec(
         "test-plan",
         help="infer a workspace-aware verification ladder from changed files",
-        execute=_run_test_plan,
+        execute=run_test_plan,
         groups=(Group.COMMON, Group.PLAN),
         configure=_test_plan_options,
     ),
     CommandSpec(
         "benchmark",
         help="benchmark one or more shell commands with hyperfine or a local fallback",
-        execute=_run_benchmark,
+        execute=run_benchmark,
         groups=(Group.COMMON,),
         configure=_benchmark_options,
     ),

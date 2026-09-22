@@ -5,14 +5,14 @@ from __future__ import annotations
 import argparse
 
 from ..commands.discovery import (
-    _run_doctor,
-    _run_files,
-    _run_outline,
-    _run_read,
-    _run_repo_map,
-    _run_search,
-    _run_stats,
-    _run_task,
+    run_doctor,
+    run_files,
+    run_outline,
+    run_read,
+    run_repo_map,
+    run_search,
+    run_stats,
+    run_task,
 )
 from ..registry import CommandSpec, Group
 from .options import (
@@ -259,7 +259,7 @@ COMMANDS = (
     CommandSpec(
         "doctor",
         help="report runtime/tool readiness and privacy defaults",
-        execute=_run_doctor,
+        execute=run_doctor,
         groups=(Group.COMMON,),
     ),
     CommandSpec(
@@ -273,49 +273,49 @@ COMMANDS = (
             "Ergonomic aliases: start=begin, current=status, done=accept, drop=abandon. "
             "Use 'next' to accept the current task and immediately begin another in the same worktree."
         ),
-        execute=_run_task,
+        execute=run_task,
         groups=(Group.COMMON,),
         configure=_task_options,
     ),
     CommandSpec(
         "stats",
         help="visualize local agentq activity and output suppression",
-        execute=_run_stats,
+        execute=run_stats,
         groups=(Group.COMMON,),
         configure=_stats_options,
     ),
     CommandSpec(
         "files",
         help="find repository paths with bounded ranked output",
-        execute=_run_files,
+        execute=run_files,
         groups=(Group.COMMON, Group.SCOPE, Group.SENSITIVE),
         configure=_files_options,
     ),
     CommandSpec(
         "search",
         help="bounded ripgrep search; fixed-string by default",
-        execute=_run_search,
+        execute=run_search,
         groups=(),
         configure=_search_options,
     ),
     CommandSpec(
         "read",
         help="read bounded file ranges with line numbers",
-        execute=_run_read,
+        execute=run_read,
         groups=(Group.COMMON, Group.SENSITIVE),
         configure=_read_options,
     ),
     CommandSpec(
         "repo-map",
         help="compact repository/workspace map",
-        execute=_run_repo_map,
+        execute=run_repo_map,
         groups=(Group.COMMON,),
         configure=_repo_map_options,
     ),
     CommandSpec(
         "outline",
         help="bounded symbol outline; ast-grep, ctags, then fallback",
-        execute=_run_outline,
+        execute=run_outline,
         groups=(Group.COMMON,),
         configure=_outline_options,
     ),

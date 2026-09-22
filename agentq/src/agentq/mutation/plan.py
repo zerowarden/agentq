@@ -24,7 +24,6 @@ from agentq.core import (
     resolve_repo_scopes,
 )
 from agentq.core import repo_id as runtime_repo_id
-from agentq.delivery import compact_line
 from agentq.execution import run_cmd
 from agentq.mutation.models import (
     MUTATION_PLAN_SCHEMA_V2,
@@ -36,6 +35,7 @@ from agentq.mutation.models import (
     apply_edits,
     plan_digest,
 )
+from agentq.text import compact_line
 from agentq.tooling import find_executable, tool_version
 
 from .journal import mutation_dir

@@ -22,14 +22,15 @@ from agentq.core import (
     SYNTACTIC,
     AgentQError,
     Coverage,
+    dict_field,
     is_sensitive_path,
     resolve_repo_scopes,
     scope_match,
     typed_coverage,
 )
-from agentq.delivery import compact_line
 from agentq.discovery import add_rg_excludes, list_repo_files
 from agentq.execution import run_cmd
+from agentq.text import compact_line
 from agentq.tooling import find_executable
 
 
@@ -305,7 +306,7 @@ def _scan_ast(
     if result.returncode not in (0, 1):
         raise AgentQError(compact_line(result.stderr or "ast-grep failed", 600))
     try:
-        objects = json.loads(result.stdout or "[]")
+        objects: list[Any] = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
         objects = []
     if not isinstance(objects, list):
@@ -316,7 +317,7 @@ def _scan_ast(
         file = str(obj.get("file", ""))
         files[file] = files.get(file, 0) + 1
         if len(samples) < request.samples:
-            start = (obj.get("range") or {}).get("start") or {}
+            start: dict[str, Any] = (dict_field(obj, "range")).get("start") or {}
             samples.append(
                 ScanSample(
                     path=file,

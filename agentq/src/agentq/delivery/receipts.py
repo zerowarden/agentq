@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import ContractError, Coverage, canonical_digest, typed_from_wire
 
@@ -122,18 +122,6 @@ def coverage_from_data(data: Mapping[str, Any]) -> Coverage:
         return Coverage()
 
 
-def request_identity(command: str, repo: str, output_format: str, budget: int) -> str:
-    """Stable identity of one CLI request, independent of its rendered output.
-
-    The output digest belongs to the receipt (``build_receipt``), not here, so
-    the same request re-emitted with different truncation keeps one identity.
-    """
-    return canonical_digest(
-        {"command": command, "repo": repo, "format": output_format, "budget": budget},
-        length=32,
-    )
-
-
 def finalize_output(
     data: Mapping[str, Any],
     *,
@@ -197,6 +185,7 @@ def mark_operation_delivery(data: dict[str, Any], key: str) -> None:
     if not isinstance(internal, dict):
         internal = {}
         data["_agentq_internal"] = internal
+    internal = cast("dict[str, Any]", internal)
     delivery = internal.get("delivery")
     if not isinstance(delivery, dict):
         delivery = {}
@@ -233,16 +222,21 @@ def record_delivery(
         )
         for row in fragment_rows
     ]
-    hints = (
-        internal.get("delivery") if isinstance(internal.get("delivery"), dict) else {}
+    hints_value = internal.get("delivery")
+    hints: Mapping[str, Any] = (
+        cast("Mapping[str, Any]", hints_value)
+        if isinstance(hints_value, dict)
+        else {}
     )
     if not dispatch.render_budget_truncated:
         for kind in ("operation", "result"):
-            hint = hints.get(kind) if isinstance(hints, dict) else None
-            if isinstance(hint, dict) and isinstance(hint.get("key"), str):
-                rows.append(
-                    FragmentRecord(command=command, kind=kind, key=hint["key"])
-                )
+            hint = hints.get(kind)
+            if isinstance(hint, dict):
+                hint_key = cast("dict[str, Any]", hint).get("key")
+                if isinstance(hint_key, str):
+                    rows.append(
+                        FragmentRecord(command=command, kind=kind, key=hint_key)
+                    )
     if not rows:
         # Nothing was recorded, so no receipt exists to report: a receipt
         # object that was never persisted must not appear in telemetry.

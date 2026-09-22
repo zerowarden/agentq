@@ -15,11 +15,17 @@ from agentq.core import (
     RESULT_LIMIT,
     SAMPLED,
     Coverage,
+    dict_field,
     typed_coverage,
+)
+from agentq.core.languages import (
+    WORKSPACE_NAMES,
+    EcosystemProfile,
+    ecosystem_for_manifest,
+    language_for,
 )
 from agentq.discovery.files import list_repo_files
 from agentq.execution import run_cmd
-from agentq.tooling import language_for
 
 
 @dataclass(frozen=True)
@@ -124,40 +130,51 @@ class RepoMapResult:
 
 def _manifest_for(path: Path, rel: str) -> Manifest | None:
     name = path.name.lower()
-    if name == "package.json":
+    if name in WORKSPACE_NAMES:
+        return Manifest(path=rel, kind="pnpm-workspace")
+    profile = ecosystem_for_manifest(name)
+    if profile is None:
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return _parse_manifest(profile, rel, text)
+
+
+def _parse_manifest(profile: EcosystemProfile, rel: str, text: str) -> Manifest:
+    if profile.id == "node":
         try:
-            obj = json.loads(path.read_text(encoding="utf-8"))
+            obj: dict[str, Any] = json.loads(text)
         except Exception:
             obj = {}
         return Manifest(
             path=rel,
-            kind="npm",
+            kind=profile.manifest_kind,
             name=obj.get("name"),
-            scripts=tuple(sorted((obj.get("scripts") or {}).keys())[:20]),
-            dependencies=len(obj.get("dependencies") or {}),
-            dev_dependencies=len(obj.get("devDependencies") or {}),
+            scripts=tuple(sorted((dict_field(obj, "scripts")).keys())[:20]),
+            dependencies=len(dict_field(obj, "dependencies")),
+            dev_dependencies=len(dict_field(obj, "devDependencies")),
         )
-    if name == "cargo.toml":
-        text = path.read_text(encoding="utf-8", errors="replace")
+    if profile.id == "cargo":
         package = re.search(r"(?ms)^\[package\].*?^name\s*=\s*[\"']([^\"']+)", text)
         workspace = bool(re.search(r"(?m)^\[workspace\]", text))
         return Manifest(
             path=rel,
-            kind="cargo",
+            kind=profile.manifest_kind,
             name=package.group(1) if package else None,
             workspace=workspace,
         )
-    if name == "pyproject.toml":
-        text = path.read_text(encoding="utf-8", errors="replace")
+    if profile.id == "python":
         project = re.search(r"(?ms)^\[project\].*?^name\s*=\s*[\"']([^\"']+)", text)
         return Manifest(
             path=rel,
-            kind="python",
+            kind=profile.manifest_kind,
             name=project.group(1) if project else None,
         )
-    if name in {"pnpm-workspace.yaml", "pnpm-workspace.yml"}:
-        return Manifest(path=rel, kind="pnpm-workspace")
-    return None
+    module = re.search(r"(?m)^module\s+(\S+)\s*$", text)
+    return Manifest(
+        path=rel,
+        kind=profile.manifest_kind,
+        name=module.group(1) if module else None,
+    )
 
 
 def repo_map(request: RepoMapRequest) -> RepoMapResult:

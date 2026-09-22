@@ -19,8 +19,11 @@ from typing import Any
 from agentq.core import (
     AgentQError,
     SourceRef,
+    as_dict,
+    as_list,
     canonical_json,
     env_enabled,
+    list_field,
     repo_id,
     session_id,
     stable_id,
@@ -130,11 +133,15 @@ def _read_version_id(path: Path) -> str:
 def read_ranges(
     root: Path, data: dict[str, Any] | None, *, limit: int = 24
 ) -> list[dict[str, Any]]:
-    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+    if not isinstance(data, dict):
+        return []
+    items = list_field(data, "items")
+    if not items:
         return []
     ranges: list[dict[str, Any]] = []
-    for item_index, item in enumerate(data["items"]):
-        if not isinstance(item, dict) or item.get("refused"):
+    for item_index, raw_item in enumerate(items):
+        item = as_dict(raw_item)
+        if not item or item.get("refused"):
             continue
         path_text, start, end = item.get("path"), item.get("start"), item.get("end")
         if (
@@ -213,8 +220,7 @@ def _prior_ranges(
     for payload in payloads:
         if payload.get("options") != options_key:
             continue
-        raw_range = payload.get("range")
-        range_value: Mapping[str, Any] = raw_range if isinstance(raw_range, dict) else {}
+        range_value: Mapping[str, Any] = as_dict(payload.get("range"))
         file_id, version, start, end = (
             range_value.get("file"),
             range_value.get("version"),
@@ -393,19 +399,20 @@ def _iter_read_results(
 
     def walk(current: Any, inherited: Any) -> None:
         if isinstance(current, dict):
-            width = current.get("max_chars", inherited)
-            items = current.get("items")
-            if isinstance(items, list) and any(
+            node = as_dict(current)
+            width = node.get("max_chars", inherited)
+            items = list_field(node, "items")
+            if any(
                 isinstance(item, dict)
-                and isinstance(item.get("path"), str)
-                and isinstance(item.get("lines"), list)
+                and isinstance(as_dict(item).get("path"), str)
+                and isinstance(as_dict(item).get("lines"), list)
                 for item in items
             ):
-                found.append((width, current))
-            for value in current.values():
+                found.append((width, node))
+            for value in node.values():
                 walk(value, width)
         elif isinstance(current, list):
-            for value in current:
+            for value in as_list(current):
                 walk(value, inherited)
 
     walk(data, max_chars)
@@ -423,23 +430,22 @@ def _merge_intervals(numbers: list[int]) -> list[tuple[int, int]]:
 
 
 def _read_item_entries(item: Any) -> list[dict[str, Any]]:
-    if not isinstance(item, dict) or item.get("refused") or item.get("suppressed"):
+    node = as_dict(item)
+    if not node or node.get("refused") or node.get("suppressed"):
         return []
-    lines = item.get("lines")
+    lines = list_field(node, "lines")
     if (
-        not isinstance(item.get("version"), str)
-        or not isinstance(item.get("path"), str)
-        or not isinstance(item.get("start"), int)
-        or not isinstance(item.get("end"), int)
-        or not isinstance(lines, list)
+        not isinstance(node.get("version"), str)
+        or not isinstance(node.get("path"), str)
+        or not isinstance(node.get("start"), int)
+        or not isinstance(node.get("end"), int)
         or not lines
     ):
         return []
     return [
         entry
-        for entry in lines
-        if isinstance(entry, dict)
-        and isinstance(entry.get("line"), int)
+        for entry in (as_dict(raw) for raw in lines)
+        if isinstance(entry.get("line"), int)
         and isinstance(entry.get("text"), str)
         and entry["text"]
     ]
@@ -448,17 +454,18 @@ def _read_item_entries(item: Any) -> list[dict[str, Any]]:
 def _json_present_lines(visible: str) -> dict[tuple[str, str, int], str]:
     """(path, version, line) -> text for records surviving JSON projection."""
     try:
-        parsed = json.loads(visible) if visible else {}
+        parsed: Any = json.loads(visible) if visible else {}
     except json.JSONDecodeError:
         return {}
     present: dict[tuple[str, str, int], str] = {}
 
     def collect(current: Any) -> None:
         if isinstance(current, dict):
-            lines = current.get("lines")
-            path = current.get("path")
-            version = current.get("version")
-            if isinstance(path, str) and isinstance(lines, list):
+            node = as_dict(current)
+            lines = list_field(node, "lines")
+            path = node.get("path")
+            version = node.get("version")
+            if isinstance(path, str) and lines:
                 for entry in _read_item_entries(
                     {
                         "path": path,
@@ -470,10 +477,10 @@ def _json_present_lines(visible: str) -> dict[tuple[str, str, int], str]:
                 ):
                     if isinstance(version, str):
                         present[(path, version, entry["line"])] = entry["text"]
-            for value in current.values():
+            for value in node.values():
                 collect(value)
         elif isinstance(current, list):
-            for value in current:
+            for value in as_list(current):
                 collect(value)
 
     collect(parsed)

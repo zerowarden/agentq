@@ -4,59 +4,90 @@ from __future__ import annotations
 
 import shlex
 
-from .models import VerificationPlan, VerificationRun
+from .models import ProviderPlan, VerificationPlan, VerificationRun
 
 
 def render_plan(plan: VerificationPlan, *, budget: int = 0) -> str:
-    lines = [
-        f"changed files: {len(plan.changed_files)}"
-        f"{'+' if plan.changed_truncated else ''}",
-        f"workspace: {plan.workspace_packages} packages / "
-        f"{plan.workspace_edges} local edges / {plan.package_manager}",
-        f"mode: {plan.mode}  changed packages: {len(plan.changed_packages)}  "
-        f"dependents: {len(plan.dependent_packages)}",
-    ]
-    for ecosystem in plan.ecosystems:
-        lines.append(
-            f"ecosystem: {ecosystem.name} ({ecosystem.manager}) · "
-            f"{len(ecosystem.changed_packages)} changed · "
-            f"{ecosystem.steps_total} planned steps"
-        )
-    if plan.changed_packages:
-        lines.append("changed: " + ", ".join(plan.changed_packages[:12]))
-    if plan.dependent_packages:
-        lines.append(
-            "dependents: "
-            + ", ".join(plan.dependent_packages[:12])
-            + (" …" if len(plan.dependent_packages) > 12 else "")
-        )
-    for package in plan.packages:
-        lines.append(f"\npackage {package.name} ({package.directory}) [{package.scope}]:")
-        if package.changed:
-            lines.append(
-                "  changed: "
-                + ", ".join(package.changed[:8])
-                + (" …" if package.changed_truncated else "")
-            )
-        if package.candidate_tests:
-            lines.append(
-                "  candidate tests: " + ", ".join(package.candidate_tests[:6])
-            )
-    if plan.checks:
-        lines.append("\nverification ladder:")
-        for index, check in enumerate(plan.checks, 1):
-            lines.append(
-                f"  {index}. [{check.kind.value}] {check.package} cwd={check.cwd}"
-            )
-            lines.append(
-                "     " + " ".join(shlex.quote(item) for item in check.command)
-            )
-            lines.append(f"     why: {check.reason}")
-    else:
-        lines.append("\nNo deterministic code-verification command inferred.")
+    lines = _plan_header(plan)
+    lines.extend(_provider_lines(plan))
+    lines.extend(_package_lines(plan))
+    lines.extend(_step_lines(plan))
     for note in plan.notes:
         lines.append(f"\nnote: {note}")
     return "\n".join(lines)
+
+
+def _plan_header(plan: VerificationPlan) -> list[str]:
+    changes = plan.changes
+    limit = plan.display_limit
+    files_shown = changes.files[:limit] if limit > 0 else changes.files
+    return [
+        f"changed files: {len(changes.files)}"
+        f"{'+' if len(files_shown) < len(changes.files) else ''}",
+        f"mode: {plan.mode}  ecosystems: {len(plan.providers)}",
+    ]
+
+
+def _provider_lines(plan: VerificationPlan) -> list[str]:
+    lines: list[str] = []
+    for provider in plan.providers:
+        lines.append(_provider_header(provider))
+        if provider.changed_packages:
+            lines.append("  changed: " + _joined(provider.changed_packages, 12))
+        if provider.dependent_packages:
+            lines.append("  dependents: " + _joined(provider.dependent_packages, 12))
+    return lines
+
+
+def _package_lines(plan: VerificationPlan) -> list[str]:
+    lines: list[str] = []
+    for provider in plan.providers:
+        for package in provider.packages:
+            lines.append(
+                f"\npackage {package.name} ({package.directory}) "
+                f"[{provider.provider}:{package.scope}]:"
+            )
+            if package.changed:
+                lines.append(
+                    "  changed: "
+                    + ", ".join(package.changed[:8])
+                    + (" …" if package.changed_truncated else "")
+                )
+            if package.candidate_tests:
+                lines.append(
+                    "  candidate tests: " + ", ".join(package.candidate_tests[:6])
+                )
+    return lines
+
+
+def _step_lines(plan: VerificationPlan) -> list[str]:
+    checks = plan.displayed_checks
+    if not checks:
+        return ["\nNo deterministic code-verification command inferred."]
+    lines = ["\nverification ladder:"]
+    for index, check in enumerate(checks, 1):
+        lines.append(f"  {index}. [{check.kind.value}] {check.package} cwd={check.cwd}")
+        lines.append("     " + " ".join(shlex.quote(item) for item in check.command))
+        lines.append(f"     why: {check.reason}")
+    if len(checks) < plan.checks_total:
+        lines.append(
+            f"  … {plan.checks_total - len(checks)} more planned step(s) "
+            "omitted from this view"
+        )
+    return lines
+
+
+def _provider_header(provider: ProviderPlan) -> str:
+    return (
+        f"ecosystem: {provider.provider} ({provider.manager}) · "
+        f"{provider.workspace_packages} units / {provider.workspace_edges} local edges · "
+        f"{len(provider.changed_packages)} changed · {len(provider.checks)} planned steps"
+    )
+
+
+def _joined(values: tuple[str, ...], limit: int) -> str:
+    shown = ", ".join(values[:limit])
+    return shown + (" …" if len(values) > limit else "")
 
 
 def render_verification(result: VerificationRun, *, budget: int = 0) -> str:
@@ -84,18 +115,16 @@ def _verification_header(result: VerificationRun) -> list[str]:
     lines = [
         f"{symbol}: verify [{status}] · scope={result.scope} · "
         f"mode={plan.mode} · dependents={plan.dependents}",
-        f"changes: {len(plan.changed_files)} files · "
-        f"{len(plan.changed_packages)} changed pkgs · "
-        f"{len(plan.affected_packages)} affected pkgs",
+        f"changes: {len(plan.changes.files)} files · "
+        f"{len(plan.providers)} ecosystem(s)",
     ]
-    if plan.changed_packages:
-        lines.append("changed packages: " + ", ".join(plan.changed_packages[:12]))
-    if plan.dependent_packages:
-        lines.append(
-            "dependent packages: "
-            + ", ".join(plan.dependent_packages[:12])
-            + (" …" if len(plan.dependent_packages) > 12 else "")
-        )
+    for provider in plan.providers:
+        if provider.changed_packages or provider.dependent_packages:
+            lines.append(
+                f"{provider.provider}: "
+                f"changed {_joined(provider.changed_packages, 8)} · "
+                f"dependents {_joined(provider.dependent_packages, 8)}"
+            )
     return lines
 
 

@@ -5,13 +5,13 @@ from __future__ import annotations
 import argparse
 
 from ..commands.git import (
-    _run_audit,
-    _run_dependencies,
-    _run_git_diff,
-    _run_git_history,
-    _run_git_status,
-    _run_git_structural,
-    _run_impact,
+    run_audit,
+    run_dependencies,
+    run_git_diff,
+    run_git_history,
+    run_git_status,
+    run_git_structural,
+    run_impact,
 )
 from ..registry import CommandSpec, Group
 from .options import (
@@ -97,49 +97,49 @@ COMMANDS = (
     CommandSpec(
         "git-status",
         help="compact porcelain-v2 status",
-        execute=_run_git_status,
+        execute=run_git_status,
         groups=(Group.COMMON,),
         configure=_git_status_options,
     ),
     CommandSpec(
         "git-diff",
         help="diff summary with optional bounded patch",
-        execute=_run_git_diff,
+        execute=run_git_diff,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_git_diff_options,
     ),
     CommandSpec(
         "git-history",
         help="bounded commit history",
-        execute=_run_git_history,
+        execute=run_git_history,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_git_history_options,
     ),
     CommandSpec(
         "git-structural",
         help="single-file syntax-aware diff using difftastic",
-        execute=_run_git_structural,
+        execute=run_git_structural,
         groups=(Group.COMMON,),
         configure=_git_structural_options,
     ),
     CommandSpec(
         "dependencies",
         help="local workspace package dependency graph from manifests",
-        execute=_run_dependencies,
+        execute=run_dependencies,
         groups=(Group.COMMON,),
         configure=_dependencies_options,
     ),
     CommandSpec(
         "impact",
         help="bounded lexical/import blast-radius evidence",
-        execute=_run_impact,
+        execute=run_impact,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_impact_options,
     ),
     CommandSpec(
         "audit",
         help="heuristic bounded audit of the current patch",
-        execute=_run_audit,
+        execute=run_audit,
         groups=(Group.COMMON,),
         configure=_audit_options,
     ),

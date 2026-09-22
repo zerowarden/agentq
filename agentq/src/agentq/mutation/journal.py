@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from agentq.core import (
     AgentQError,
@@ -112,9 +112,12 @@ class JournalRecord:
 def _strings(value: Any, what: str) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    if not isinstance(value, list):
         raise ContractError(f"{what} must be an array of strings")
-    return tuple(value)
+    items = cast("list[Any]", value)
+    if not all(isinstance(item, str) for item in items):
+        raise ContractError(f"{what} must be an array of strings")
+    return tuple(items)
 
 
 def mutation_dir() -> Path:

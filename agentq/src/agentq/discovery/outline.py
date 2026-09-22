@@ -17,69 +17,26 @@ from agentq.core import (
     SYNTACTIC,
     Coverage,
     is_sensitive_path,
+    list_field,
     scope_match,
     typed_from_wire,
 )
-from agentq.delivery import compact_line
+from agentq.core.languages import language_for, language_id_for
 from agentq.discovery.files import list_repo_files, validated_scopes
 from agentq.execution import run_cmd
-from agentq.tooling import find_executable, language_for
+from agentq.syntax import (
+    MAX_PARSE_ERRORS,
+    OutlineParseError,
+    OutlineSymbol,
+    collect_python_files,
+    definitions_from_tree,
+    parse_python,
+    python_coverage,
+)
+from agentq.text import compact_line
+from agentq.tooling import find_executable
 
 from .search import parse_json_lines
-
-
-@dataclass(frozen=True)
-class OutlineSymbol:
-    name: str
-    kind: str | None
-    file: str
-    line: int | None
-    signature: str
-    scope: str | None = None
-    language: str | None = None
-    end_line: int | None = None
-    column: int | None = None
-
-    def to_wire(self, *, variant: str) -> dict[str, Any]:
-        if variant == "python":
-            return {
-                "name": self.name,
-                "kind": self.kind,
-                "file": self.file,
-                "line": self.line,
-                "end_line": self.end_line,
-                "column": self.column,
-                "signature": self.signature,
-                "scope": self.scope,
-                "language": self.language,
-            }
-        if variant == "ctags":
-            return {
-                "name": self.name,
-                "kind": self.kind,
-                "file": self.file,
-                "line": self.line,
-                "signature": self.signature,
-                "scope": self.scope,
-                "language": self.language,
-            }
-        return {
-            "name": self.name,
-            "kind": self.kind,
-            "file": self.file,
-            "line": self.line,
-            "signature": self.signature,
-            "language": self.language,
-        }
-
-
-@dataclass(frozen=True)
-class OutlineParseError:
-    path: str
-    error: str
-
-    def to_wire(self) -> dict[str, str]:
-        return {"path": self.path, "error": self.error}
 
 
 @dataclass(frozen=True)
@@ -144,8 +101,8 @@ class OutlineResult:
     @classmethod
     def from_wire(cls, payload: Mapping[str, Any]) -> OutlineResult:
         engine = str(payload.get("engine", "stdlib-ast-regex-fallback"))
-        symbols = []
-        for item in payload.get("symbols") or []:
+        symbols: list[OutlineSymbol] = []
+        for item in list_field(payload, "symbols"):
             symbols.append(
                 OutlineSymbol(
                     name=str(item.get("name", "")),
@@ -163,9 +120,9 @@ class OutlineResult:
             OutlineParseError(
                 path=str(item.get("path", "")), error=str(item.get("error", ""))
             )
-            for item in payload.get("parse_errors") or []
+            for item in list_field(payload, "parse_errors")
         )
-        paths = payload.get("paths")
+        paths = list_field(payload, "paths")
         return cls(
             engine=engine,
             shown=int(payload.get("shown", 0) or 0),
@@ -173,9 +130,9 @@ class OutlineResult:
             coverage=typed_from_wire(payload.get("coverage")),
             provenance=str(payload.get("provenance", SYNTACTIC)),
             symbols=tuple(symbols),
-            lines=tuple(str(item) for item in payload.get("lines") or []),
+            lines=tuple(str(item) for item in list_field(payload, "lines")),
             total=(int(payload["total"]) if payload.get("total") is not None else None),
-            scopes=tuple(str(item) for item in paths or []),
+            scopes=tuple(str(item) for item in paths),
             limit=(int(payload["limit"]) if payload.get("limit") is not None else None),
             parse_errors=parse_errors,
             parse_error_count=_int_or(payload.get("parse_error_count"), 0),
@@ -188,12 +145,44 @@ def _int_or(value: Any, default: int) -> int:
     return value
 
 
-def _python_outline(request: OutlineRequest) -> OutlineResult:
-    # The stdlib-AST definition engine is owned by the Python navigation
-    # provider; import it lazily so discovery never imports navigation at load.
-    from agentq.navigation import python_outline
-
-    return python_outline(request)
+def python_outline(request: OutlineRequest) -> OutlineResult:
+    """Outline one scope with the stdlib-AST definition engine."""
+    pattern = re.compile(request.match, re.I) if request.match else None
+    files, wire_scopes = collect_python_files(
+        request.root, list(request.paths), list_repo_files(request.root)
+    )
+    definitions: list[OutlineSymbol] = []
+    parse_errors: list[OutlineParseError] = []
+    parse_error_count = 0
+    for relative in files:
+        tree, _, error = parse_python(request.root / relative)
+        if tree is None:
+            parse_error_count += 1
+            if len(parse_errors) < MAX_PARSE_ERRORS:
+                parse_errors.append(
+                    OutlineParseError(path=relative, error=error or "unparseable")
+                )
+            continue
+        definitions.extend(definitions_from_tree(relative, tree))
+    if pattern is not None:
+        definitions = [item for item in definitions if pattern.search(item.name)]
+    if request.public:
+        definitions = [item for item in definitions if not item.name.startswith("_")]
+    truncated = len(definitions) > request.limit
+    reasons = (RESULT_LIMIT,) if truncated else ()
+    return OutlineResult(
+        engine="stdlib-python-ast",
+        shown=min(request.limit, len(definitions)),
+        truncated=truncated,
+        coverage=python_coverage(parse_error_count, *reasons),
+        provenance=SYNTACTIC,
+        symbols=tuple(definitions[: request.limit]),
+        total=len(definitions),
+        scopes=tuple(wire_scopes),
+        limit=request.limit,
+        parse_errors=tuple(parse_errors),
+        parse_error_count=parse_error_count,
+    )
 
 
 def _outline_ast_grep(request: OutlineRequest) -> OutlineResult | None:
@@ -320,9 +309,7 @@ def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
     pattern = re.compile(request.match, re.I) if request.match else None
     symbols: list[OutlineSymbol] = []
     for obj in parse_json_lines(result.stdout):
-        symbol = _ctags_symbol(
-            obj, root, pattern, public=bool(request.public)
-        )
+        symbol = _ctags_symbol(obj, root, pattern, public=bool(request.public))
         if symbol is None:
             continue
         symbols.append(symbol)
@@ -345,25 +332,9 @@ def _outline_ctags(request: OutlineRequest) -> OutlineResult | None:
 
 
 def _outline_fallback(request: OutlineRequest) -> OutlineResult:
-    from agentq.navigation import python_outline
-
     root = request.root
     query = re.compile(request.match, re.I) if request.match else None
-    python_payload = python_outline(request)
-    symbols: list[OutlineSymbol] = [
-        OutlineSymbol(
-            name=item.name,
-            kind=item.kind,
-            file=item.file,
-            line=item.line,
-            signature=item.signature or item.name,
-            scope=item.scope,
-            language=item.language,
-            end_line=item.end_line,
-            column=item.column,
-        )
-        for item in python_payload.symbols
-    ]
+    symbols: list[OutlineSymbol] = list(python_outline(request).symbols)
     ts_re = re.compile(
         r"^\s*(export\s+)?(?:declare\s+)?(?:async\s+)?(function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)",
         re.M,
@@ -376,11 +347,11 @@ def _outline_fallback(request: OutlineRequest) -> OutlineResult:
         if not scope_match(rel, list(request.paths) or ["."]) or is_sensitive_path(rel):
             continue
         path = root / rel
-        suffix = path.suffix.lower()
-        if suffix not in {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".rs"}:
+        language_id = language_id_for(rel)
+        if language_id not in {"typescript", "tsx", "javascript", "jsx", "rust"}:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        regex = rust_re if suffix == ".rs" else ts_re
+        regex = rust_re if language_id == "rust" else ts_re
         for found in regex.finditer(text):
             exported, kind, name = found.group(1), found.group(2), found.group(3)
             if query and not query.search(name):
@@ -436,7 +407,7 @@ def outline(request: OutlineRequest) -> OutlineResult:
     if (request.language and request.language.lower() in {"py", "python"}) or (
         scoped and all(path.endswith(".py") for path in scoped)
     ):
-        return _python_outline(normalized)
+        return python_outline(normalized)
     result = (
         _outline_ast_grep(normalized)
         or _outline_ctags(normalized)

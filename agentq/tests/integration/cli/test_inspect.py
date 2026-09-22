@@ -23,9 +23,9 @@ class InspectCliTests(AgentQIntegrationHarness):
             from agentq.core import typed_from_wire
             from agentq.navigation import (
                 InspectRequest,
-                TypeScriptNav,
                 inspect,
                 render_inspect,
+                ts_nav_from_payload,
             )
             from agentq.navigation.providers import typescript as typescript_provider
 
@@ -59,7 +59,7 @@ class InspectCliTests(AgentQIntegrationHarness):
         (self.repo / "packages/a/src/dup.py").write_text(
             "class Config:\n    pass\n", encoding="utf-8"
         )
-        nav = TypeScriptNav.from_payload(
+        nav = ts_nav_from_payload(
             ts_result, coverage=typed_from_wire(ts_result["coverage"])
         )
         with mock.patch.dict(os.environ, {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}):

@@ -24,6 +24,7 @@ from .errors import ContractError
 from .validation import (
     canonical_digest,
     is_instance_of,
+    list_field,
     optional_str,
     reject_unknown_keys,
     require_int,
@@ -55,6 +56,8 @@ PROVIDER_ERROR = "provider_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 RENDER_OMISSION = "render_omission"
 SOURCE_UNSTABLE = "source_unstable"
+UNATTRIBUTED = "unattributed"
+EXECUTION_INCOMPLETE = "execution_incomplete"
 
 EXACT = "exact"
 LOWER_BOUND = "lower_bound"
@@ -403,7 +406,7 @@ def typed_from_wire(value: Any) -> Coverage:
     status = mapping.get("status", UNKNOWN)
     if not isinstance(status, str) or status not in _COVERAGE_RANK:
         status = UNKNOWN
-    reasons_raw: Any = mapping.get("reason") or []
+    reasons_raw: Any = list_field(mapping, "reason")
     if not is_instance_of(reasons_raw, list):
         raise ContractError("coverage reason must be an array")
     reasons = cast("list[Any]", reasons_raw)

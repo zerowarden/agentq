@@ -198,8 +198,8 @@ class StatsCliTests(AgentQIntegrationHarness):
         with mock.patch.dict(os.environ, self.env):
             with mock.patch.object(
                 telemetry_module.report,
-                "_build_context_index",
-                wraps=telemetry_module.report._build_context_index,
+                "build_context_index",
+                wraps=telemetry_module.report.build_context_index,
             ) as build_index:
                 summary = telemetry_module.stats_data(self.repo, since="all")
                 build_index.assert_not_called()
@@ -427,7 +427,7 @@ class StatsCliTests(AgentQIntegrationHarness):
         self,
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.telemetry import SCHEMA, _cohort_comparison
+            from agentq.telemetry import SCHEMA, cohort_comparison
 
         now = 1_800_000_000.0
 
@@ -452,7 +452,7 @@ class StatsCliTests(AgentQIntegrationHarness):
             value.update(overrides)
             return value
 
-        comparable = _cohort_comparison(
+        comparable = cohort_comparison(
             [
                 event(1, 60),
                 event(2, 80),
@@ -469,7 +469,7 @@ class StatsCliTests(AgentQIntegrationHarness):
             comparable["rows"][0]["current"]["visible_chars_distribution"]["p90"], 78.0
         )
 
-        incomplete = _cohort_comparison(
+        incomplete = cohort_comparison(
             [
                 event(1, 60),
                 event(8, 100),
@@ -562,12 +562,12 @@ class StatsCliTests(AgentQIntegrationHarness):
         self,
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.telemetry import _verification_stats
+            from agentq.telemetry import verification_stats
 
-        legacy = _verification_stats(
+        legacy = verification_stats(
             [{"subject_status": "passed", "metrics": {}}], detailed=True
         )
-        measured_zero = _verification_stats(
+        measured_zero = verification_stats(
             [
                 {
                     "subject_status": "passed",
@@ -656,9 +656,9 @@ class StatsCliTests(AgentQIntegrationHarness):
         self,
     ) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.telemetry import _event_facets, read_efficiency
+            from agentq.telemetry import event_facets, read_efficiency
 
-        project = _event_facets([{"command": "run", "subject_status": None}])[
+        project = event_facets([{"command": "run", "subject_status": None}])[
             "project_commands"
         ]
         self.assertEqual(project["unknown"], 1)

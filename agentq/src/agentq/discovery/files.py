@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,9 @@ from agentq.core import (
     scope_match,
     typed_coverage,
 )
+from agentq.core.languages import language_for
 from agentq.execution import run_cmd
-from agentq.tooling import find_executable, language_for
+from agentq.tooling import find_executable
 
 from .models import FileEntry
 
@@ -189,26 +191,46 @@ def _is_subsequence(needle: str, haystack: str) -> bool:
     return all(any(ch == candidate for candidate in it) for ch in needle)
 
 
-def _file_score(path: str, query: str) -> tuple[int, int, int, str]:
+class MatchClass(IntEnum):
+    """Ordered file-lookup match strength; lower is stronger."""
+
+    EXACT = 0
+    PREFIX = 1
+    NAME_SUBSTRING = 2
+    PATH_SUBSTRING = 3
+    SUBSEQUENCE = 4
+    NONE = 5
+
+
+@dataclass(frozen=True, order=True)
+class FileRank:
+    """Lexicographic file ranking: match class dominates every length fact."""
+
+    match_class: MatchClass
+    depth: int
+    path_length: int
+    path: str
+
+
+def _file_rank(path: str, query: str) -> FileRank:
     p = Path(path)
     q = query.lower()
     full = path.lower()
     name = p.name.lower()
     stem = p.stem.lower()
-    score = 0
     if q == name or q == stem:
-        score += 100
-    if name.startswith(q) or stem.startswith(q):
-        score += 60
-    if f"/{q}" in "/" + full:
-        score += 25
-    if q in name:
-        score += 30
-    if q in full:
-        score += 15
-    if q and _is_subsequence(q, name):
-        score += 5
-    return (-score, len(p.parts), len(path), path)
+        match_class = MatchClass.EXACT
+    elif name.startswith(q) or stem.startswith(q):
+        match_class = MatchClass.PREFIX
+    elif q in name:
+        match_class = MatchClass.NAME_SUBSTRING
+    elif q in full:
+        match_class = MatchClass.PATH_SUBSTRING
+    elif q and _is_subsequence(q, name):
+        match_class = MatchClass.SUBSEQUENCE
+    else:
+        match_class = MatchClass.NONE
+    return FileRank(match_class, len(p.parts), len(path), path)
 
 
 @dataclass(frozen=True)
@@ -270,10 +292,10 @@ def files(request: FilesRequest) -> FilesResult:
             continue
         candidates.append(path)
     candidates.sort(
-        key=lambda p: (
-            _file_score(p, request.query)
+        key=lambda path: (
+            _file_rank(path, request.query)
             if request.query
-            else (0, len(Path(p).parts), len(p), p)
+            else FileRank(MatchClass.NONE, len(Path(path).parts), len(path), path)
         )
     )
     total = len(candidates)

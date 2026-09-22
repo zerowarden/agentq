@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from collections.abc import Hashable
-from typing import Any
+from typing import Any, cast
 
 OUTPUT_ATTRIBUTION_KEYS = (
     "unique_evidence_chars",
@@ -60,8 +60,9 @@ def empty_attribution() -> dict[str, int]:
 def attribution_total(attribution: Any) -> int:
     if not isinstance(attribution, dict):
         return 0
+    values = cast("dict[str, Any]", attribution)
     return sum(
-        max(0, int(attribution.get(key, 0) or 0)) for key in OUTPUT_ATTRIBUTION_KEYS
+        max(0, int(values.get(key, 0) or 0)) for key in OUTPUT_ATTRIBUTION_KEYS
     )
 
 
@@ -144,10 +145,13 @@ def _json_attribution(command: str, value: Any) -> dict[str, int]:
         key: str | None = None,
     ) -> None:
         if isinstance(current, dict):
-            result["serialization_chars"] += 2 + max(0, len(current) - 1)
-            local_path = current.get("path") or current.get("file") or path_hint
+            current_dict = cast("dict[str, Any]", current)
+            result["serialization_chars"] += 2 + max(0, len(current_dict) - 1)
+            local_path = (
+                current_dict.get("path") or current_dict.get("file") or path_hint
+            )
             local_path = str(local_path) if isinstance(local_path, str) else path_hint
-            for child_key, child in current.items():
+            for child_key, child in current_dict.items():
                 result["serialization_chars"] += (
                     len(json.dumps(str(child_key), ensure_ascii=False)) + 1
                 )
@@ -155,13 +159,14 @@ def _json_attribution(command: str, value: Any) -> dict[str, int]:
                     child,
                     (*ancestors, str(child_key)),
                     local_path,
-                    current,
+                    current_dict,
                     str(child_key),
                 )
             return
         if isinstance(current, list):
-            result["serialization_chars"] += 2 + max(0, len(current) - 1)
-            for child in current:
+            current_list = cast("list[Any]", current)
+            result["serialization_chars"] += 2 + max(0, len(current_list) - 1)
+            for child in current_list:
                 walk(child, ancestors, path_hint, parent, None)
             return
         if isinstance(current, str):
@@ -207,10 +212,10 @@ class _EvidenceCollector:
         key: str | None = None,
     ) -> None:
         if isinstance(current, dict):
-            self._walk_dict(current, ancestors, path_hint)
+            self._walk_dict(cast("dict[str, Any]", current), ancestors, path_hint)
             return
         if isinstance(current, list):
-            for child in current:
+            for child in cast("list[Any]", current):
                 self.walk(child, ancestors, path_hint, parent, None)
             return
         self._record(current, ancestors, path_hint, parent, key)

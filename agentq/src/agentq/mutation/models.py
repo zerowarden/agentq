@@ -11,12 +11,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import (
     AgentQError,
     ContractError,
     canonical_digest,
+    list_field,
     optional_int,
     optional_str,
     reject_unknown_keys,
@@ -125,13 +126,15 @@ class PlannedFile:
 
 
 def _is_match_span(span: object) -> bool:
+    if not isinstance(span, tuple):
+        return False
+    values = cast("tuple[Any, ...]", span)
     return (
-        isinstance(span, tuple)
-        and len(span) == 2
-        and not isinstance(span[0], bool)
-        and not isinstance(span[1], bool)
-        and isinstance(span[0], int)
-        and isinstance(span[1], int)
+        len(values) == 2
+        and not isinstance(values[0], bool)
+        and not isinstance(values[1], bool)
+        and isinstance(values[0], int)
+        and isinstance(values[1], int)
     )
 
 
@@ -284,9 +287,11 @@ class MutationPlan:
         scopes = payload.get("scopes")
         if not isinstance(scopes, list) or not scopes:
             raise ContractError(f"{what}.scopes must be a non-empty array")
+        scopes = cast("list[Any]", scopes)
         files = payload.get("files")
         if not isinstance(files, list):
             raise ContractError(f"{what}.files must be an array")
+        files = cast("list[Any]", files)
         plan_id = require_str(payload.get("plan_id"), f"{what}.plan_id")
         digest = plan_digest(payload)
         if plan_id != digest:
@@ -343,18 +348,19 @@ def _planned_file_from_wire(value: Any, what: str, index: int) -> PlannedFile:
         ),
         f"{what}.files[{index}]",
     )
-    spans = entry.get("match_spans") or []
+    spans: list[Any] = list_field(entry, "match_spans")
     if not isinstance(spans, list):
         raise ContractError(f"{what}.files[{index}].match_spans must be an array")
-    decoded_spans = []
+    decoded_spans: list[tuple[int, int]] = []
     for span in spans:
-        if not isinstance(span, list) or len(span) != 2:
+        if not isinstance(span, list) or len(cast("list[Any]", span)) != 2:
             raise ContractError(f"{what}.files[{index}] has a malformed match span")
-        decoded_spans.append((span[0], span[1]))
-    edits = entry.get("edits") or []
+        pair = cast("list[Any]", span)
+        decoded_spans.append((pair[0], pair[1]))
+    edits: list[Any] = list_field(entry, "edits")
     if not isinstance(edits, list):
         raise ContractError(f"{what}.files[{index}].edits must be an array")
-    decoded_edits = []
+    decoded_edits: list[ByteEdit] = []
     for edit in edits:
         item = require_mapping(edit, f"{what}.files[{index}].edits entry")
         reject_unknown_keys(

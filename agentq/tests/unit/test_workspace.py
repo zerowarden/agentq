@@ -1,4 +1,4 @@
-"""Typed workspace discovery, dependency graph, and change classification."""
+"""Typed workspace discovery, project graph identity, and change classification."""
 
 from __future__ import annotations
 
@@ -9,66 +9,92 @@ from pathlib import Path
 
 from agentq.workspace import (
     ChangeSet,
-    DependencyGraph,
-    Package,
+    DependencyEdge,
+    NodePackage,
     PackageManager,
-    discover_workspace,
+    ProjectGraph,
+    ProjectUnit,
+    UnitId,
+    discover_cargo,
+    discover_node,
+    discover_python,
     find_script,
     manifest_units,
     nearest_manifest,
+    normalize_python_name,
     owner_for_file,
     package_exec_argv,
     package_manager,
+    python_dependency_name,
     script_argv,
 )
 
 
-class DependencyGraphTests(unittest.TestCase):
+def _unit(ecosystem: str, path: str, name: str) -> ProjectUnit:
+    return ProjectUnit(id=UnitId(ecosystem, path), name=name, manifest=path)
+
+
+class ProjectGraphTests(unittest.TestCase):
     def test_edges_traversal_and_order(self) -> None:
-        packages = {
-            "packages/a": Package(path="packages/a", name="a"),
-            "packages/b": Package(
-                path="packages/b", name="b", dependencies=frozenset({"a"})
+        a, b, c = (
+            UnitId("node", "packages/a"),
+            UnitId("node", "packages/b"),
+            UnitId("node", "packages/c"),
+        )
+        graph = ProjectGraph.from_units(
+            {
+                a: _unit("node", "packages/a", "a"),
+                b: _unit("node", "packages/b", "b"),
+                c: _unit("node", "packages/c", "c"),
+            },
+            (
+                DependencyEdge(source=b, target=a, kind="dependencies"),
+                DependencyEdge(source=c, target=b, kind="dependencies"),
             ),
-            "packages/c": Package(
-                path="packages/c", name="c", dependencies=frozenset({"b"})
+        )
+
+        self.assertEqual(graph.edge_count(), 2)
+        self.assertEqual(graph.resolve("a"), a)
+        self.assertEqual(graph.dependents({a}, depth=1), {b: 1})
+        self.assertEqual(graph.dependents({a}, depth=None), {b: 1, c: 2})
+        self.assertEqual(
+            graph.dependency_order({a, b, c}),
+            (a, b, c),
+        )
+        self.assertEqual(graph.dependency_order({a}), (a,))
+
+    def test_cycle_order_stays_deterministic_and_cycles_are_explicit(self) -> None:
+        x, y = UnitId("node", "x"), UnitId("node", "y")
+        graph = ProjectGraph.from_units(
+            {x: _unit("node", "x", "x"), y: _unit("node", "y", "y")},
+            (
+                DependencyEdge(source=x, target=y, kind="dependencies"),
+                DependencyEdge(source=y, target=x, kind="dependencies"),
             ),
-        }
-        graph = DependencyGraph.from_packages(packages)
+        )
+        self.assertEqual(graph.dependency_order({x, y}), (y, x))
+        self.assertEqual(graph.cycles(), ((x, y),))
 
-        self.assertEqual(graph.edges(), 2)
-        self.assertEqual(graph.by_name["a"], "packages/a")
-        self.assertEqual(graph.dependents({"packages/a"}, depth=1), {"packages/b": 1})
-        self.assertEqual(
-            graph.dependents({"packages/a"}, depth=None),
-            {"packages/b": 1, "packages/c": 2},
+    def test_duplicate_names_are_many_valued_not_collapsed(self) -> None:
+        node = UnitId("node", "packages/core")
+        cargo = UnitId("cargo", "crates/core")
+        graph = ProjectGraph.from_units(
+            {
+                node: _unit("node", "packages/core", "core"),
+                cargo: _unit("cargo", "crates/core", "core"),
+            }
         )
-        self.assertEqual(
-            graph.dependency_order({"packages/a", "packages/b", "packages/c"}),
-            ("packages/a", "packages/b", "packages/c"),
-        )
-        self.assertEqual(graph.dependency_order({"packages/a"}), ("packages/a",))
-
-    def test_cycle_order_stays_deterministic(self) -> None:
-        packages = {
-            "x": Package(path="x", name="x", dependencies=frozenset({"y"})),
-            "y": Package(path="y", name="y", dependencies=frozenset({"x"})),
-        }
-        self.assertEqual(
-            DependencyGraph.from_packages(packages).dependency_order({"x", "y"}),
-            ("y", "x"),
-        )
+        self.assertEqual(graph.units_named("core"), (cargo, node))
+        self.assertIsNone(graph.resolve("core"))
+        self.assertEqual(graph.ambiguous_names(), ("core",))
 
     def test_owner_for_file_picks_the_deepest_package(self) -> None:
-        packages = {
-            ".": Package(path=".", name="root", root=True),
-            "packages/a": Package(path="packages/a", name="a"),
-        }
-        self.assertEqual(
-            owner_for_file("packages/a/src/index.ts", packages), "packages/a"
-        )
-        self.assertEqual(owner_for_file("README.md", packages), ".")
-        self.assertIsNone(owner_for_file("README.md", {"packages/a": packages["packages/a"]}))
+        root = ProjectUnit(id=UnitId("node", "."), name="root", root=True)
+        nested = _unit("node", "packages/a", "a")
+        units = {root.id: root, nested.id: nested}
+        self.assertEqual(owner_for_file("packages/a/src/index.ts", units), nested.id)
+        self.assertEqual(owner_for_file("README.md", units), root.id)
+        self.assertIsNone(owner_for_file("README.md", {nested.id: nested}))
 
 
 class ChangeSetTests(unittest.TestCase):
@@ -112,8 +138,7 @@ class PackageCommandTests(unittest.TestCase):
                 )
 
     def test_find_script_uses_aliases(self) -> None:
-        package = Package(
-            path="packages/a",
+        package = NodePackage(
             name="@test/a",
             scripts={"type-check": "tsc --noEmit", "test": "vitest run"},
         )
@@ -159,23 +184,24 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
                 json.dumps({"name": "@test/excluded"}), encoding="utf-8"
             )
 
-            workspace = discover_workspace(root)
+            workspace = discover_node(root)
 
             self.assertEqual(workspace.manager, PackageManager.NPM)
             self.assertEqual(workspace.patterns, ("packages/*",))
-            self.assertEqual(
-                sorted(workspace.packages), [".", "packages/a", "packages/b"]
-            )
-            root_package = workspace.packages["."]
+            paths = sorted(unit.id.path for unit in workspace.graph.units.values())
+            self.assertEqual(paths, [".", "packages/a", "packages/b"])
+            root_package = workspace.packages[UnitId("node", ".")]
             self.assertTrue(root_package.root)
             self.assertTrue(root_package.private)
-            package = workspace.packages["packages/a"]
+            package = workspace.packages[UnitId("node", "packages/a")]
             self.assertEqual(package.name, "@test/a")
-            self.assertEqual(package.dependencies, frozenset({"@test/b"}))
-            self.assertEqual(package.dependency_kinds, {"@test/b": ("dependencies",)})
             self.assertEqual(package.scripts, {"test": "vitest run"})
             self.assertIn("@test/b", package.declared_dependencies)
             self.assertIn("@test/b", package.runtime_dependencies)
+            self.assertEqual(
+                workspace.graph.dependencies(UnitId("node", "packages/a")),
+                frozenset({UnitId("node", "packages/b")}),
+            )
 
     def test_package_manager_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -220,6 +246,70 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
             self.assertEqual(manifest.path, "package.json")
             self.assertEqual(manifest.name, "root")
             self.assertEqual(manifest.scripts, ("test",))
+
+
+class EcosystemAdapterTests(unittest.TestCase):
+    def test_python_names_normalize_separators(self) -> None:
+        self.assertEqual(normalize_python_name("Some_Package"), "some-package")
+        self.assertEqual(python_dependency_name("my.pkg>=1.2"), "my-pkg")
+        self.assertEqual(
+            normalize_python_name("my_pkg"), normalize_python_name("my-pkg")
+        )
+
+    def test_python_local_edges_use_normalized_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "root"\n', encoding="utf-8"
+            )
+            package = root / "pkg"
+            package.mkdir()
+            (package / "pyproject.toml").write_text(
+                '[project]\nname = "my_pkg"\n', encoding="utf-8"
+            )
+            consumer = root / "consumer"
+            consumer.mkdir()
+            (consumer / "pyproject.toml").write_text(
+                '[project]\nname = "consumer"\ndependencies = ["my.pkg>=1"]\n',
+                encoding="utf-8",
+            )
+
+            workspace = discover_python(
+                root, ["pkg/pyproject.toml", "consumer/pyproject.toml"]
+            )
+
+            self.assertEqual(
+                workspace.graph.dependencies(UnitId("python", "consumer")),
+                frozenset({UnitId("python", "pkg")}),
+            )
+            self.assertTrue(workspace.tooling[UnitId("python", "pkg")].pytest is False)
+
+    def test_cargo_path_dependencies_become_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/*"]\n', encoding="utf-8"
+            )
+            for name, dependency in (
+                ("core", ""),
+                ("app", 'core = { path = "../core" }\n'),
+            ):
+                crate = root / "crates" / name
+                crate.mkdir(parents=True)
+                (crate / "Cargo.toml").write_text(
+                    f'[package]\nname = "{name}"\nversion = "0.1.0"\n\n'
+                    + (f"[dependencies]\n{dependency}" if dependency else ""),
+                    encoding="utf-8",
+                )
+
+            workspace = discover_cargo(
+                root, ["crates/core/Cargo.toml", "crates/app/Cargo.toml"]
+            )
+
+            self.assertEqual(
+                workspace.graph.dependencies(UnitId("cargo", "crates/app")),
+                frozenset({UnitId("cargo", "crates/core")}),
+            )
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ class TelemetryEvent:
     tool_status: str | None = None
     agentq_exit_code: int | None = None
     execution: ExecutionOutcome | None = None
-    attributes: Mapping[str, Any] = field(default_factory=dict)
+    attributes: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
     def __post_init__(self) -> None:
         require_str(self.event_id, "telemetry event id")

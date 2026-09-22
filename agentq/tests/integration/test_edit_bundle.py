@@ -218,7 +218,7 @@ class ExplicitResolutionTests(unittest.TestCase):
                 },
                 "coverage": {"status": "complete", "reason": []},
             }
-            nav = navigation_module.TypeScriptNav.from_payload(
+            nav = navigation_module.ts_nav_from_payload(
                 ts_payload, coverage=typed_from_wire(ts_payload["coverage"])
             )
             with (
@@ -310,7 +310,7 @@ class ExplicitResolutionTests(unittest.TestCase):
         try:
             with mock.patch.object(
                 navigation_module.PythonProvider,
-                "overview",
+                "inspect_symbol",
                 side_effect=AgentQError("python provider crashed"),
             ):
                 result = edit_result(root, "Missing", ["pkg"], lang="python")

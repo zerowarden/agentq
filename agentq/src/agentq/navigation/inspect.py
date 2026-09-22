@@ -28,13 +28,13 @@ from agentq.core import (
     status_of,
     typed_coverage,
 )
+from agentq.core.languages import language_for
 from agentq.discovery import (
     OutlineRequest,
     ReadRequest,
     ReadResult,
     SearchHit,
     SearchRequest,
-    SearchResult,
     outline,
     read,
     render_outline,
@@ -42,7 +42,6 @@ from agentq.discovery import (
     render_search,
     search,
 )
-from agentq.tooling import language_for
 from agentq.workspace import nearest_manifest
 
 from .models import (
@@ -54,17 +53,20 @@ from .models import (
     CandidateRef,
     EditBundle,
     EditCoverage,
+    EditInspection,
     InspectRequest,
     InspectResult,
+    OutlineInspection,
     PackageManifest,
     ProviderMetadata,
-    PythonOverview,
     ReferenceEvidence,
-    ReferenceItem,
+    SourceInspection,
+    SymbolEvidence,
+    SymbolInspection,
     TargetIdentity,
-    TypeScriptNav,
+    reference_text,
 )
-from .providers import render_python_overview, render_ts_nav
+from .providers import lexical_payload, navigation_payload, render_navigation
 from .resolution import SymbolResolution, resolve_symbol
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -146,59 +148,33 @@ def _make_candidate_ref(
 
 
 def _candidate_refs(
-    provider: str, payload: object | None, *, root: Path
+    provider: str, evidence: SymbolEvidence | None, *, root: Path
 ) -> tuple[tuple[CandidateRef, ...], int]:
-    if isinstance(payload, PythonOverview):
-        items = payload.candidates
-        refs = [
-            ref
-            for symbol in items
-            if (
-                ref := _make_candidate_ref(
-                    provider=provider,
-                    root=root,
-                    path=symbol.file,
-                    line=symbol.line or 1,
-                    column=symbol.column or 1,
-                    end_line=symbol.end_line or symbol.line or 1,
-                    kind=symbol.kind or "declaration",
-                    signature=symbol.signature,
-                    scope=symbol.scope,
-                )
+    if evidence is None:
+        return (), 0
+    refs = [
+        ref
+        for symbol in evidence.candidates
+        if (
+            ref := _make_candidate_ref(
+                provider=provider,
+                root=root,
+                path=symbol.path,
+                line=symbol.line,
+                column=symbol.column,
+                end_line=symbol.end_line,
+                kind=symbol.kind,
+                signature=symbol.signature,
+                scope=symbol.scope,
             )
-            is not None
-        ]
-        return tuple(refs), len(items)
-    if isinstance(payload, TypeScriptNav):
-        items = payload.candidates
-        refs = [
-            ref
-            for item in items
-            if (
-                ref := _make_candidate_ref(
-                    provider=provider,
-                    root=root,
-                    path=item.path,
-                    line=item.line,
-                    column=item.column,
-                    end_line=item.end_line,
-                    kind=item.kind or "declaration",
-                    signature=item.preview or item.name or item.display or "",
-                    scope=item.container,
-                )
-            )
-            is not None
-        ]
-        return tuple(refs), len(items)
-    return (), 0
+        )
+        is not None
+    ]
+    return tuple(refs), len(evidence.candidates)
 
 
 def _declared_candidates(resolution: SymbolResolution) -> int:
-    return sum(
-        outcome.candidate_count or 0
-        for outcome in resolution.outcomes
-        if outcome.provider in {"typescript", "python"}
-    )
+    return sum(outcome.candidate_count or 0 for outcome in resolution.outcomes)
 
 
 def _acquisition_incomplete(resolution: SymbolResolution) -> bool:
@@ -246,42 +222,16 @@ def _declaration_evidence(
     )
 
 
-def _reference_evidence(
-    provider: str, payload: object | None
-) -> ReferenceEvidence | None:
-    section = None
-    if isinstance(payload, PythonOverview):
-        section = payload.references
-        return ReferenceEvidence(
-            provider=provider,
-            results=tuple(ReferenceItem.from_python(item) for item in section.results),
-            shown=section.shown,
-            total=section.total,
-            truncated=section.truncated,
-        )
-    if isinstance(payload, TypeScriptNav) and payload.references is not None:
-        section = payload.references
-        return ReferenceEvidence(
-            provider=provider,
-            results=tuple(
-                ReferenceItem.from_typescript(item) for item in section.results
-            ),
-            shown=section.shown,
-            total=section.total,
-            truncated=section.truncated,
-        )
-    return None
-
-
-def _fallback_reference(payload: object | None) -> ReferenceEvidence | None:
-    if not isinstance(payload, SearchResult):
+def _reference_evidence(evidence: SymbolEvidence | None) -> ReferenceEvidence | None:
+    if evidence is None or evidence.references is None:
         return None
+    page = evidence.references
     return ReferenceEvidence(
-        provider="lexical",
-        results=tuple(ReferenceItem.from_search_hit(hit) for hit in payload.hits),
-        shown=payload.shown,
-        total=payload.total_matching_lines,
-        truncated=payload.truncated,
+        provider=evidence.provider,
+        results=page.results,
+        shown=page.shown,
+        total=page.total,
+        truncated=page.truncated,
     )
 
 
@@ -453,14 +403,14 @@ def _selected_declaration(
 def _selected_references(
     resolution: SymbolResolution,
     selected: CandidateRef | None,
-    navigation: PythonOverview | TypeScriptNav | None,
+    navigation: SymbolEvidence | None,
 ) -> tuple[ReferenceEvidence, ...]:
     if selected is not None:
-        section = _reference_evidence(selected.provider, navigation)
+        section = _reference_evidence(navigation)
         if section is not None:
             return (section,)
     if resolution.fallback is not None:
-        fallback = _fallback_reference(resolution.fallback.payload)
+        fallback = _reference_evidence(resolution.fallback.payload)
         if fallback is not None:
             return (fallback,)
     return ()
@@ -511,8 +461,8 @@ def _edit_result(
     max_lines: int,
     repeat: bool,
 ) -> InspectResult:
-    ts = resolution.payload("typescript")
-    python = resolution.payload("python")
+    ts = resolution.evidence("typescript")
+    python = resolution.evidence("python")
     ts_refs, ts_retained = _candidate_refs("typescript", ts, root=root)
     py_refs, py_retained = _candidate_refs("python", python, root=root)
     refs = (*ts_refs, *py_refs)
@@ -536,7 +486,7 @@ def _edit_result(
     if (
         selected is not None
         and selected.provider == "typescript"
-        and not (isinstance(ts, TypeScriptNav) and ts.overview_selected)
+        and not (ts is not None and ts.selected)
     ):
         index = next(
             (
@@ -557,8 +507,8 @@ def _edit_result(
                 include_references=True,
                 pick=index + 1,
             )
-            upgraded_ts = upgraded.payload("typescript")
-            if isinstance(upgraded_ts, TypeScriptNav) and upgraded_ts.overview_selected:
+            upgraded_ts = upgraded.evidence("typescript")
+            if upgraded_ts is not None and upgraded_ts.selected:
                 resolution = upgraded
                 ts = upgraded_ts
 
@@ -570,11 +520,14 @@ def _edit_result(
         incomplete=incomplete,
         resolution=resolution,
     )
-    navigation: PythonOverview | TypeScriptNav | None = None
+    navigation_evidence: SymbolEvidence | None = None
     if selected is not None:
-        candidate = ts if selected.provider == "typescript" else python
-        if isinstance(candidate, (PythonOverview, TypeScriptNav)):
-            navigation = candidate
+        navigation_evidence = ts if selected.provider == "typescript" else python
+    navigation = (
+        navigation_payload(navigation_evidence)
+        if navigation_evidence is not None
+        else None
+    )
 
     if selected is not None:
         declaration, declaration_omission = _selected_declaration(
@@ -586,7 +539,7 @@ def _edit_result(
             f"no declaration selected ({resolution_outcome})",
         )
 
-    references = _selected_references(resolution, selected, navigation)
+    references = _selected_references(resolution, selected, navigation_evidence)
     references_omission = (
         None if references else "no reference evidence was returned for this request"
     )
@@ -660,12 +613,10 @@ def _edit_result(
             bundle.coverage.declaration,
             bundle.coverage.tests,
         )
-    return InspectResult(
-        kind="edit",
+    return EditInspection(
         target=target,
         intent="edit",
-        semantic=ts if isinstance(ts, TypeScriptNav) else None,
-        python=python if isinstance(python, PythonOverview) else None,
+        evidence=tuple(item for item in (ts, python) if item is not None),
         edit=bundle,
         providers=entries,
         provenance=provenance,
@@ -705,52 +656,47 @@ def _symbol_result(
     )
     entries = resolution.entries()
     provenance, coverage = _metadata(entries)
-    ts = resolution.payload("typescript")
-    python = resolution.payload("python")
-    ts_nav = ts if isinstance(ts, TypeScriptNav) else None
-    py_nav = python if isinstance(python, PythonOverview) else None
+    ts = resolution.evidence("typescript")
+    python = resolution.evidence("python")
 
-    if (
-        ts_nav is not None
-        and ts_nav.candidates
-        and py_nav is not None
-        and py_nav.candidates
-    ):
-        return InspectResult(
+    if ts is not None and ts.candidates and python is not None and python.candidates:
+        return SymbolInspection(
             kind="ambiguous",
             target=target,
             intent=intent,
-            semantic=ts_nav,
-            python=py_nav,
+            evidence=(ts, python),
             providers=entries,
             provenance=provenance,
             coverage=coverage,
         )
-    if ts_nav is not None and ts_nav.candidates:
-        return InspectResult(
+    if ts is not None and ts.candidates:
+        return SymbolInspection(
             kind="semantic",
             target=target,
             intent=intent,
-            semantic=ts_nav,
+            evidence=(ts,),
             providers=entries,
             provenance=provenance,
             coverage=coverage,
         )
-    if py_nav is not None and py_nav.candidates:
-        return InspectResult(
+    if python is not None and python.candidates:
+        return SymbolInspection(
             kind="python",
             target=target,
             intent=intent,
-            python=py_nav,
+            evidence=(python,),
             providers=entries,
             provenance=provenance,
             coverage=coverage,
         )
+    fallback = resolution.fallback
     lexical = (
-        resolution.fallback.payload
-        if resolution.fallback is not None
-        and isinstance(resolution.fallback.payload, SearchResult)
-        else search(
+        lexical_payload(fallback.payload)
+        if fallback is not None and fallback.payload is not None
+        else None
+    )
+    if lexical is None:
+        lexical = search(
             SearchRequest(
                 root=root,
                 query=target,
@@ -767,8 +713,7 @@ def _symbol_result(
                 max_files=40,
             )
         )
-    )
-    return InspectResult(
+    return SymbolInspection(
         kind="lexical",
         target=target,
         intent=intent,
@@ -791,7 +736,7 @@ def _file_result(
         )
     )
     if request.intent != "edit":
-        return InspectResult(
+        return OutlineInspection(
             kind="file",
             target=request.target,
             path=relative,
@@ -807,11 +752,9 @@ def _file_result(
             "(typecheck, tests)"
         ]
         if package
-        else [
-            "no owning manifest found; verify through the workspace-level checks"
-        ]
+        else ["no owning manifest found; verify through the workspace-level checks"]
     )
-    return InspectResult(
+    return OutlineInspection(
         kind="file",
         target=request.target,
         path=relative,
@@ -870,8 +813,7 @@ def inspect(request: InspectRequest) -> InspectResult:
                         output_format=request.output_format,
                     )
                 )
-                return InspectResult(
-                    kind="source-windows",
+                return SourceInspection(
                     target=request.target,
                     path=relative,
                     role=classify_path(relative),
@@ -881,7 +823,7 @@ def inspect(request: InspectRequest) -> InspectResult:
             return _file_result(request, root, relative, candidate_path)
         if anchors or ranges:
             raise AgentQError("--line/--lines require inspect TARGET to be a file")
-        return InspectResult(
+        return OutlineInspection(
             kind="directory",
             target=request.target,
             path=relative,
@@ -944,7 +886,7 @@ def inspect(request: InspectRequest) -> InspectResult:
             max_files=40,
         )
     )
-    return InspectResult(
+    return SymbolInspection(
         kind="lexical",
         target=request.target,
         search=lexical,
@@ -955,32 +897,21 @@ def inspect(request: InspectRequest) -> InspectResult:
 
 
 def render_inspect(result: InspectResult, *, budget: int = 0) -> str:
-    if result.kind == "semantic":
-        assert result.semantic is not None
-        return render_ts_nav(result.semantic, budget=budget)
-    if result.kind == "python":
-        assert result.python is not None
-        return render_python_overview(result.python, budget=budget)
-    if result.kind == "source-windows":
+    if isinstance(result, SourceInspection):
         assert result.source is not None
         return render_read(result.source, budget=budget)
+    if isinstance(result, OutlineInspection):
+        return _render_outline(result, budget=budget)
+    if isinstance(result, EditInspection):
+        return _render_edit(result, budget=budget)
+    if result.kind in {"semantic", "python"}:
+        return render_navigation(result.semantic or result.python, budget=budget)
     if result.kind == "ambiguous":
         return _render_ambiguous(result, budget=budget)
-    if result.kind == "edit":
-        return _render_edit(result, budget=budget)
-    return _render_untyped_result(result, budget=budget)
+    return _render_lexical(result, budget=budget)
 
 
-def _render_untyped_result(result: InspectResult, *, budget: int) -> str:
-    """Render lexical, file, and directory results, or the empty fallback."""
-    if result.kind == "lexical":
-        return _render_lexical(result, budget=budget)
-    if result.kind in {"file", "directory"}:
-        return _render_outline(result, budget=budget)
-    return rendered_text(f"inspect {result.target}: no result")
-
-
-def _render_lexical(result: InspectResult, *, budget: int) -> str:
+def _render_lexical(result: SymbolInspection, *, budget: int) -> str:
     """Render a lexical search result with any limited provider evidence."""
     search_result = result.search
     assert search_result is not None
@@ -1012,13 +943,11 @@ def _render_lexical(result: InspectResult, *, budget: int) -> str:
             if isinstance(rendered, RenderedText)
             else len(rendered)
         ),
-        truncated=(
-            rendered.truncated if isinstance(rendered, RenderedText) else False
-        ),
+        truncated=(rendered.truncated if isinstance(rendered, RenderedText) else False),
     )
 
 
-def _render_outline(result: InspectResult, *, budget: int) -> str:
+def _render_outline(result: OutlineInspection, *, budget: int) -> str:
     """Render a file or directory outline with its verification scope."""
     assert result.outline is not None
     header = f"inspect {result.path}"
@@ -1041,23 +970,14 @@ def _render_outline(result: InspectResult, *, budget: int) -> str:
     return rendered
 
 
-def _render_ambiguous(result: InspectResult, *, budget: int) -> str:
+def _render_ambiguous(result: SymbolInspection, *, budget: int) -> str:
     records: list[str] = []
-    if result.semantic is not None:
-        for item in result.semantic.candidates:
-            detail = f" [{item.kind}]" if item.kind else ""
-            records.append(
-                f"  typescript {item.path}:{item.line}:{item.column}{detail}"
-            )
-            preview = item.preview or item.display
-            if preview:
-                records.append(f"    {preview}")
-    if result.python is not None:
-        for item in result.python.candidates:
+    for evidence in result.evidence:
+        for item in evidence.candidates:
             scope = f" scope={item.scope}" if item.scope else ""
             records.append(
-                f"  python {item.file}:{item.line} [{item.kind}] "
-                f"{item.signature}{scope}"
+                f"  {evidence.provider} {item.path}:{item.line}:{item.column} "
+                f"[{item.kind}] {item.signature}{scope}"
             )
     coverage_status = (
         result.coverage.status if result.coverage is not None else "unknown"
@@ -1131,7 +1051,7 @@ def _reference_record(references: tuple[ReferenceEvidence, ...]) -> str:
             f"{reference.provider} references {reference.shown}/{reference.total}{suffix}"
         )
         for item in reference.results[:_EDIT_CANDIDATE_DISPLAY_LIMIT]:
-            text = item.preview or item.text or ""
+            text = reference_text(item)
             lines.append(f"  {item.path}:{item.line} {text}".rstrip())
     return "references:\n" + "\n".join(lines)
 
@@ -1163,12 +1083,7 @@ def _edit_records(bundle: EditBundle, *, budget: int) -> tuple[list[str], bool]:
         )
     if bundle.navigation is not None:
         provider = bundle.selected.provider if bundle.selected else "?"
-        if isinstance(bundle.navigation, PythonOverview):
-            navigation = render_python_overview(
-                bundle.navigation, budget=_share(budget, 3, 600)
-            )
-        else:
-            navigation = render_ts_nav(bundle.navigation, budget=_share(budget, 3, 600))
+        navigation = render_navigation(bundle.navigation, budget=_share(budget, 3, 600))
         unrendered = unrendered or bool(navigation.truncated)
         records.append(f"navigation ({provider}):\n{navigation}")
     elif bundle.references:
@@ -1208,7 +1123,7 @@ def _edit_omission(bundle: EditBundle) -> str:
     )
 
 
-def _render_edit(result: InspectResult, *, budget: int) -> str:
+def _render_edit(result: EditInspection, *, budget: int) -> str:
     bundle = result.edit
     assert bundle is not None
     header = (

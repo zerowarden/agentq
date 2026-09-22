@@ -40,7 +40,6 @@ class MigrationTests(unittest.TestCase):
                 {
                     "task_state",
                     "continuations",
-                    "continuation_artifacts",
                     "receipts",
                     "receipt_fragments",
                 }

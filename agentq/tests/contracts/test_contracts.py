@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 from agentq import continuations
 from agentq.core import (
-    AgentQError,
     Budget,
     ContractError,
+    Coverage,
     DiffSelection,
     OperationRequest,
     ProviderResult,
@@ -123,15 +123,9 @@ class BudgetTests(unittest.TestCase):
             Budget(output_chars=True)
         with self.assertRaises(ContractError):
             Budget(output_chars=-1)
-        with self.assertRaises(ContractError):
-            Budget(max_scan_records=False)
-        with self.assertRaises(ContractError):
-            Budget(execution_deadline_seconds=-0.5)
 
     def test_round_trip(self) -> None:
-        budget = Budget(
-            output_chars=12000, max_scan_records=5000, execution_deadline_seconds=30.0
-        )
+        budget = Budget(output_chars=12000)
         self.assertEqual(Budget.from_wire(budget.to_wire()), budget)
 
     def test_unknown_field_rejected(self) -> None:
@@ -186,13 +180,20 @@ class OperationRequestTests(unittest.TestCase):
             request,
         )
 
-    def test_unknown_schema_and_operation(self) -> None:
+    def test_unknown_schema_and_invalid_operation_tag(self) -> None:
         wire = self._request().to_wire(SearchOptions.to_wire)
         wire["schema"] = "agentq.request/v99"
         with self.assertRaises(ContractError):
             OperationRequest.from_wire(wire, SearchOptions.from_wire)
+        # Request operations are an open tag: support is an application-layer
+        # fact, so only the tag shape is validated here.
         wire = self._request().to_wire(SearchOptions.to_wire)
         wire["operation"] = "not-a-command"
+        self.assertEqual(
+            OperationRequest.from_wire(wire, SearchOptions.from_wire).operation,
+            "not-a-command",
+        )
+        wire["operation"] = ""
         with self.assertRaises(ContractError):
             OperationRequest.from_wire(wire, SearchOptions.from_wire)
 
@@ -302,30 +303,6 @@ class ContinuationWireTests(unittest.TestCase):
                 ),
             )
 
-    def test_artifact_page_position_and_kind_validation(self) -> None:
-        page = continuations.artifact_page_block(
-            artifact_id="abc123",
-            position=7,
-            request_id="r1",
-            operation="search",
-            repo_id_value="repo",
-            worktree_id="wt",
-            reason=("scan-cap",),
-        )
-        self.assertEqual(
-            continuations.ArtifactPage.from_wire(page).position,
-            7,
-        )
-        for position in (-1, True, "3"):
-            payload = dict(page)
-            payload["position"] = position
-            with self.assertRaises(ContractError):
-                continuations.ArtifactPage.from_wire(payload)
-        payload = dict(page)
-        payload["kind"] = "query-follow-up"
-        with self.assertRaises(ContractError):
-            continuations.ArtifactPage.from_wire(payload)
-
     def test_producer_blocks_strip_display_fields(self) -> None:
         from agentq.git import DiffFollowUp
 
@@ -350,17 +327,6 @@ class ContinuationWireTests(unittest.TestCase):
         self.assertEqual(argv[:3], ["agentq", "git-diff", "--staged"])
         self.assertIn("--patch", argv)
         self.assertNotIn("--hunks", argv)
-        with self.assertRaises(AgentQError):
-            continuations.dispatch_argv(
-                continuations.ArtifactPage(
-                    artifact_id="abc123",
-                    position=0,
-                    request_id="r1",
-                    operation="search",
-                    repo_id="repo",
-                    worktree_id="wt",
-                )
-            )
 
 
 class ProviderResultTests(unittest.TestCase):
@@ -820,10 +786,7 @@ class NavigationBoundaryTests(unittest.TestCase):
             def supports(self, request) -> bool:
                 return True
 
-            def locate(self, request):
-                return None
-
-            def overview(self, request):
+            def inspect_symbol(self, request, *, include_references):
                 return None
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
@@ -843,15 +806,12 @@ class NavigationBoundaryTests(unittest.TestCase):
             def supports(self, request) -> bool:
                 return True
 
-            def locate(self, request):
-                return navigation.TypeScriptNav(
-                    action="locate",
-                    resolution_mode="symbol",
-                    coverage=evidence.complete(),
+            def inspect_symbol(self, request, *, include_references):
+                return navigation.SymbolEvidence(
+                    provider=self.name,
+                    provenance=self.provenance,
+                    coverage=evidence.typed_coverage(evidence.COMPLETE),
                 )
-
-            def overview(self, request):
-                return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
         result = query_provider(EmptyProvider(), request, include_references=True)
@@ -869,15 +829,13 @@ class NavigationBoundaryTests(unittest.TestCase):
             def supports(self, request) -> bool:
                 return True
 
-            def locate(self, request):
-                return navigation.TypeScriptNav(
-                    action="locate",
-                    resolution_mode="symbol",
+            def inspect_symbol(self, request, *, include_references):
+                return navigation.SymbolEvidence(
+                    provider=self.name,
+                    provenance=self.provenance,
+                    coverage=Coverage(),
                     candidate_count=1,
                 )
-
-            def overview(self, request):
-                return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
         result = query_provider(BareProvider(), request, include_references=True)
@@ -905,16 +863,13 @@ class NavigationBoundaryTests(unittest.TestCase):
             def supports(self, request) -> bool:
                 return True
 
-            def locate(self, request):
-                return navigation.TypeScriptNav(
-                    action="locate",
-                    resolution_mode="symbol",
+            def inspect_symbol(self, request, *, include_references):
+                return navigation.SymbolEvidence(
+                    provider=self.name,
+                    provenance=self.provenance,
+                    coverage=evidence.typed_coverage(evidence.COMPLETE),
                     candidate_count=1,
-                    coverage=evidence.complete(),
                 )
-
-            def overview(self, request):
-                return self.locate(request)
 
         request = navigation.NavigationRequest(root=Path("."), symbol="X")
         result = query_provider(CustomProvider(), request, include_references=True)
@@ -934,11 +889,11 @@ class NavigationBoundaryTests(unittest.TestCase):
         applicable = ProviderResult(
             provider="python",
             status=ProviderStatus.OK,
-            payload=navigation.TypeScriptNav(
-                action="locate",
-                resolution_mode="symbol",
-                candidate_count=1,
+            payload=navigation.SymbolEvidence(
+                provider="python",
+                provenance=evidence.SYNTACTIC,
                 coverage=evidence.typed_coverage(evidence.COMPLETE),
+                candidate_count=1,
             ),
             provenance=evidence.SYNTACTIC,
             candidate_count=1,

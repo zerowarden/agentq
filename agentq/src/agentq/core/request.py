@@ -19,8 +19,7 @@ from .runtime import stable_id
 from .validation import (
     canonical_json,
     is_instance_of,
-    optional_int,
-    optional_number,
+    list_field,
     optional_str,
     reject_unknown_keys,
     require_bool,
@@ -34,36 +33,6 @@ from .validation import (
 )
 
 REQUEST_SCHEMA = "agentq.request/v1"
-
-KNOWN_OPERATIONS = frozenset(
-    {
-        "doctor",
-        "task",
-        "stats",
-        "files",
-        "search",
-        "read",
-        "repo-map",
-        "outline",
-        "git-status",
-        "git-diff",
-        "git-history",
-        "git-structural",
-        "dependencies",
-        "impact",
-        "codemod-scan",
-        "codemod-apply",
-        "run",
-        "test-plan",
-        "verify",
-        "verify-changed",
-        "verify-task",
-        "ts-nav",
-        "inspect",
-        "audit",
-        "benchmark",
-    }
-)
 
 
 class OutputFormat(str, Enum):
@@ -109,69 +78,26 @@ class RequestContext:
 
 @dataclass(frozen=True)
 class Budget:
-    """Collection limits and the output-character budget are different facts."""
+    """The output-character budget for one operation."""
 
     output_chars: int = 0
-    max_scan_records: int | None = None
-    retained_artifact_limit: int | None = None
-    execution_deadline_seconds: float | None = None
 
     def __post_init__(self) -> None:
         require_int(self.output_chars, "budget.output_chars", minimum=0)
-        optional_int(self.max_scan_records, "budget.max_scan_records", minimum=0)
-        optional_int(
-            self.retained_artifact_limit, "budget.retained_artifact_limit", minimum=0
-        )
-        if self.execution_deadline_seconds is not None:
-            if is_instance_of(
-                self.execution_deadline_seconds, bool
-            ) or not is_instance_of(self.execution_deadline_seconds, (int, float)):
-                raise ContractError(
-                    "budget.execution_deadline_seconds must be a number or null"
-                )
-            if self.execution_deadline_seconds < 0:
-                raise ContractError("budget.execution_deadline_seconds must be >= 0")
 
     def to_wire(self) -> dict[str, Any]:
-        return {
-            "output_chars": self.output_chars,
-            "max_scan_records": self.max_scan_records,
-            "retained_artifact_limit": self.retained_artifact_limit,
-            "execution_deadline_seconds": self.execution_deadline_seconds,
-        }
+        return {"output_chars": self.output_chars}
 
     @classmethod
     def from_wire(cls, value: Any, *, what: str = "budget") -> Budget:
         if value is None:
             return cls()
         payload = require_mapping(value, what)
-        reject_unknown_keys(
-            payload,
-            (
-                "output_chars",
-                "max_scan_records",
-                "retained_artifact_limit",
-                "execution_deadline_seconds",
-            ),
-            what,
-        )
+        reject_unknown_keys(payload, ("output_chars",), what)
         return cls(
             output_chars=require_int(
                 payload.get("output_chars", 0), f"{what}.output_chars", minimum=0
-            ),
-            max_scan_records=optional_int(
-                payload.get("max_scan_records"), f"{what}.max_scan_records", minimum=0
-            ),
-            retained_artifact_limit=optional_int(
-                payload.get("retained_artifact_limit"),
-                f"{what}.retained_artifact_limit",
-                minimum=0,
-            ),
-            execution_deadline_seconds=optional_number(
-                payload.get("execution_deadline_seconds"),
-                f"{what}.execution_deadline_seconds",
-                minimum=0,
-            ),
+            )
         )
 
 
@@ -246,8 +172,8 @@ class SearchOptions:
     def from_wire(cls, value: Any, *, what: str = "search options") -> SearchOptions:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
-        globs_raw: Any = payload.get("globs") or []
-        types_raw: Any = payload.get("types") or []
+        globs_raw: Any = list_field(payload, "globs")
+        types_raw: Any = list_field(payload, "types")
         if not is_instance_of(globs_raw, list) or not is_instance_of(types_raw, list):
             raise ContractError(f"{what}.globs and {what}.types must be arrays")
         globs = cast("list[Any]", globs_raw)
@@ -346,7 +272,7 @@ class DiffSelection:
     def from_wire(cls, value: Any, *, what: str = "diff selection") -> DiffSelection:
         payload = require_mapping(value, what)
         reject_unknown_keys(payload, tuple(cls.__dataclass_fields__), what)
-        paths_raw: Any = payload.get("paths") or []
+        paths_raw: Any = list_field(payload, "paths")
         if not is_instance_of(paths_raw, list):
             raise ContractError(f"{what}.paths must be an array")
         paths = cast("list[Any]", paths_raw)
@@ -378,6 +304,34 @@ class DiffSelection:
 OptionsT = TypeVar("OptionsT")
 
 
+def request_identity(
+    *,
+    root: Path | str,
+    operation: str,
+    options_wire: Any,
+    scopes: tuple[str, ...] = (),
+) -> str:
+    """The one request identity: operation, encoded options, scopes, and repo.
+
+    Every layer that needs a request identity calls this function, so a typed
+    ``OperationRequest`` and a CLI emission of the same semantic invocation
+    share the same identity shape.
+    """
+    resolved_root = str(Path(root).expanduser().resolve())
+    require_tag(operation, "request.operation")
+    return stable_id(
+        canonical_json(
+            {
+                "operation": operation,
+                "options": options_wire,
+                "scopes": list(scopes),
+                "repo": resolved_root,
+            }
+        ),
+        length=32,
+    )
+
+
 def new_operation_request(
     *,
     root: Path,
@@ -399,16 +353,11 @@ def new_operation_request(
     identity = stable_id(resolved_root, length=32)
     return OperationRequest(
         operation=operation,
-        request_id=stable_id(
-            canonical_json(
-                {
-                    "operation": operation,
-                    "options": encode_options(options),
-                    "scopes": list(scopes),
-                    "repo": resolved_root,
-                }
-            ),
-            length=32,
+        request_id=request_identity(
+            root=root,
+            operation=operation,
+            options_wire=encode_options(options),
+            scopes=scopes,
         ),
         repo_id=identity,
         worktree_id=identity,
@@ -455,8 +404,6 @@ class OperationRequest(Generic[OptionsT]):
     def __post_init__(self) -> None:
         require_schema(self.schema, REQUEST_SCHEMA, "request schema")
         require_tag(self.operation, "request.operation")
-        if self.operation not in KNOWN_OPERATIONS:
-            raise ContractError(f"unknown request operation: {self.operation!r}")
         require_str(self.request_id, "request.request_id")
         require_str(self.repo_id, "request.repo_id")
         require_str(self.worktree_id, "request.worktree_id")
@@ -512,7 +459,7 @@ class OperationRequest(Generic[OptionsT]):
             options=options_decoder(payload.get("options")),
             scopes=tuple(
                 require_str(item, f"{what}.scopes entry")
-                for item in cast("list[Any]", payload.get("scopes") or [])
+                for item in list_field(payload, "scopes")
             ),
             budget=Budget.from_wire(payload.get("budget"), what=f"{what}.budget"),
             output_format=require_str(

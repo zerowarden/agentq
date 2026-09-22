@@ -37,7 +37,7 @@ from agentq.git import (
 )
 from agentq.telemetry import (
     SCHEMA,
-    _append_jsonl_many_unlocked,
+    append_jsonl_many_unlocked,
     stats_data,
 )
 
@@ -232,7 +232,7 @@ def _stats_case(
 def _fixture_case(
     archive: Path, count: int, repository_id: str, repository_name: str
 ) -> tuple[int, dict[str, Any]]:
-    written = _append_jsonl_many_unlocked(
+    written = append_jsonl_many_unlocked(
         archive,
         fixture_events(count, repository_id, repository_name),
     )

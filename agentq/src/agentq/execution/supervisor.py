@@ -101,10 +101,10 @@ class CancellationToken:
     def in_use(self) -> bool:
         return self._supervising > 0
 
-    def _enter(self) -> None:
+    def enter(self) -> None:
         self._supervising += 1
 
-    def _exit(self) -> None:
+    def exit(self) -> None:
         self._supervising -= 1
 
 
@@ -179,12 +179,12 @@ def supervise(
     """Run one command under the shared lifecycle and return a typed outcome."""
     token = cancel or active_cancellation()
     if token is not None:
-        token._enter()
+        token.enter()
     try:
         return _Supervisor(spec, consumer, token).run()
     finally:
         if token is not None:
-            token._exit()
+            token.exit()
 
 
 class _Supervisor:

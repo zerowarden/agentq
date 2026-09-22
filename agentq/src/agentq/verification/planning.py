@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import tomllib
+from agentq.core import AgentQError, relpath
+from agentq.workspace import ProjectUnit, UnitId, owner_for_file
 
-from agentq.core import relpath
-from agentq.workspace import Package, owner_for_file
-
-from .models import CheckKind, CheckSpec, PackageRow, VerifyConfig, check_identity
+from .models import (
+    CheckKind,
+    CheckSpec,
+    PackageRow,
+    VerifyConfig,
+    check_identity,
+    check_phase,
+)
 
 
 def dependent_depth(mode: str, dependents: str) -> int | None:
@@ -29,18 +33,6 @@ def dependent_depth(mode: str, dependents: str) -> int | None:
     if mode == "standard":
         return 1
     return None
-
-
-def read_toml(path: Path) -> dict[str, Any]:
-    try:
-        value = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def dependency_name(spec: str) -> str:
-    return re.split(r"[<>=!;@\[ \]]", spec.strip(), maxsplit=1)[0].strip().lower()
 
 
 def package_row(
@@ -109,7 +101,6 @@ def make_check(
     cwd: str,
     command: Sequence[str],
     reason: str,
-    priority: int,
     scope: str,
     distance: int = 0,
 ) -> CheckSpec:
@@ -118,7 +109,6 @@ def make_check(
         check_id=check_identity(cwd, argv),
         kind=kind,
         command=argv,
-        priority=priority,
         package=package,
         package_key=package_key,
         cwd=cwd,
@@ -130,11 +120,11 @@ def make_check(
 
 def group_by_units(
     changed: Sequence[str],
-    units: Mapping[str, Package],
+    units: Mapping[UnitId, ProjectUnit],
     config: VerifyConfig,
-) -> tuple[dict[str, list[str]], list[str]]:
+) -> tuple[dict[UnitId, list[str]], list[str]]:
     """Assign changed files to their deepest owning unit, honoring overrides."""
-    grouped: dict[str, list[str]] = {}
+    grouped: dict[UnitId, list[str]] = {}
     unowned: list[str] = []
     for path in changed:
         owner = _ownership_override(path, owner_for_file(path, units), config, units)
@@ -147,17 +137,24 @@ def group_by_units(
 
 def _ownership_override(
     path: str,
-    default_key: str | None,
+    default_key: UnitId | None,
     config: VerifyConfig,
-    units: Mapping[str, Package],
-) -> str | None:
+    units: Mapping[UnitId, ProjectUnit],
+) -> UnitId | None:
     normalized = path.replace("\\", "/").strip("/")
     for prefix, package_name in config.ownership:
         clean = prefix.strip("/")
         if normalized == clean or normalized.startswith(clean + "/"):
-            for key, unit in units.items():
-                if unit.name == package_name:
-                    return key
+            matches = sorted(
+                unit_id for unit_id, unit in units.items() if unit.name == package_name
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise AgentQError(
+                    f".agentq.toml [ownership] name {package_name!r} matches "
+                    f"{len(matches)} units; use a unique package name"
+                )
             return default_key  # configured name unknown to this provider
     return default_key
 
@@ -165,14 +162,14 @@ def _ownership_override(
 def sorted_checks(
     checks: Sequence[CheckSpec], order_rank: Mapping[str, int]
 ) -> tuple[CheckSpec, ...]:
-    """Order checks by package rank, priority, and kind; drop exact duplicates."""
+    """Order checks by package rank, semantic phase, and kind; drop duplicates."""
     seen: set[tuple[str | None, tuple[str, ...]]] = set()
     ordered: list[CheckSpec] = []
     for check in sorted(
         checks,
         key=lambda item: (
             order_rank.get(item.package_key or "", 9999),
-            item.priority,
+            check_phase(item.kind),
             item.kind.value,
         ),
     ):

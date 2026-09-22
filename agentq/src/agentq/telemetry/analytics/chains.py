@@ -5,10 +5,12 @@ behavior.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, cast
+
+from agentq.core import dict_field
 
 from ..storage import mapping_field
-from . import _percent
+from . import percent
 
 
 def _context_key(event: dict[str, Any]) -> str:
@@ -20,7 +22,7 @@ def _context_key(event: dict[str, Any]) -> str:
     )
 
 
-def _build_context_index(
+def build_context_index(
     all_events: list[dict[str, Any]],
     selected_events: list[dict[str, Any]],
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -74,7 +76,7 @@ def _transition_counts(
             target = _transition_label(right, detailed=detailed)
             counts[(source, target)] += 1
             origins[source] += 1
-    rows = []
+    rows: list[dict[str, Any]] = []
     for (source, target), count in counts.most_common(16):
         rows.append(
             {
@@ -83,7 +85,7 @@ def _transition_counts(
                 "transition": f"{source} → {target}",
                 "calls": count,
                 "from_transitions": origins[source],
-                "percent": _percent(count, origins[source]),
+                "percent": percent(count, origins[source]),
             }
         )
     return rows
@@ -125,7 +127,7 @@ def read_chain_behavior(
 ) -> dict[str, Any]:
     reads = [event for event in events if event.get("command") == "read"]
     counts = [
-        int((event.get("metrics") or {}).get("read_range_count", 0)) for event in reads
+        int((dict_field(event, "metrics")).get("read_range_count", 0)) for event in reads
     ]
     consecutive = same_file = adjacent = 0
     for items in contexts.values():
@@ -135,14 +137,17 @@ def read_chain_behavior(
             if float(right.get("time", 0)) - float(left.get("time", 0)) > 30 * 60:
                 continue
             consecutive += 1
-            left_ranges = (left.get("metrics") or {}).get("read_ranges") or []
-            right_ranges = (right.get("metrics") or {}).get("read_ranges") or []
+            left_ranges: list[Any] = (dict_field(left, "metrics")).get("read_ranges") or []
+            right_ranges: list[Any] = (dict_field(right, "metrics")).get("read_ranges") or []
             pair_same = pair_adjacent = False
             for lrange in left_ranges:
                 for rrange in right_ranges:
                     if not isinstance(lrange, dict) or not isinstance(rrange, dict):
                         continue
-                    same, near = _ranges_overlap_or_adjacent(lrange, rrange)
+                    same, near = _ranges_overlap_or_adjacent(
+                        cast("dict[str, Any]", lrange),
+                        cast("dict[str, Any]", rrange),
+                    )
                     pair_same = pair_same or same
                     pair_adjacent = pair_adjacent or near
             same_file += int(pair_same)
@@ -152,7 +157,7 @@ def read_chain_behavior(
         "multi_range_calls": sum(value > 1 for value in counts),
         "untracked_calls": sum(value == 0 for value in counts),
         "windowed_calls": sum(
-            bool((event.get("metrics") or {}).get("read_windowed")) for event in reads
+            bool((dict_field(event, "metrics")).get("read_windowed")) for event in reads
         ),
         "consecutive_read_pairs": consecutive,
         "same_file_consecutive_pairs": same_file,

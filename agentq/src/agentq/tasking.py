@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentq.core import AgentQError, repo_id
+from agentq.core import AgentQError, as_dict, list_field, repo_id
 from agentq.execution import run_cmd
 
 from .persistence import delete_task, load_task, store_task
@@ -78,10 +78,8 @@ def task_changes(root: Path) -> dict[str, Any]:
         raise AgentQError(
             "no active task; use 'agentq task begin' before requesting task-scoped changes"
         )
-    raw_baseline = state.get("baseline")
-    baseline = raw_baseline if isinstance(raw_baseline, dict) else {}
-    raw_dirty = baseline.get("dirty")
-    baseline_dirty = raw_dirty if isinstance(raw_dirty, dict) else {}
+    baseline = as_dict(state.get("baseline"))
+    baseline_dirty = as_dict(baseline.get("dirty"))
     raw_head = baseline.get("head")
     baseline_head = raw_head if isinstance(raw_head, str) else None
 
@@ -240,13 +238,13 @@ def render_task(data: dict[str, Any], *, budget: int = 0) -> str:
 
 
 def _render_task_changes(data: dict[str, Any]) -> str:
-    files = data.get("files") or []
+    files: list[Any] = list_field(data, "files")
     lines = [f"task changes: {len(files)} files"]
     lines.extend(f"  {path}" for path in files)
-    excluded = data.get("excluded_preexisting_unchanged") or []
+    excluded: list[Any] = list_field(data, "excluded_preexisting_unchanged")
     if excluded:
         lines.append(f"excluded unchanged pre-task dirty files: {len(excluded)}")
-    ambiguous = data.get("ambiguous_preexisting") or []
+    ambiguous: list[Any] = list_field(data, "ambiguous_preexisting")
     if ambiguous:
         lines.append(
             f"changed from already-dirty baseline: {len(ambiguous)} (attribution conservative)"

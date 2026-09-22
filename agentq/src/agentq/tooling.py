@@ -1,54 +1,11 @@
-"""External tool discovery, versions, and language detection."""
+"""External tool discovery and version probing."""
 
 from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
 
-from agentq.delivery import compact_line, strip_ansi
-
-LANG_BY_SUFFIX = {
-    ".ts": "TypeScript",
-    ".tsx": "TSX",
-    ".mts": "TypeScript",
-    ".cts": "TypeScript",
-    ".js": "JavaScript",
-    ".jsx": "JSX",
-    ".mjs": "JavaScript",
-    ".cjs": "JavaScript",
-    ".py": "Python",
-    ".rs": "Rust",
-    ".go": "Go",
-    ".java": "Java",
-    ".kt": "Kotlin",
-    ".kts": "Kotlin",
-    ".c": "C",
-    ".h": "C/C++",
-    ".cc": "C++",
-    ".cpp": "C++",
-    ".hpp": "C++",
-    ".cs": "C#",
-    ".rb": "Ruby",
-    ".php": "PHP",
-    ".swift": "Swift",
-    ".sql": "SQL",
-    ".sh": "Shell",
-    ".bash": "Shell",
-    ".zsh": "Shell",
-    ".fish": "Fish",
-    ".json": "JSON",
-    ".yaml": "YAML",
-    ".yml": "YAML",
-    ".toml": "TOML",
-    ".md": "Markdown",
-    ".mdx": "MDX",
-    ".css": "CSS",
-    ".scss": "SCSS",
-    ".html": "HTML",
-    ".vue": "Vue",
-    ".svelte": "Svelte",
-}
+from agentq.text import compact_line, strip_ansi
 
 
 def find_executable(name: str) -> str | None:
@@ -94,7 +51,3 @@ def tool_version(executable: str) -> str:
         if text:
             return compact_line(text.splitlines()[0], 160)
     return "installed"
-
-
-def language_for(path: str | Path) -> str:
-    return LANG_BY_SUFFIX.get(Path(path).suffix.lower(), "Other")

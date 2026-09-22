@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from typing import Any
 
 
-def _fallback_session_contexts(
+def fallback_session_contexts(
     events: list[dict[str, Any]],
     gap_seconds: int = 30 * 60,
 ) -> dict[int, str]:
@@ -33,7 +33,7 @@ def _fallback_session_contexts(
     return contexts
 
 
-def _percent(numerator: int | float, denominator: int | float) -> float | None:
+def percent(numerator: int | float, denominator: int | float) -> float | None:
     return round(100.0 * numerator / denominator, 1) if denominator else None
 
 
@@ -50,7 +50,7 @@ def _percentile(values: Sequence[int | float], q: float) -> float | None:
     return ordered[low] * (high - pos) + ordered[high] * (pos - low)
 
 
-def _distribution(values: Sequence[int | float]) -> dict[str, float | int | None]:
+def distribution(values: Sequence[int | float]) -> dict[str, float | int | None]:
     return {
         "p50": round(_percentile(values, 0.50) or 0, 1) if values else None,
         "p90": round(_percentile(values, 0.90) or 0, 1) if values else None,

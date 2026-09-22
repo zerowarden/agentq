@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,12 +23,25 @@ from agentq.core import (
     session_id,
 )
 
-OptionsCodec = tuple[Callable[[Any], Any], Callable[[Any], Any]]
 
-OPTIONS_CODECS: dict[str, OptionsCodec] = {
-    "search": (SearchOptions.from_wire, SearchOptions.to_wire),
-    "git-diff": (DiffSelection.from_wire, DiffSelection.to_wire),
-}
+@dataclass(frozen=True)
+class RequestCodec:
+    """One resumable operation's complete request codec.
+
+    Registry presence means the operation is resumable; ``argv`` is the only
+    execution path for a stored continuation, and ``accepts_source_guard``
+    says whether replay must re-validate a mutable diff source.
+    """
+
+    decode_options: Callable[[Any], Any]
+    encode_options: Callable[[Any], Any]
+    argv: Callable[[OperationRequest[Any]], list[str]]
+    accepts_source_guard: bool = False
+
+
+def request_codec(operation: str) -> RequestCodec | None:
+    """The codec for one resumable operation, or ``None`` when it is not one."""
+    return REQUEST_CODECS.get(operation)
 
 
 def current_context(root: Path, *, consumer_id: str | None = None) -> RequestContext:
@@ -69,7 +83,6 @@ def request_from_args(
     options: Any,
     *,
     scopes: tuple[str, ...] = (),
-    execution_deadline_seconds: float | None = None,
     consumer_id: str | None = None,
 ) -> OperationRequest[Any]:
     """Normalize one CLI invocation into an accepted request."""
@@ -79,9 +92,6 @@ def request_from_args(
         options,
         scopes=scopes,
         output_chars=int(getattr(args, "budget", 0) or 0),
-        max_scan_records=None,
-        retained_artifact_limit=None,
-        execution_deadline_seconds=execution_deadline_seconds,
         output_format=str(getattr(args, "format", "text")),
         repeat=bool(getattr(args, "repeat", False)),
         consumer_id=consumer_id,
@@ -95,9 +105,6 @@ def request_for(
     *,
     scopes: tuple[str, ...] = (),
     output_chars: int = 0,
-    max_scan_records: int | None = None,
-    retained_artifact_limit: int | None = None,
-    execution_deadline_seconds: float | None = None,
     output_format: str = "text",
     repeat: bool = False,
     consumer_id: str | None = None,
@@ -108,7 +115,7 @@ def request_for(
     ``context`` lets a caller supply an identity it already resolved; the
     default reads the current host context, which may consult task state.
     """
-    codec = OPTIONS_CODECS.get(operation)
+    codec = request_codec(operation)
     if codec is None:
         raise ContractError(
             f"request normalization is not implemented for operation {operation!r}"
@@ -117,14 +124,9 @@ def request_for(
         root=root,
         operation=operation,
         options=options,
-        encode_options=codec[1],
+        encode_options=codec.encode_options,
         scopes=scopes,
-        budget=Budget(
-            output_chars=output_chars,
-            max_scan_records=max_scan_records,
-            retained_artifact_limit=retained_artifact_limit,
-            execution_deadline_seconds=execution_deadline_seconds,
-        ),
+        budget=Budget(output_chars=output_chars),
         output_format=output_format,
         repeat=repeat,
         context=(
@@ -136,13 +138,13 @@ def request_for(
 
 
 def request_to_json(request: OperationRequest[Any]) -> str:
-    codec = OPTIONS_CODECS.get(request.operation)
+    codec = request_codec(request.operation)
     if codec is None:
         raise ContractError(
             f"request JSON is not implemented for operation {request.operation!r}"
         )
     return json.dumps(
-        request.to_wire(codec[1]),
+        request.to_wire(codec.encode_options),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -156,25 +158,25 @@ def request_from_json(text: str) -> OperationRequest[Any]:
         raise ContractError(f"request JSON is not valid JSON: {exc}") from exc
     mapping = cast("dict[str, Any]", payload) if isinstance(payload, dict) else {}
     operation = mapping.get("operation")
-    codec = OPTIONS_CODECS.get(operation if isinstance(operation, str) else "")
+    codec = request_codec(operation if isinstance(operation, str) else "")
     if codec is None:
         raise ContractError(
             f"request JSON names an unsupported operation: {operation!r}"
         )
     return cast(
-        "OperationRequest[Any]", OperationRequest.from_wire(mapping, codec[0])
+        "OperationRequest[Any]",
+        OperationRequest.from_wire(mapping, codec.decode_options),
     )
 
 
 def request_argv(request: OperationRequest[Any]) -> list[str]:
     """Explicit argv codec used by continuations; no shell interpretation."""
-    if request.operation == "search":
-        return _search_argv(request)
-    if request.operation == "git-diff":
-        return _diff_argv(request)
-    raise ContractError(
-        f"request argv is not implemented for operation {request.operation!r}"
-    )
+    codec = request_codec(request.operation)
+    if codec is None:
+        raise ContractError(
+            f"request argv is not implemented for operation {request.operation!r}"
+        )
+    return codec.argv(request)
 
 
 def _presentation_args(request: OperationRequest[Any]) -> list[str]:
@@ -263,3 +265,18 @@ def _diff_argv(request: OperationRequest[Any]) -> list[str]:
         argv.extend(("--path", scope))
     argv.extend(_presentation_args(request))
     return argv
+
+
+REQUEST_CODECS: dict[str, RequestCodec] = {
+    "search": RequestCodec(
+        decode_options=SearchOptions.from_wire,
+        encode_options=SearchOptions.to_wire,
+        argv=_search_argv,
+    ),
+    "git-diff": RequestCodec(
+        decode_options=DiffSelection.from_wire,
+        encode_options=DiffSelection.to_wire,
+        argv=_diff_argv,
+        accepts_source_guard=True,
+    ),
+}

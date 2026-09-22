@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.continuations import QueryFollowUp
 from agentq.core import (
@@ -447,7 +447,7 @@ class DiffResult:
         continuation = self.continuation
         block = wire.get("continuation")
         if continuation is not None and isinstance(block, Mapping):
-            continuation = continuation.with_display(block)
+            continuation = continuation.with_display(cast("Mapping[str, Any]", block))
         hunks = _hunks_with_display(self.hunks, wire.get("hunks"))
         if continuation is self.continuation and hunks is self.hunks:
             return self
@@ -461,12 +461,14 @@ def _hunks_with_display(
         return hunks
     updated: list[DiffHunk] = []
     changed = False
-    for hunk, wire_hunk in zip(hunks, wire_hunks, strict=False):
+    for hunk, wire_hunk in zip(
+        hunks, cast("list[Mapping[str, Any]]", wire_hunks), strict=False
+    ):
         block = wire_hunk.get("follow_up") if isinstance(wire_hunk, Mapping) else None
         if hunk.follow_up is None or not isinstance(block, Mapping):
             updated.append(hunk)
             continue
-        follow_up = hunk.follow_up.with_display(block)
+        follow_up = hunk.follow_up.with_display(cast("Mapping[str, Any]", block))
         changed = changed or follow_up is not hunk.follow_up
         updated.append(replace(hunk, follow_up=follow_up))
     return tuple(updated) if changed else hunks

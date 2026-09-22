@@ -8,17 +8,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, cast, runtime_checkable
 
 from agentq.core import (
-    LEXICAL,
     SEMANTIC,
     SYNTACTIC,
     Budget,
     ContractError,
     Coverage,
     RequestContext,
-    typed_coverage,
+    as_dict,
+    dict_field,
+    list_field,
 )
 from agentq.discovery import (
     OutlineParseError,
@@ -39,10 +40,6 @@ RESOLUTION_OUTCOMES = frozenset(
 )
 
 
-def _optional_text(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
 def _text_key(payload: dict[str, Any], key: str) -> str | None:
     """Preserve an always-emitted provider string even when it is empty."""
     if key not in payload:
@@ -55,6 +52,28 @@ def _int_or(value: Any, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return value
+
+
+def _continuation_command(payload: dict[str, Any]) -> str | None:
+    block = as_dict(payload.get("continuation"))
+    command = block.get("command")
+    return command if isinstance(command, str) else None
+
+
+def _payload_of(evidence: tuple[SymbolEvidence, ...], provider: str) -> object | None:
+    for item in evidence:
+        if item.provider == provider:
+            return item.payload
+    return None
+
+
+def _replace_payload(
+    evidence: tuple[SymbolEvidence, ...], provider: str, payload: object
+) -> tuple[SymbolEvidence, ...]:
+    return tuple(
+        replace(item, payload=payload) if item.provider == provider else item
+        for item in evidence
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +126,22 @@ class NavigationRequest:
 
 @runtime_checkable
 class NavigationProvider(Protocol):
-    """Typed language-provider seam consumed by resolution and inspection."""
+    """Typed language-provider seam consumed by resolution and inspection.
+
+    Providers normalize their own output into :class:`SymbolEvidence`; the
+    orchestration layer never sees a provider-specific payload class. The
+    concrete payload stays attached to the evidence as an adapter-private
+    handle so wire projection and rendering remain provider-owned.
+    """
 
     name: str
     provenance: str
 
     def supports(self, request: NavigationRequest) -> bool: ...
-    def locate(self, request: NavigationRequest) -> NavigationPayload | None: ...
-    def overview(self, request: NavigationRequest) -> NavigationPayload | None: ...
+
+    def inspect_symbol(
+        self, request: NavigationRequest, *, include_references: bool
+    ) -> SymbolEvidence | None: ...
 
 
 @dataclass(frozen=True)
@@ -223,7 +250,7 @@ class TypeScriptSection:
             truncated=bool(payload.get("truncated")),
             results=tuple(
                 TypeScriptLocation.from_payload(item)
-                for item in payload.get("results") or []
+                for item in list_field(payload, "results")
             ),
         )
 
@@ -261,51 +288,23 @@ class TypeScriptContinuation:
 
 
 @dataclass(frozen=True)
-class TypeScriptNav:
-    """Typed TypeScript navigation payload (symbol-first or position mode)."""
+class TypeScriptCandidateSearch:
+    """Symbol-first declaration candidate list (locate or ambiguous overview)."""
 
     action: str
-    resolution_mode: str
-    provenance: str = SEMANTIC
-    coverage: Coverage = field(default_factory=Coverage)
-    symbol: str | None = None
+    symbol: str
     paths: tuple[str, ...] = ()
     candidates: tuple[TypeScriptLocation, ...] = ()
+    candidate_count: int | None = None
     total: int = 0
     shown: int = 0
     truncated: bool = False
-    ambiguous: bool | None = None
+    ambiguous: bool = False
     hint: str | None = None
-    candidate: int | None = None
-    candidate_count: int | None = None
-    config: str | None = None
-    target: str | None = None
-    line: int | None = None
-    column: int | None = None
-    root: str | None = None
-    limit: int | None = None
-    declaration_span: DeclarationSpan | None = None
-    definition: TypeScriptSection | None = None
-    references: TypeScriptSection | None = None
-    implementations: TypeScriptSection | None = None
-    results: tuple[TypeScriptLocation, ...] | None = None
+    limit: int = 0
+    provenance: str = SEMANTIC
+    coverage: Coverage = field(default_factory=Coverage)
     continuation: TypeScriptContinuation | None = None
-
-    @property
-    def sections(self) -> tuple[TypeScriptSection, ...]:
-        return tuple(
-            section
-            for section in (self.definition, self.references, self.implementations)
-            if section is not None
-        )
-
-    @property
-    def overview_selected(self) -> bool:
-        return self.definition is not None
-
-    @property
-    def section_truncated(self) -> bool:
-        return any(section.truncated for section in self.sections)
 
     def candidate_count_value(self) -> int:
         if self.candidate_count is not None:
@@ -313,167 +312,172 @@ class TypeScriptNav:
         return len(self.candidates)
 
     def to_wire(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"ok": True, "action": self.action}
-        if self.resolution_mode == "position":
-            data.update(
-                {
-                    "root": self.root,
-                    "config": self.config,
-                    "target": self.target,
-                    "line": self.line,
-                    "column": self.column,
-                    "total": self.total,
-                    "shown": self.shown,
-                    "truncated": self.truncated,
-                    "results": [item.to_wire() for item in self.results or ()],
-                }
-            )
-        else:
-            data.update(
-                {
-                    "resolution_mode": self.resolution_mode,
-                    "symbol": self.symbol,
-                    "paths": list(self.paths),
-                    "total": self.total,
-                    "shown": self.shown,
-                    "truncated": self.truncated,
-                    "candidates": [item.to_wire() for item in self.candidates],
-                }
-            )
-            if self.limit is not None:
-                data["limit"] = self.limit
-            if self.ambiguous is not None:
-                data["ambiguous"] = self.ambiguous
-            if self.hint is not None:
-                data["hint"] = self.hint
-            if self.candidate is not None:
-                data.update(
-                    {
-                        "candidate": self.candidate,
-                        "candidate_count": self.candidate_count_value(),
-                        "ambiguous": False,
-                        "config": self.config,
-                        "target": self.target,
-                        "line": self.line,
-                        "column": self.column,
-                    }
-                )
-                if self.overview_selected:
-                    data["declaration_span"] = (
-                        self.declaration_span.to_wire()
-                        if self.declaration_span is not None
-                        else None
-                    )
-                    data["definition"] = (
-                        self.definition.to_wire()
-                        if self.definition is not None
-                        else None
-                    )
-                    data["references"] = (
-                        self.references.to_wire()
-                        if self.references is not None
-                        else TypeScriptSection(0, 0, False, ()).to_wire()
-                    )
-                    data["implementations"] = (
-                        self.implementations.to_wire()
-                        if self.implementations is not None
-                        else TypeScriptSection(0, 0, False, ()).to_wire()
-                    )
-                else:
-                    data.update(
-                        {
-                            "total": self.total,
-                            "shown": self.shown,
-                            "truncated": self.truncated,
-                            "results": [item.to_wire() for item in self.results or ()],
-                        }
-                    )
-        data["provenance"] = self.provenance
-        data["coverage"] = self.coverage.to_wire()
+        data: dict[str, Any] = {
+            "ok": True,
+            "action": self.action,
+            "resolution_mode": "symbol",
+            "symbol": self.symbol,
+            "paths": list(self.paths),
+            "total": self.total,
+            "shown": self.shown,
+            "truncated": self.truncated,
+            "candidates": [item.to_wire() for item in self.candidates],
+            "ambiguous": self.ambiguous,
+            "provenance": self.provenance,
+            "coverage": self.coverage.to_wire(),
+        }
+        if self.limit:
+            data["limit"] = self.limit
+        if self.hint is not None:
+            data["hint"] = self.hint
         if self.continuation is not None:
             data["continuation"] = {"command": self.continuation.command}
         return data
 
-    def with_wire_continuation(self, payload: dict[str, Any]) -> TypeScriptNav:
-        block = payload.get("continuation")
-        if (
-            self.continuation is None
-            or not isinstance(block, dict)
-            or not isinstance(block.get("command"), str)
-        ):
+    def with_wire_continuation(
+        self, payload: dict[str, Any]
+    ) -> TypeScriptCandidateSearch:
+        command = _continuation_command(payload)
+        if self.continuation is None or command is None:
             return self
-        return replace(
-            self,
-            continuation=replace(self.continuation, command=block["command"]),
-        )
+        return replace(self, continuation=replace(self.continuation, command=command))
 
-    @classmethod
-    def from_payload(
-        cls,
-        payload: dict[str, Any],
-        *,
-        provenance: str = SEMANTIC,
-        coverage: Coverage | None = None,
-    ) -> TypeScriptNav:
-        sections = {
-            key: (
-                TypeScriptSection.from_payload(payload[key])
-                if isinstance(payload.get(key), dict)
+
+@dataclass(frozen=True)
+class TypeScriptSymbolOverview:
+    """One selected symbol with its definition, reference, and implementation pages."""
+
+    symbol: str
+    action: str = "overview"
+    paths: tuple[str, ...] = ()
+    candidates: tuple[TypeScriptLocation, ...] = ()
+    candidate: int = 1
+    candidate_count: int = 1
+    config: str | None = None
+    target: str | None = None
+    line: int | None = None
+    column: int | None = None
+    limit: int = 80
+    declaration_span: DeclarationSpan | None = None
+    definition: TypeScriptSection = field(
+        default_factory=lambda: TypeScriptSection(0, 0, False, ())
+    )
+    references: TypeScriptSection = field(
+        default_factory=lambda: TypeScriptSection(0, 0, False, ())
+    )
+    implementations: TypeScriptSection = field(
+        default_factory=lambda: TypeScriptSection(0, 0, False, ())
+    )
+    provenance: str = SEMANTIC
+    coverage: Coverage = field(default_factory=Coverage)
+    continuation: TypeScriptContinuation | None = None
+
+    @property
+    def sections(self) -> tuple[TypeScriptSection, ...]:
+        return (self.definition, self.references, self.implementations)
+
+    @property
+    def section_truncated(self) -> bool:
+        return any(section.truncated for section in self.sections)
+
+    def to_wire(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "ok": True,
+            "action": self.action,
+            "resolution_mode": "symbol",
+            "symbol": self.symbol,
+            "paths": list(self.paths),
+            "candidates": [item.to_wire() for item in self.candidates],
+            "candidate": self.candidate,
+            "candidate_count": self.candidate_count,
+            "ambiguous": False,
+            "config": self.config,
+            "target": self.target,
+            "line": self.line,
+            "column": self.column,
+            "declaration_span": (
+                self.declaration_span.to_wire()
+                if self.declaration_span is not None
                 else None
-            )
-            for key in ("definition", "references", "implementations")
+            ),
+            "definition": self.definition.to_wire(),
+            "references": self.references.to_wire(),
+            "implementations": self.implementations.to_wire(),
+            "provenance": self.provenance,
+            "coverage": self.coverage.to_wire(),
         }
-        span = payload.get("declaration_span")
-        return cls(
-            action=str(payload.get("action", "")),
-            resolution_mode=str(payload.get("resolution_mode", "position")),
-            provenance=provenance,
-            coverage=coverage or Coverage(),
-            symbol=_optional_text(payload.get("symbol")),
-            paths=tuple(str(item) for item in payload.get("paths") or []),
-            candidates=tuple(
-                TypeScriptLocation.from_payload(item)
-                for item in payload.get("candidates") or []
-            ),
-            total=_int_or(payload.get("total"), 0),
-            shown=_int_or(payload.get("shown"), 0),
-            truncated=bool(payload.get("truncated")),
-            ambiguous=(bool(payload["ambiguous"]) if "ambiguous" in payload else None),
-            hint=_optional_text(payload.get("hint")),
-            candidate=(
-                _int_or(payload.get("candidate"), 0) if "candidate" in payload else None
-            ),
-            candidate_count=(
-                _int_or(payload.get("candidate_count"), 0)
-                if "candidate_count" in payload
-                else None
-            ),
-            config=_optional_text(payload.get("config")),
-            target=_optional_text(payload.get("target")),
-            line=(_int_or(payload.get("line"), 0) if "line" in payload else None),
-            column=(_int_or(payload.get("column"), 0) if "column" in payload else None),
-            root=_optional_text(payload.get("root")),
-            limit=(_int_or(payload.get("limit"), 0) if "limit" in payload else None),
-            declaration_span=(
-                DeclarationSpan.from_payload(span) if isinstance(span, dict) else None
-            ),
-            definition=sections["definition"],
-            references=sections["references"],
-            implementations=sections["implementations"],
-            results=(
-                tuple(
-                    TypeScriptLocation.from_payload(item)
-                    for item in payload.get("results") or []
-                )
-                if "results" in payload
-                else None
-            ),
-        )
+        if self.limit:
+            data["limit"] = self.limit
+        if self.continuation is not None:
+            data["continuation"] = {"command": self.continuation.command}
+        return data
+
+    def with_wire_continuation(
+        self, payload: dict[str, Any]
+    ) -> TypeScriptSymbolOverview:
+        command = _continuation_command(payload)
+        if self.continuation is None or command is None:
+            return self
+        return replace(self, continuation=replace(self.continuation, command=command))
 
 
-# ---------------------------------------------------------------------------
-# Python provider payload
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TypeScriptLocations:
+    """A bounded location page: exact-position mode or symbol-first references."""
+
+    action: str
+    results: tuple[TypeScriptLocation, ...] = ()
+    total: int = 0
+    shown: int = 0
+    truncated: bool = False
+    resolution_mode: str = "position"
+    symbol: str | None = None
+    paths: tuple[str, ...] = ()
+    root: str | None = None
+    config: str | None = None
+    target: str | None = None
+    line: int | None = None
+    column: int | None = None
+    limit: int | None = None
+    provenance: str = SEMANTIC
+    coverage: Coverage = field(default_factory=Coverage)
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.resolution_mode == "position":
+            data: dict[str, Any] = {
+                "ok": True,
+                "action": self.action,
+                "resolution_mode": "position",
+                "root": self.root,
+                "config": self.config,
+                "target": self.target,
+                "line": self.line,
+                "column": self.column,
+                "total": self.total,
+                "shown": self.shown,
+                "truncated": self.truncated,
+                "results": [item.to_wire() for item in self.results],
+            }
+        else:
+            data = {
+                "ok": True,
+                "action": self.action,
+                "resolution_mode": "symbol",
+                "symbol": self.symbol,
+                "paths": list(self.paths),
+                "total": self.total,
+                "shown": self.shown,
+                "truncated": self.truncated,
+                "results": [item.to_wire() for item in self.results],
+            }
+            if self.limit:
+                data["limit"] = self.limit
+        data["provenance"] = self.provenance
+        data["coverage"] = self.coverage.to_wire()
+        return data
+
+    def with_wire_continuation(self, payload: dict[str, Any]) -> TypeScriptLocations:
+        return self
 
 
 @dataclass(frozen=True)
@@ -524,7 +528,7 @@ class PythonReferenceSection:
         return cls(
             results=tuple(
                 PythonReference.from_payload(item)
-                for item in payload.get("results") or []
+                for item in list_field(payload, "results")
             ),
             shown=_int_or(payload.get("shown"), 0),
             total=_int_or(payload.get("total"), 0),
@@ -592,16 +596,12 @@ class PythonOverview:
         return data
 
     def with_wire_continuation(self, payload: dict[str, Any]) -> PythonOverview:
-        block = payload.get("continuation")
-        if (
-            self.continuation is None
-            or not isinstance(block, dict)
-            or not isinstance(block.get("command"), str)
-        ):
+        command = as_dict(payload.get("continuation")).get("command")
+        if self.continuation is None or not isinstance(command, str):
             return self
         return replace(
             self,
-            continuation=replace(self.continuation, command=block["command"]),
+            continuation=replace(self.continuation, command=command),
         )
 
     @classmethod
@@ -624,7 +624,7 @@ class PythonOverview:
                 end_line=item.get("end_line"),
                 column=item.get("column"),
             )
-            for item in payload.get("candidates") or []
+            for item in list_field(payload, "candidates")
         )
         return cls(
             symbol=str(payload.get("symbol", "")),
@@ -632,12 +632,12 @@ class PythonOverview:
             candidate_count=_int_or(payload.get("candidate_count"), len(candidates)),
             ambiguous=bool(payload.get("ambiguous")),
             references=PythonReferenceSection.from_payload(
-                payload.get("references") or {}
+                dict_field(payload, "references")
             ),
             references_omitted=bool(payload.get("references_omitted")),
             references_requested=bool(payload.get("references_requested", True)),
             evidence=str(payload.get("evidence", "")),
-            paths=tuple(str(item) for item in payload.get("paths") or []),
+            paths=tuple(str(item) for item in list_field(payload, "paths")),
             limit=_int_or(payload.get("limit"), 0),
             provenance=provenance,
             coverage=coverage or Coverage(),
@@ -645,56 +645,38 @@ class PythonOverview:
                 OutlineParseError(
                     path=str(item.get("path", "")), error=str(item.get("error", ""))
                 )
-                for item in payload.get("parse_errors") or []
+                for item in list_field(payload, "parse_errors")
             ),
             parse_error_count=_int_or(payload.get("parse_error_count"), 0),
         )
 
 
+TypeScriptNav = (
+    TypeScriptCandidateSearch | TypeScriptSymbolOverview | TypeScriptLocations
+)
+TS_NAV_TYPES = (
+    TypeScriptCandidateSearch,
+    TypeScriptSymbolOverview,
+    TypeScriptLocations,
+)
 NavigationPayload = PythonOverview | TypeScriptNav | SearchResult
+NAVIGATION_PAYLOAD_TYPES = (
+    TypeScriptCandidateSearch,
+    TypeScriptSymbolOverview,
+    TypeScriptLocations,
+    PythonOverview,
+)
+
+# One canonical reference record: the provider payload record itself. Each
+# variant owns its wire projection, so no variant-dispatch table exists here.
+ReferenceRecord = SearchHit | PythonReference | TypeScriptLocation
 
 
-def payload_candidate_count(payload: NavigationPayload | None) -> int:
-    if payload is None:
-        return 0
-    if isinstance(payload, PythonOverview):
-        return payload.candidate_count
-    if isinstance(payload, TypeScriptNav):
-        return payload.candidate_count_value()
-    return len(payload.hits)
-
-
-def payload_errors(payload: NavigationPayload | None) -> tuple[str, ...]:
-    if payload is None:
-        return ()
-    if isinstance(payload, PythonOverview):
-        messages = [f"{item.path}: {item.error}" for item in payload.parse_errors]
-        omitted = payload.parse_error_count - len(payload.parse_errors)
-        if omitted > 0:
-            messages.append(
-                f"{omitted} additional parse errors omitted "
-                f"({payload.parse_error_count} total)"
-            )
-        return tuple(messages)
-    return ()
-
-
-def payload_coverage(payload: NavigationPayload | None) -> Coverage:
-    if payload is None:
-        return typed_coverage("unknown")
-    if isinstance(payload, (PythonOverview, TypeScriptNav)):
-        return payload.coverage
-    return payload.coverage
-
-
-def payload_provenance(payload: NavigationPayload | None) -> str:
-    if payload is None:
-        return LEXICAL
-    if isinstance(payload, PythonOverview):
-        return payload.provenance
-    if isinstance(payload, TypeScriptNav):
-        return payload.provenance
-    return payload.provenance
+def reference_text(item: ReferenceRecord) -> str:
+    """Human-readable text for any reference record."""
+    if isinstance(item, SearchHit):
+        return item.text
+    return item.preview
 
 
 # ---------------------------------------------------------------------------
@@ -782,115 +764,11 @@ class TargetIdentity:
 
 
 @dataclass(frozen=True)
-class ReferenceItem:
-    """One provider reference entry, typed across provider variants."""
-
-    variant: str
-    path: str
-    line: int
-    column: int
-    kind: str | None = None
-    preview: str | None = None
-    text: str | None = None
-    role: str | None = None
-    declared_symbol: str | None = None
-    external: bool | None = None
-    end_line: int | None = None
-    end_column: int | None = None
-    name: str | None = None
-    container: str | None = None
-    display: str | None = None
-    config: str | None = None
-    definition: bool | None = None
-    write: bool | None = None
-
-    def to_wire(self) -> dict[str, Any]:
-        if self.variant == "lexical":
-            return {
-                "path": self.path,
-                "line": self.line,
-                "column": self.column,
-                "text": self.text or "",
-                "role": self.role or "source",
-                "kind": self.kind or "reference",
-                "declared_symbol": self.declared_symbol,
-            }
-        if self.variant == "python":
-            return {
-                "path": self.path,
-                "line": self.line,
-                "column": self.column,
-                "kind": self.kind or "name",
-                "preview": self.preview or "",
-            }
-        return TypeScriptLocation(
-            path=self.path,
-            line=self.line,
-            column=self.column,
-            end_line=self.end_line or self.line,
-            end_column=self.end_column or self.column,
-            preview=self.preview or "",
-            external=bool(self.external),
-            name=self.name,
-            kind=self.kind,
-            container=self.container,
-            config=self.config,
-            display=self.display,
-            definition=self.definition,
-            write=self.write,
-        ).to_wire()
-
-    @classmethod
-    def from_python(cls, reference: PythonReference) -> ReferenceItem:
-        return cls(
-            variant="python",
-            path=reference.path,
-            line=reference.line,
-            column=reference.column,
-            kind=reference.kind,
-            preview=reference.preview,
-        )
-
-    @classmethod
-    def from_typescript(cls, location: TypeScriptLocation) -> ReferenceItem:
-        return cls(
-            variant="typescript",
-            path=location.path,
-            line=location.line,
-            column=location.column,
-            end_line=location.end_line,
-            end_column=location.end_column,
-            preview=location.preview,
-            external=location.external,
-            name=location.name,
-            kind=location.kind,
-            container=location.container,
-            config=location.config,
-            display=location.display,
-            definition=location.definition,
-            write=location.write,
-        )
-
-    @classmethod
-    def from_search_hit(cls, hit: SearchHit) -> ReferenceItem:
-        return cls(
-            variant="lexical",
-            path=hit.path,
-            line=hit.line,
-            column=hit.column,
-            kind=hit.kind,
-            text=hit.text,
-            role=hit.role,
-            declared_symbol=hit.declared_symbol,
-        )
-
-
-@dataclass(frozen=True)
 class ReferenceEvidence:
     """One provider's bounded reference section."""
 
     provider: str
-    results: tuple[ReferenceItem, ...]
+    results: tuple[ReferenceRecord, ...]
     shown: int
     total: int
     truncated: bool
@@ -903,6 +781,78 @@ class ReferenceEvidence:
             "truncated": self.truncated,
             "results": [item.to_wire() for item in self.results],
         }
+
+
+# ---------------------------------------------------------------------------
+# Canonical provider evidence
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SymbolCandidate:
+    """One canonical declaration candidate, independent of provider dialect."""
+
+    path: str
+    line: int
+    column: int
+    end_line: int
+    kind: str
+    signature: str
+    scope: str | None = None
+    external: bool = False
+
+
+@dataclass(frozen=True)
+class EvidencePage:
+    """One canonical bounded page of evidence locations."""
+
+    results: tuple[ReferenceRecord, ...] = ()
+    shown: int = 0
+    total: int = 0
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class SymbolEvidence:
+    """Canonical normalized provider output for symbol navigation.
+
+    ``payload`` is an adapter-private handle: orchestration reads only the
+    canonical fields, while the owning provider uses the handle for wire
+    projection and rendering.
+    """
+
+    provider: str
+    provenance: str
+    coverage: Coverage
+    candidates: tuple[SymbolCandidate, ...] = ()
+    candidate_count: int = 0
+    ambiguous: bool = False
+    selected: bool = False
+    declaration: EvidencePage | None = None
+    references: EvidencePage | None = None
+    implementations: EvidencePage | None = None
+    declaration_span: tuple[int, int] | None = None
+    diagnostics: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+    limit: int = 0
+    symbol: str | None = None
+    payload: object | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.provider:
+            raise ContractError("symbol evidence provider is required")
+        if not isinstance(self.coverage, Coverage):
+            raise ContractError("symbol evidence coverage must be a Coverage")
+        if not isinstance(self.candidates, tuple) or not all(
+            isinstance(item, SymbolCandidate) for item in self.candidates
+        ):
+            raise ContractError(
+                "symbol evidence candidates must be a tuple of SymbolCandidate"
+            )
+        if self.candidate_count < len(self.candidates):
+            raise ContractError(
+                "symbol evidence candidate count cannot be smaller than retained"
+            )
 
 
 @dataclass(frozen=True)
@@ -937,7 +887,7 @@ class EditBundle:
     selected: CandidateRef | None
     candidates: tuple[CandidateRef, ...]
     candidate_total: int
-    navigation: PythonOverview | TypeScriptNav | None
+    navigation: NavigationPayload | None
     navigation_omission: str | None
     declaration: ReadResult | None
     declaration_omission: str | None
@@ -1019,37 +969,17 @@ class InspectRequest:
 
 
 @dataclass(frozen=True)
-class InspectResult:
-    """Typed inspection outcome for every inspect kind."""
+class SourceInspection:
+    """Source-window inspection of one file."""
 
-    kind: str
     target: str
-    intent: str | None = None
     path: str | None = None
     role: str | None = None
     language: str | None = None
     source: ReadResult | None = None
-    outline: Any | None = None
-    semantic: TypeScriptNav | None = None
-    python: PythonOverview | None = None
-    search: SearchResult | None = None
-    edit: EditBundle | None = None
-    providers: tuple[ProviderMetadata, ...] = ()
-    provenance: str | None = None
-    coverage: Coverage | None = None
-    package: PackageManifest | None = None
-    verification: tuple[str, ...] = ()
+    kind: ClassVar[str] = "source-windows"
 
     def to_wire(self) -> dict[str, Any]:
-        if self.kind == "source-windows":
-            return self._source_wire()
-        if self.kind in {"file", "directory"}:
-            return self._outline_wire()
-        if self.kind == "edit":
-            return self._edit_wire()
-        return self._symbol_wire()
-
-    def _source_wire(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
             "target": self.target,
@@ -1059,7 +989,29 @@ class InspectResult:
             "source": self.source.to_wire() if self.source else None,
         }
 
-    def _outline_wire(self) -> dict[str, Any]:
+    def with_wire_continuations(self, wire: dict[str, Any]) -> SourceInspection:
+        if self.source is not None and isinstance(wire.get("source"), dict):
+            return replace(
+                self, source=self.source.with_wire_continuations(wire["source"])
+            )
+        return self
+
+
+@dataclass(frozen=True)
+class OutlineInspection:
+    """File or directory outline inspection."""
+
+    kind: str
+    target: str
+    path: str | None = None
+    role: str | None = None
+    language: str | None = None
+    outline: Any | None = None
+    intent: str | None = None
+    package: PackageManifest | None = None
+    verification: tuple[str, ...] = ()
+
+    def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {"kind": self.kind, "target": self.target}
         if self.kind == "file":
             data.update(
@@ -1076,7 +1028,34 @@ class InspectResult:
                 data["verification"] = list(self.verification)
         return data
 
-    def _symbol_wire(self) -> dict[str, Any]:
+    def with_wire_continuations(self, wire: dict[str, Any]) -> OutlineInspection:
+        return self
+
+
+@dataclass(frozen=True)
+class SymbolInspection:
+    """Symbol inspection: canonical evidence plus its provider metadata."""
+
+    kind: str
+    target: str
+    intent: str | None = None
+    evidence: tuple[SymbolEvidence, ...] = ()
+    search: SearchResult | None = None
+    providers: tuple[ProviderMetadata, ...] = ()
+    provenance: str | None = None
+    coverage: Coverage | None = None
+
+    @property
+    def semantic(self) -> TypeScriptNav | None:
+        payload = _payload_of(self.evidence, "typescript")
+        return payload if isinstance(payload, TS_NAV_TYPES) else None
+
+    @property
+    def python(self) -> PythonOverview | None:
+        payload = _payload_of(self.evidence, "python")
+        return payload if isinstance(payload, PythonOverview) else None
+
+    def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {"kind": self.kind, "target": self.target}
         if self.kind == "ambiguous":
             data["typescript"] = self.semantic.to_wire() if self.semantic else None
@@ -1093,7 +1072,37 @@ class InspectResult:
         data["coverage"] = self.coverage.to_wire() if self.coverage else None
         return data
 
-    def _edit_wire(self) -> dict[str, Any]:
+    def with_wire_continuations(self, wire: dict[str, Any]) -> SymbolInspection:
+        evidence = _evidence_with_wire_continuations(self.evidence, wire)
+        if evidence is self.evidence:
+            return self
+        return replace(self, evidence=evidence)
+
+
+@dataclass(frozen=True)
+class EditInspection:
+    """Edit-oriented inspection: declaration, references, tests, and scope."""
+
+    target: str
+    edit: EditBundle
+    intent: str | None = None
+    evidence: tuple[SymbolEvidence, ...] = ()
+    providers: tuple[ProviderMetadata, ...] = ()
+    provenance: str | None = None
+    coverage: Coverage | None = None
+    kind: ClassVar[str] = "edit"
+
+    @property
+    def semantic(self) -> TypeScriptNav | None:
+        payload = _payload_of(self.evidence, "typescript")
+        return payload if isinstance(payload, TS_NAV_TYPES) else None
+
+    @property
+    def python(self) -> PythonOverview | None:
+        payload = _payload_of(self.evidence, "python")
+        return payload if isinstance(payload, PythonOverview) else None
+
+    def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "kind": self.kind,
             "target": self.target,
@@ -1106,49 +1115,64 @@ class InspectResult:
         data["providers"] = [item.to_wire() for item in self.providers]
         data["provenance"] = self.provenance
         data["coverage"] = self.coverage.to_wire() if self.coverage else None
-        data["edit"] = self.edit.to_wire() if self.edit else None
+        data["edit"] = self.edit.to_wire()
         data["navigation"] = (
-            self.edit.navigation.to_wire()
-            if self.edit is not None and self.edit.navigation is not None
-            else None
+            self.edit.navigation.to_wire() if self.edit.navigation is not None else None
         )
         data["package"] = (
-            self.edit.package.to_wire()
-            if self.edit is not None and self.edit.package is not None
-            else None
+            self.edit.package.to_wire() if self.edit.package is not None else None
         )
-        data["verification"] = list(self.edit.verification) if self.edit else []
+        data["verification"] = list(self.edit.verification)
         return data
 
-    def with_wire_continuations(self, wire: dict[str, Any]) -> InspectResult:
+    def with_wire_continuations(self, wire: dict[str, Any]) -> EditInspection:
         updates: dict[str, Any] = {}
-        if self.source is not None and isinstance(wire.get("source"), dict):
-            updates["source"] = self.source.with_wire_continuations(wire["source"])
-        if self.semantic is not None and isinstance(wire.get("semantic"), dict):
-            updates["semantic"] = self.semantic.with_wire_continuation(wire["semantic"])
-        if self.python is not None and isinstance(wire.get("python"), dict):
-            updates["python"] = self.python.with_wire_continuation(wire["python"])
-        if self.edit is not None and isinstance(wire.get("edit"), dict):
-            edit_wire = wire["edit"]
-            edit_updates: dict[str, Any] = {}
-            if self.edit.declaration is not None and isinstance(
-                edit_wire.get("declaration"), dict
-            ):
-                edit_updates["declaration"] = (
-                    self.edit.declaration.with_wire_continuations(
-                        edit_wire["declaration"]
-                    )
-                )
-            if self.edit.navigation is not None and isinstance(
-                edit_wire.get("navigation"), dict
-            ):
-                nav = self.edit.navigation
-                if isinstance(nav, TypeScriptNav) or isinstance(nav, PythonOverview):
-                    edit_updates["navigation"] = nav.with_wire_continuation(
-                        edit_wire["navigation"]
-                    )
-            if edit_updates:
-                updates["edit"] = replace(self.edit, **edit_updates)
+        evidence = _evidence_with_wire_continuations(self.evidence, wire)
+        if evidence is not self.evidence:
+            updates["evidence"] = evidence
+        if isinstance(wire.get("edit"), dict):
+            edit = _edit_with_wire_continuations(self.edit, wire["edit"])
+            if edit is not None:
+                updates["edit"] = edit
         if not updates:
             return self
         return replace(self, **updates)
+
+
+InspectResult = SourceInspection | OutlineInspection | SymbolInspection | EditInspection
+
+
+def _evidence_with_wire_continuations(
+    evidence: tuple[SymbolEvidence, ...], wire: dict[str, Any]
+) -> tuple[SymbolEvidence, ...]:
+    updated = evidence
+    for provider, key in (("typescript", "semantic"), ("python", "python")):
+        block = wire.get(key)
+        if not isinstance(block, dict):
+            continue
+        payload = _payload_of(updated, provider)
+        if isinstance(payload, TS_NAV_TYPES) or isinstance(payload, PythonOverview):
+            updated = _replace_payload(
+                updated,
+                provider,
+                payload.with_wire_continuation(cast("dict[str, Any]", block)),
+            )
+    return updated
+
+
+def _edit_with_wire_continuations(
+    edit: EditBundle, edit_wire: dict[str, Any]
+) -> EditBundle | None:
+    edit_updates: dict[str, Any] = {}
+    if edit.declaration is not None and isinstance(edit_wire.get("declaration"), dict):
+        edit_updates["declaration"] = edit.declaration.with_wire_continuations(
+            edit_wire["declaration"]
+        )
+    nav = edit.navigation
+    if isinstance(nav, NAVIGATION_PAYLOAD_TYPES) and isinstance(
+        edit_wire.get("navigation"), dict
+    ):
+        edit_updates["navigation"] = nav.with_wire_continuation(edit_wire["navigation"])
+    if not edit_updates:
+        return None
+    return replace(edit, **edit_updates)

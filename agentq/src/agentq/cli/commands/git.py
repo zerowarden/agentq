@@ -28,12 +28,12 @@ from ..registry import Outcome
 from .task_scope import attach_task_scope
 
 
-def _run_git_status(args: argparse.Namespace, root: Path) -> Outcome:
+def run_git_status(args: argparse.Namespace, root: Path) -> Outcome:
     result = status(StatusRequest(root=root, limit=args.limit))
     return emit(args, result.to_wire(), render_status, result=result)
 
 
-def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
+def run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.tasking import task_changes
 
     diff_paths = list(args.paths)
@@ -77,14 +77,14 @@ def _run_git_diff(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, data, render_diff, root=root, result=result)
 
 
-def _run_git_history(args: argparse.Namespace, root: Path) -> Outcome:
+def run_git_history(args: argparse.Namespace, root: Path) -> Outcome:
     result = history(
         HistoryRequest(root=root, limit=args.limit, paths=tuple(args.paths))
     )
     return emit(args, result.to_wire(), render_history, result=result)
 
 
-def _run_git_structural(args: argparse.Namespace, root: Path) -> Outcome:
+def run_git_structural(args: argparse.Namespace, root: Path) -> Outcome:
     result = structural(
         StructuralRequest(
             root=root,
@@ -96,7 +96,7 @@ def _run_git_structural(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, result.to_wire(), render_structural, result=result)
 
 
-def _run_dependencies(args: argparse.Namespace, root: Path) -> Outcome:
+def run_dependencies(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.deps import dependencies_data, render_dependencies
 
     return emit(
@@ -106,7 +106,7 @@ def _run_dependencies(args: argparse.Namespace, root: Path) -> Outcome:
     )
 
 
-def _run_impact(args: argparse.Namespace, root: Path) -> Outcome:
+def run_impact(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.impact import impact_data, render_impact
 
     return emit(
@@ -114,7 +114,7 @@ def _run_impact(args: argparse.Namespace, root: Path) -> Outcome:
     )
 
 
-def _run_audit(args: argparse.Namespace, root: Path) -> Outcome:
+def run_audit(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.audit import audit_data, render_audit
     from agentq.tasking import task_changes
 

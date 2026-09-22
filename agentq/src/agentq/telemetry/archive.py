@@ -15,16 +15,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agentq.core import AgentQError, repo_id, secure_dir
+from agentq.core import AgentQError, as_dict, repo_id, secure_dir
 from agentq.tasking import current_task_state
 
 from .storage import (
-    _append_jsonl_many_unlocked,
-    _iter_jsonl,
-    _telemetry_lock,
+    append_jsonl_many_unlocked,
     archive_file,
     hot_dir,
     hot_file,
+    iter_jsonl,
+    telemetry_lock,
 )
 
 ARCHIVE_SERVICE = "agentq-archive.service"
@@ -190,7 +190,7 @@ def remove_persistence() -> dict[str, Any]:
 
 
 def _file_storage(path: Path, repo_id: str | None = None) -> dict[str, Any]:
-    events = list(_iter_jsonl(path)) if path.exists() else []
+    events = list(iter_jsonl(path)) if path.exists() else []
     current = (
         sum(event.get("repo_id") == repo_id for event in events) if repo_id else None
     )
@@ -265,7 +265,9 @@ def _rewrite_excluding_repo(path: Path, repo_id: str) -> int:
                 keep = True
                 try:
                     event = json.loads(line)
-                    if isinstance(event, dict) and event.get("repo_id") == repo_id:
+                    if isinstance(event, dict) and as_dict(event).get(
+                        "repo_id"
+                    ) == repo_id:
                         keep = False
                 except json.JSONDecodeError:
                     pass
@@ -316,7 +318,7 @@ def _reset_telemetry_unlocked(
     if not hot_only:
         path = archive_file()
         if all_repos:
-            persistent_removed = sum(1 for _ in _iter_jsonl(path))
+            persistent_removed = sum(1 for _ in iter_jsonl(path))
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
@@ -328,7 +330,7 @@ def _reset_telemetry_unlocked(
 
     for path in (hot_file().with_suffix(".jsonl.1"), hot_file()):
         if all_repos:
-            hot_removed += sum(1 for _ in _iter_jsonl(path))
+            hot_removed += sum(1 for _ in iter_jsonl(path))
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
@@ -351,7 +353,7 @@ def _reset_telemetry_unlocked(
 def reset_telemetry(
     root: Path, *, all_repos: bool = False, hot_only: bool = False, force: bool = False
 ) -> dict[str, Any]:
-    with _telemetry_lock():
+    with telemetry_lock():
         return _reset_telemetry_unlocked(
             root,
             all_repos=all_repos,
@@ -361,13 +363,13 @@ def reset_telemetry(
 
 
 def archive_hot_events() -> dict[str, Any]:
-    with _telemetry_lock():
-        hot = list(_iter_jsonl(hot_file())) + list(
-            _iter_jsonl(hot_file().with_suffix(".jsonl.1"))
+    with telemetry_lock():
+        hot = list(iter_jsonl(hot_file())) + list(
+            iter_jsonl(hot_file().with_suffix(".jsonl.1"))
         )
         destination = archive_file()
-        existing = {str(event["id"]) for event in _iter_jsonl(destination)}
-        pending = []
+        existing = {str(event["id"]) for event in iter_jsonl(destination)}
+        pending: list[dict[str, Any]] = []
         for event in hot:
             identity = str(event["id"])
             if identity in existing:
@@ -375,7 +377,7 @@ def archive_hot_events() -> dict[str, Any]:
             existing.add(identity)
             pending.append(event)
         try:
-            added = _append_jsonl_many_unlocked(destination, pending) if pending else 0
+            added = append_jsonl_many_unlocked(destination, pending) if pending else 0
         except OSError as exc:
             raise AgentQError(
                 f"unable to archive telemetry to {destination}; run 'agentq stats --archive' from a normal shell: {exc}"

@@ -106,21 +106,10 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             # than reinterpreted.
             "ALTER TABLE continuations ADD COLUMN payload TEXT",
             "UPDATE continuations SET expires_at = 0 WHERE payload IS NULL",
-            """
-        CREATE TABLE IF NOT EXISTS continuation_artifacts (
-            repo_id TEXT NOT NULL,
-            artifact_id TEXT NOT NULL,
-            payload BLOB NOT NULL,
-            created_at REAL NOT NULL,
-            expires_at REAL NOT NULL,
-            PRIMARY KEY (repo_id, artifact_id)
-        )
-        """,
-            "CREATE INDEX IF NOT EXISTS continuation_artifacts_expiry "
-            "ON continuation_artifacts (expires_at)",
         ),
     ),
 )
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     with conn:

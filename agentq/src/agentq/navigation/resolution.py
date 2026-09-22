@@ -1,7 +1,10 @@
 """Provider resolution: query applicable language providers, then fall back.
 
-A provider returning no payload is never interpreted as complete: it becomes an
-explicit ``unavailable`` result whose coverage cannot claim completeness.
+A provider returning no evidence is never interpreted as complete: it becomes
+an explicit ``unavailable`` result whose coverage cannot claim completeness.
+Orchestration consumes canonical
+:class:`~agentq.navigation.models.SymbolEvidence` only; concrete provider
+payloads never cross this seam.
 """
 
 from __future__ import annotations
@@ -29,18 +32,13 @@ from agentq.core import (
 )
 
 from .models import (
-    NavigationPayload,
     NavigationProvider,
     NavigationRequest,
     ProviderMetadata,
-    TypeScriptNav,
-    payload_candidate_count,
-    payload_coverage,
-    payload_errors,
-    payload_provenance,
+    SymbolEvidence,
 )
 from .providers.lexical import LexicalFallbackProvider
-from .providers.python import PythonOverview, PythonProvider
+from .providers.python import PythonProvider
 from .providers.typescript import TypeScriptProvider
 
 LANGUAGE_PROVIDERS: tuple[NavigationProvider, ...] = (
@@ -54,53 +52,47 @@ def query_provider(
     provider: NavigationProvider,
     request: NavigationRequest,
     include_references: bool,
-) -> ProviderResult[NavigationPayload]:
+) -> ProviderResult[SymbolEvidence]:
     try:
-        method = provider.overview if include_references else provider.locate
-        payload = method(request)
+        evidence = provider.inspect_symbol(
+            request, include_references=include_references
+        )
     except (AgentQError, ContractError) as exc:
         # A missing runtime never reaches here: providers return None for it,
         # which maps to unavailable below. Everything else is a failure.
         return failed_result(provider.name, str(exc), provenance=provider.provenance)
-    if payload is None:
+    if evidence is None:
         return unavailable_result(
             provider.name,
-            "provider returned no payload for an applicable request",
+            "provider returned no evidence for an applicable request",
             provenance=provider.provenance,
         )
-    if not isinstance(payload, (PythonOverview, TypeScriptNav)) and not hasattr(
-        payload, "hits"
-    ):
-        return failed_result(
-            provider.name,
-            "provider returned an unsupported payload",
-            provenance=provider.provenance,
-        )
-    candidate_count = payload_candidate_count(payload)
     diagnostics = tuple(
         Diagnostic(
             message=message,
             code=(PARSE_ERROR if "parse" in message.lower() else PROVIDER_ERROR),
         )
-        for message in payload_errors(payload)
+        for message in evidence.diagnostics
     )
     return ProviderResult(
         provider=provider.name,
-        status=ProviderStatus.EMPTY if candidate_count == 0 else ProviderStatus.OK,
-        payload=payload,
+        status=(
+            ProviderStatus.EMPTY if evidence.candidate_count == 0 else ProviderStatus.OK
+        ),
+        payload=evidence,
         provenance=provider.provenance,
-        candidate_count=candidate_count,
-        coverage=payload_coverage(payload),
+        candidate_count=evidence.candidate_count,
+        coverage=evidence.coverage,
         diagnostics=diagnostics,
     )
 
 
 @dataclass
 class SymbolResolution:
-    outcomes: tuple[ProviderResult[NavigationPayload], ...]
-    fallback: ProviderResult[NavigationPayload] | None = None
+    outcomes: tuple[ProviderResult[SymbolEvidence], ...]
+    fallback: ProviderResult[SymbolEvidence] | None = None
 
-    def _all(self) -> tuple[ProviderResult[NavigationPayload], ...]:
+    def _all(self) -> tuple[ProviderResult[SymbolEvidence], ...]:
         return (
             *self.outcomes,
             *((self.fallback,) if self.fallback is not None else ()),
@@ -111,8 +103,8 @@ class SymbolResolution:
             ProviderMetadata(
                 provider=result.provider,
                 available=result.status in {ProviderStatus.OK, ProviderStatus.EMPTY},
-                candidate_count=payload_candidate_count(result.payload),
-                provenance=payload_provenance(result.payload),
+                candidate_count=result.candidate_count or 0,
+                provenance=result.provenance or LEXICAL,
                 coverage=result.coverage,
                 errors=tuple(item.message for item in result.diagnostics),
             )
@@ -131,16 +123,15 @@ class SymbolResolution:
 
     def provenance(self) -> str:
         with_candidates = [
-            payload_provenance(result.payload)
-            for result in self._all()
-            if payload_candidate_count(result.payload)
+            result.provenance for result in self._all() if result.candidate_count
         ]
         return best_provenance(*with_candidates) or LEXICAL
 
-    def payload(self, name: str) -> NavigationPayload | None:
+    def evidence(self, name: str) -> SymbolEvidence | None:
         for outcome in self.outcomes:
             if outcome.provider == name:
-                return outcome.payload
+                payload = outcome.payload
+                return payload if isinstance(payload, SymbolEvidence) else None
         return None
 
 
@@ -175,7 +166,7 @@ def resolve_symbol(
         if provider.supports(request)
     )
     resolution = SymbolResolution(outcomes=outcomes)
-    if not any(payload_candidate_count(outcome.payload) for outcome in outcomes):
+    if not any(outcome.candidate_count for outcome in outcomes):
         resolution.fallback = query_provider(
             LEXICAL_FALLBACK, request, include_references
         )

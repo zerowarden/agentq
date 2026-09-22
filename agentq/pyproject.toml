@@ -73,7 +73,10 @@ strict = [
     "src/agentq/persistence",
 ]
 pythonVersion = "3.10"
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
+# Runtime contract validation is deliberate: dataclass annotations alone never
+# validate wire/argv/persisted input (see agentq.core.validation).
+reportUnnecessaryIsInstance = "none"
 reportMissingTypeArgument = "error"
 reportMissingParameterType = "error"
 reportUnknownParameterType = "error"

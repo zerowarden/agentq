@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..storage import mapping_field
-from . import _percent
+from . import percent
 
 
 def _count_retry_event(result: dict[str, int], event: dict[str, Any]) -> None:
@@ -29,7 +29,7 @@ def _count_retry_followup(
 ) -> None:
     if previous.get("render_budget_truncated", previous.get("truncated")):
         result["truncation_followups"] += 1
-        result["expanded_budget_retries"] += int(_is_expanded_retry(previous, event))
+        result["expanded_budget_retries"] += int(is_expanded_retry(previous, event))
     if previous.get("tool_status") != "error":
         return
     result["error_followups"] += 1
@@ -44,7 +44,7 @@ def _count_retry_followup(
             result["hinted_recovered_retries"] += 1
 
 
-def _retry_behavior(events: Iterable[dict[str, Any]]) -> dict[str, int]:
+def retry_behavior(events: Iterable[dict[str, Any]]) -> dict[str, int]:
     ordered = sorted(events, key=lambda event: float(event.get("time", 0)))
     previous_by_task: dict[str, dict[str, Any]] = {}
     result = {
@@ -96,7 +96,7 @@ def failure_breakdown(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "command": command,
                 "errors": len(failures),
                 "calls": len(items),
-                "rate": _percent(len(failures), len(items)),
+                "rate": percent(len(failures), len(items)),
                 "top_cause": categories.most_common(1)[0][0],
                 "top_signature": local_signatures.most_common(1)[0][0],
             }
@@ -117,7 +117,7 @@ def failure_breakdown(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _is_expanded_retry(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+def is_expanded_retry(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     if not previous.get("truncated") or previous.get(
         "operation_fingerprint"
     ) != current.get("operation_fingerprint"):

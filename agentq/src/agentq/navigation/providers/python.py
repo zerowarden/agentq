@@ -3,197 +3,44 @@
 from __future__ import annotations
 
 import ast
-import re
 import shlex
 from dataclasses import replace
 from pathlib import Path
 
 from agentq.core import (
-    PARSE_ERROR,
-    PARTIAL,
     REFERENCE_LIMIT,
     RESULT_LIMIT,
-    SAMPLED,
     SYNTACTIC,
-    Coverage,
     RenderedText,
     budget_text_records,
-    is_sensitive_path,
-    normalize_scopes_for_wire,
     rendered_text,
-    scope_match,
-    typed_coverage,
     visible_coverage,
 )
-from agentq.delivery import compact_line
-from agentq.discovery import (
+from agentq.discovery import list_repo_files
+from agentq.syntax import (
+    MAX_PARSE_ERRORS,
     OutlineParseError,
-    OutlineRequest,
-    OutlineResult,
     OutlineSymbol,
-    list_repo_files,
+    collect_python_files,
+    matching_definitions,
+    parse_python,
+    python_coverage,
+    reference_kind,
 )
+from agentq.text import compact_line
 
 from ..models import (
-    NavigationPayload,
+    EvidencePage,
     NavigationRequest,
     PythonContinuation,
     PythonOverview,
     PythonReference,
     PythonReferenceSection,
+    SymbolCandidate,
+    SymbolEvidence,
 )
 
 _MAX_PARSE_ERRORS = 5
-
-
-def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    prefix = "async " if isinstance(node, ast.AsyncFunctionDef) else ""
-    returns = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
-    return compact_line(f"{prefix}{node.name}({ast.unparse(node.args)}){returns}", 240)
-
-
-def _class_signature(node: ast.ClassDef) -> str:
-    bases = [ast.unparse(base) for base in node.bases]
-    bases.extend(
-        f"{keyword.arg}={ast.unparse(keyword.value)}" for keyword in node.keywords
-    )
-    suffix = f"({', '.join(bases)})" if bases else ""
-    return compact_line(f"{node.name}{suffix}", 240)
-
-
-class _DefinitionVisitor(ast.NodeVisitor):
-    def __init__(self, relative: str) -> None:
-        self.relative = relative
-        self.scope: list[str] = []
-        self.records: list[OutlineSymbol] = []
-
-    def _visit_definition(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
-    ) -> None:
-        is_class = isinstance(node, ast.ClassDef)
-        self.records.append(
-            OutlineSymbol(
-                name=node.name,
-                kind="class" if is_class else "function",
-                file=self.relative,
-                line=node.lineno,
-                end_line=getattr(node, "end_lineno", node.lineno),
-                column=node.col_offset + 1,
-                signature=(
-                    _class_signature(node) if is_class else _function_signature(node)
-                ),
-                scope=".".join(self.scope) or None,
-                language="Python",
-            )
-        )
-        self.scope.append(node.name)
-        self.generic_visit(node)
-        self.scope.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._visit_definition(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._visit_definition(node)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._visit_definition(node)
-
-
-def _collect_python_files(root: Path, paths: list[str]) -> tuple[list[str], list[str]]:
-    """Confined `.py` files plus the normalized wire scopes, resolved once.
-
-    Single scope authority: confined, existence-checked, repo-relative wire
-    scopes from core.paths. No second Path.resolve/prefix checker here.
-    """
-    scopes = normalize_scopes_for_wire(root, paths or [])
-    files = [
-        relative
-        for relative in list_repo_files(root)
-        if relative.endswith(".py")
-        and scope_match(relative, scopes)
-        and not is_sensitive_path(relative)
-    ]
-    return files, scopes
-
-
-def _python_coverage(parse_error_count: int, *reasons: str) -> Coverage:
-    """One coverage decision: parse failures dominate, else sample, else complete."""
-    if parse_error_count:
-        return typed_coverage(PARTIAL, PARSE_ERROR, *reasons)
-    if reasons:
-        return typed_coverage(SAMPLED, *reasons)
-    return typed_coverage("complete")
-
-
-def _parse_python(path: Path) -> tuple[ast.AST | None, list[str], str | None]:
-    """Parse one file; on failure return (None, [], diagnostic)."""
-    try:
-        source = path.read_text(encoding="utf-8", errors="replace")
-        return ast.parse(source), source.splitlines(), None
-    except (OSError, SyntaxError, ValueError) as exc:
-        return None, [], compact_line(f"{type(exc).__name__}: {exc}", 160)
-
-
-def _definitions_from_tree(relative: str, tree: ast.AST) -> tuple[OutlineSymbol, ...]:
-    visitor = _DefinitionVisitor(relative)
-    visitor.visit(tree)
-    return tuple(visitor.records)
-
-
-def python_outline(request: OutlineRequest) -> OutlineResult:
-    pattern = re.compile(request.match, re.I) if request.match else None
-    files, wire_scopes = _collect_python_files(request.root, list(request.paths))
-    definitions: list[OutlineSymbol] = []
-    parse_errors: list[OutlineParseError] = []
-    parse_error_count = 0
-    for relative in files:
-        tree, _, error = _parse_python(request.root / relative)
-        if tree is None:
-            parse_error_count += 1
-            if len(parse_errors) < _MAX_PARSE_ERRORS:
-                parse_errors.append(
-                    OutlineParseError(path=relative, error=error or "unparseable")
-                )
-            continue
-        definitions.extend(_definitions_from_tree(relative, tree))
-    if pattern is not None:
-        definitions = [item for item in definitions if pattern.search(item.name)]
-    if request.public:
-        definitions = [item for item in definitions if not item.name.startswith("_")]
-    truncated = len(definitions) > request.limit
-    reasons = (RESULT_LIMIT,) if truncated else ()
-    return OutlineResult(
-        engine="stdlib-python-ast",
-        shown=min(request.limit, len(definitions)),
-        truncated=truncated,
-        coverage=_python_coverage(parse_error_count, *reasons),
-        provenance=SYNTACTIC,
-        symbols=tuple(definitions[: request.limit]),
-        total=len(definitions),
-        scopes=tuple(wire_scopes),
-        limit=request.limit,
-        parse_errors=tuple(parse_errors),
-        parse_error_count=parse_error_count,
-    )
-
-
-def _matching_definitions(
-    relative: str, tree: ast.AST, symbol: str
-) -> tuple[OutlineSymbol, ...]:
-    """Definitions in one parsed file whose name equals the requested symbol."""
-    return tuple(
-        item for item in _definitions_from_tree(relative, tree) if item.name == symbol
-    )
-
-
-def _reference_kind(node: ast.AST, symbol: str) -> str | None:
-    """Classify one AST node as a name or attribute reference to the symbol."""
-    if isinstance(node, ast.Name) and node.id == symbol:
-        return "name"
-    if isinstance(node, ast.Attribute) and node.attr == symbol:
-        return "attribute"
-    return None
 
 
 def _collect_python_references(
@@ -207,7 +54,7 @@ def _collect_python_references(
     """Append retained lexical references; return the total number matched."""
     total = 0
     for node in ast.walk(tree):
-        kind = _reference_kind(node, symbol)
+        kind = reference_kind(node, symbol)
         if not kind or not hasattr(node, "lineno"):
             continue
         total += 1
@@ -252,17 +99,17 @@ def python_symbol_overview(
     parse_errors: list[OutlineParseError] = []
     parse_error_count = 0
     total = 0
-    files, wire_scopes = _collect_python_files(root, paths)
+    files, wire_scopes = collect_python_files(root, paths, list_repo_files(root))
     for relative in files:
-        tree, lines, error = _parse_python(root / relative)
+        tree, lines, error = parse_python(root / relative)
         if tree is None:
             parse_error_count += 1
-            if len(parse_errors) < _MAX_PARSE_ERRORS:
+            if len(parse_errors) < MAX_PARSE_ERRORS:
                 parse_errors.append(
                     OutlineParseError(path=relative, error=error or "unparseable")
                 )
             continue
-        candidates.extend(_matching_definitions(relative, tree, symbol))
+        candidates.extend(matching_definitions(relative, tree, symbol))
         if not include_references:
             continue
         total += _collect_python_references(
@@ -297,7 +144,7 @@ def python_symbol_overview(
         ),
         paths=tuple(wire_scopes),
         limit=limit,
-        coverage=_python_coverage(parse_error_count, *reasons),
+        coverage=python_coverage(parse_error_count, *reasons),
         parse_errors=tuple(parse_errors),
         parse_error_count=parse_error_count,
     )
@@ -396,6 +243,50 @@ def render_python_overview(
     return rendered
 
 
+def python_evidence(overview: PythonOverview) -> SymbolEvidence:
+    """Normalize a Python payload into canonical symbol evidence."""
+    references = EvidencePage(
+        results=overview.references.results,
+        shown=overview.references.shown,
+        total=overview.references.total,
+        truncated=overview.references.truncated,
+    )
+    return SymbolEvidence(
+        provider=PythonProvider.name,
+        provenance=overview.provenance,
+        coverage=overview.coverage,
+        candidates=tuple(
+            SymbolCandidate(
+                path=item.file,
+                line=item.line or 1,
+                column=item.column or 1,
+                end_line=item.end_line or item.line or 1,
+                kind=item.kind or "declaration",
+                signature=item.signature,
+                scope=item.scope,
+            )
+            for item in overview.candidates
+        ),
+        candidate_count=overview.candidate_count,
+        ambiguous=overview.ambiguous,
+        selected=bool(overview.candidates),
+        references=references,
+        diagnostics=tuple(
+            f"{item.path}: {item.error}" for item in overview.parse_errors
+        ),
+        paths=overview.paths,
+        limit=overview.limit,
+        symbol=overview.symbol,
+        payload=overview,
+    )
+
+
+def python_payload(evidence: SymbolEvidence) -> PythonOverview | None:
+    """The adapter-private Python payload behind normalized evidence."""
+    payload = evidence.payload
+    return payload if isinstance(payload, PythonOverview) else None
+
+
 class PythonProvider:
     name = "python"
     provenance = SYNTACTIC
@@ -403,20 +294,15 @@ class PythonProvider:
     def supports(self, request: NavigationRequest) -> bool:
         return request.lang in {None, "python"}
 
-    def locate(self, request: NavigationRequest) -> NavigationPayload | None:
-        return python_symbol_overview(
-            request.root,
-            request.symbol,
-            list(request.paths),
-            request.limit,
-            include_references=False,
-        )
-
-    def overview(self, request: NavigationRequest) -> NavigationPayload | None:
-        return python_symbol_overview(
-            request.root,
-            request.symbol,
-            list(request.paths),
-            request.limit,
-            include_references=True,
+    def inspect_symbol(
+        self, request: NavigationRequest, *, include_references: bool
+    ) -> SymbolEvidence | None:
+        return python_evidence(
+            python_symbol_overview(
+                request.root,
+                request.symbol,
+                list(request.paths),
+                request.limit,
+                include_references=include_references,
+            )
         )

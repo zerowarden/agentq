@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..commands.navigation import _run_continue, _run_inspect, _run_ts_nav
+from ..commands.navigation import run_continue, run_inspect, run_ts_nav
 from ..registry import CommandSpec, Group
 from .options import (
     line_range,
@@ -118,7 +118,7 @@ COMMANDS = (
             "Resolve a known symbol directly, or query an exact file position. "
             "Symbol-first mode avoids a separate lexical search when declarations are unambiguous."
         ),
-        execute=_run_ts_nav,
+        execute=run_ts_nav,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_ts_nav_options,
     ),
@@ -129,14 +129,14 @@ COMMANDS = (
             "Replay a stored continuation command after validating that the cursor belongs to "
             "this repository and session and that the workspace has not changed since creation."
         ),
-        execute=_run_continue,
+        execute=run_continue,
         groups=(Group.COMMON,),
         configure=_continue_options,
     ),
     CommandSpec(
         "inspect",
         help="single-entry repository inspection for symbols, literals, files, or source anchors",
-        execute=_run_inspect,
+        execute=run_inspect,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_inspect_options,
     ),

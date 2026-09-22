@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..commands.mutation import _run_codemod_apply, _run_codemod_scan
+from ..commands.mutation import run_codemod_apply, run_codemod_scan
 from ..registry import CommandSpec, Group
 from .options import (
     nonnegative_int,
@@ -51,14 +51,14 @@ COMMANDS = (
     CommandSpec(
         "codemod-scan",
         help="count and sample a proposed codemod without mutation",
-        execute=_run_codemod_scan,
+        execute=run_codemod_scan,
         groups=(Group.COMMON, Group.SCOPE, Group.SENSITIVE),
         configure=_codemod_scan_options,
     ),
     CommandSpec(
         "codemod-apply",
         help="guarded codemod; dry-run unless --apply is explicit",
-        execute=_run_codemod_apply,
+        execute=run_codemod_apply,
         groups=(Group.COMMON, Group.SCOPE, Group.SENSITIVE),
         configure=_codemod_apply_options,
     ),

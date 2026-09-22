@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from agentq.core import AgentQError, normalize_scopes_for_wire, resolve_repo_path
+from agentq.discovery import list_repo_files
 from agentq.navigation.providers import typescript as tsnav_module
 from agentq.tooling import find_executable
 
@@ -77,10 +78,12 @@ class ScopeWireNormalizationTests(unittest.TestCase):
             self.assertEqual(normalize_scopes_for_wire(root, ["sp ace"]), ["sp ace"])
             self.assertEqual(normalize_scopes_for_wire(root, ["ünicode"]), ["ünicode"])
             # Sibling prefix must not conflate src with src-old.
-            from agentq.navigation.providers.python import _collect_python_files
+            from agentq.syntax import collect_python_files
 
-            scoped, wire = _collect_python_files(root, ["src"])
-            self.assertEqual(wire, ["src"])
+            scoped, wire = collect_python_files(
+                root, ["src"], list(list_repo_files(root))
+            )
+            self.assertEqual(wire, ("src",))
             self.assertIn("src/a.py", scoped)
             self.assertIn("src/exact.py", scoped)
             self.assertNotIn("src-old/a.py", scoped)

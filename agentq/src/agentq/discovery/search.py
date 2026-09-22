@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.continuations import QueryFollowUp
 from agentq.core import (
@@ -29,17 +29,20 @@ from agentq.core import (
     RequestContext,
     SearchOptions,
     classify_path,
+    dict_field,
     is_sensitive_path,
+    list_field,
     new_operation_request,
     session_id,
     status_of,
     typed_coverage,
     typed_from_wire,
 )
-from agentq.delivery import compact_line
+from agentq.core.languages import TS_JS_SUFFIXES
 from agentq.discovery.files import add_rg_excludes, validated_scopes
 from agentq.execution import run_cmd
 from agentq.redaction import redact_text
+from agentq.text import compact_line
 from agentq.tooling import find_executable
 
 DEF_RE = re.compile(
@@ -49,10 +52,43 @@ IMPORT_RE = re.compile(
     r"^\s*(?:import|export\s+.*\s+from|from\s+\S+\s+import|use\s+|mod\s+|require\s*\()"
 )
 TS_JS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
-TS_JS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
 
-_PRIORITY = {"definition": 0, "import": 1, "reference": 2}
+_HIT_KIND_PRIORITY = {"definition": 0, "import": 1, "reference": 2}
 _ROLE_PRIORITY = {"source": 0, "test": 1, "config": 2, "docs": 3, "generated": 4}
+
+
+@dataclass(frozen=True, order=True)
+class SearchRank:
+    """Lexicographic search ordering; every field is compared in order."""
+
+    hit_kind: int
+    role: int
+    negative_frequency: int
+    path: str
+    line: int = 0
+    column: int = 0
+
+
+def _hit_rank(hit: SearchHit, counts_by_file: dict[str, int]) -> SearchRank:
+    return SearchRank(
+        _HIT_KIND_PRIORITY.get(hit.kind, 9),
+        _ROLE_PRIORITY.get(hit.role, 9),
+        -counts_by_file.get(hit.path, 0),
+        hit.path,
+        hit.line,
+        hit.column,
+    )
+
+
+def _file_hit_rank(
+    path: str, hits: list[SearchHit], counts_by_file: dict[str, int]
+) -> SearchRank:
+    return SearchRank(
+        min(_HIT_KIND_PRIORITY.get(hit.kind, 9) for hit in hits),
+        _ROLE_PRIORITY.get(classify_path(path), 9),
+        -counts_by_file.get(path, 0),
+        path,
+    )
 
 
 def parse_json_lines(text: str) -> Iterable[Any]:
@@ -141,7 +177,7 @@ class SourceSnippet:
                     text=str(item.get("text", "")),
                     match=bool(item.get("match")),
                 )
-                for item in payload.get("lines") or []
+                for item in list_field(payload, "lines")
             ),
         )
 
@@ -223,10 +259,10 @@ class SearchFile:
             path=str(payload.get("path", "")),
             role=str(payload.get("role", "source")),
             matching_lines=int(payload.get("matching_lines", 0) or 0),
-            kind_counts=dict(payload.get("kind_counts") or {}),
-            hits=tuple(SearchHit.from_wire(item) for item in payload.get("hits") or []),
+            kind_counts=dict(dict_field(payload, "kind_counts")),
+            hits=tuple(SearchHit.from_wire(item) for item in list_field(payload, "hits")),
             snippets=tuple(
-                SourceSnippet.from_wire(item) for item in payload.get("snippets") or []
+                SourceSnippet.from_wire(item) for item in list_field(payload, "snippets")
             ),
         )
 
@@ -262,8 +298,6 @@ class SearchResume:
     budget: int
 
 
-
-
 @dataclass(frozen=True)
 class SearchFollowUp:
     """One typed search resume request plus its display/cursor state.
@@ -291,7 +325,12 @@ class SearchFollowUp:
 
     @classmethod
     def from_wire(cls, payload: Mapping[str, Any]) -> SearchFollowUp:
-        omitted = payload.get("omitted")
+        raw_omitted = payload.get("omitted")
+        omitted: Mapping[str, Any] | None = (
+            cast("Mapping[str, Any]", raw_omitted)
+            if isinstance(raw_omitted, Mapping)
+            else None
+        )
         return cls(
             record=QueryFollowUp.from_wire(
                 {
@@ -305,7 +344,7 @@ class SearchFollowUp:
                     matches=int(omitted.get("matches", 0) or 0),
                     files=int(omitted.get("files", 0) or 0),
                 )
-                if isinstance(omitted, Mapping)
+                if omitted is not None
                 else None
             ),
             command=str(payload.get("command", "")),
@@ -515,11 +554,13 @@ class SearchResult:
         continuation = self.continuation
         block = wire.get("continuation")
         if continuation is not None and isinstance(block, Mapping):
-            continuation = continuation.with_display(block)
+            continuation = continuation.with_display(
+                cast("Mapping[str, Any]", block)
+            )
         budget = self.budget_continuation
         budget_block = wire.get("budget_continuation")
         if budget is not None and isinstance(budget_block, Mapping):
-            budget = budget.with_display(budget_block)
+            budget = budget.with_display(cast("Mapping[str, Any]", budget_block))
         if continuation is self.continuation and budget is self.budget_continuation:
             return self
         return replace(self, continuation=continuation, budget_continuation=budget)
@@ -533,10 +574,10 @@ class SearchResult:
             query=str(payload.get("query", "")),
             mode=str(payload.get("mode", "fixed")),
             word=bool(payload.get("word")),
-            paths=tuple(str(item) for item in payload.get("paths") or []),
-            hits=tuple(SearchHit.from_wire(item) for item in payload.get("hits") or []),
+            paths=tuple(str(item) for item in list_field(payload, "paths")),
+            hits=tuple(SearchHit.from_wire(item) for item in list_field(payload, "hits")),
             files=tuple(
-                SearchFile.from_wire(item) for item in payload.get("files") or []
+                SearchFile.from_wire(item) for item in list_field(payload, "files")
             ),
             total_matching_lines=int(
                 payload.get("total_matching_lines", payload.get("total", 0)) or 0
@@ -546,20 +587,20 @@ class SearchResult:
             coverage_policy=str(payload.get("coverage_policy", "auto")),
             count_quality=str(payload.get("count_quality", "exact")),
             scan_complete=bool(payload.get("scan_complete", True)),
-            counts_by_role=dict(payload.get("counts_by_role") or {}),
+            counts_by_role=dict(dict_field(payload, "counts_by_role")),
             context_lines=tuple(
                 ContextLine.from_wire(item)
-                for item in payload.get("context_lines") or []
+                for item in list_field(payload, "context_lines")
             ),
             context_truncated=bool(payload.get("context_truncated")),
             semantic_candidate=bool(payload.get("semantic_candidate")),
             symbol_candidates=tuple(
-                str(item) for item in payload.get("symbol_candidates") or []
+                str(item) for item in list_field(payload, "symbol_candidates")
             ),
             query_intent=str(payload.get("query_intent", "literal-matches")),
             match_file_summary=tuple(
                 MatchFileSummary.from_wire(item)
-                for item in payload.get("match_file_summary") or []
+                for item in list_field(payload, "match_file_summary")
             ),
             candidate_lines=int(payload.get("candidate_lines", 0) or 0),
             candidate_chars=int(payload.get("candidate_chars", 0) or 0),
@@ -787,9 +828,7 @@ def _build_context_snippets(
     return snippets, flat_context
 
 
-def _none_found(
-    request: SearchRequest, root: Path, scopes: list[str]
-) -> SearchResult:
+def _none_found(request: SearchRequest, root: Path, scopes: list[str]) -> SearchResult:
     return SearchResult.none_found(
         root,
         request.query,
@@ -850,7 +889,7 @@ def _hit_kind(stripped_line: str, *, is_relevant_decl: bool) -> str:
 class _HitCollector:
     request: SearchRequest
     counts_by_file: dict[str, int]
-    hits: list[SearchHit] = field(default_factory=list)
+    hits: list[SearchHit] = field(default_factory=list[SearchHit])
     candidate_chars: int = 0
     scan_limited: bool = False
 
@@ -861,19 +900,19 @@ class _HitCollector:
             return True
         if payload_event.get("type") != "match":
             return True
-        payload = payload_event.get("data") or {}
-        path = ((payload.get("path") or {}).get("text") or "").replace(os.sep, "/")
+        payload: dict[str, Any] = dict_field(payload_event, "data")
+        path = ((dict_field(payload, "path")).get("text") or "").replace(os.sep, "/")
         while path.startswith("./"):
             path = path[2:]
         if not path or (not self.request.include_sensitive and is_sensitive_path(path)):
             return True
         line_number = safe_int(payload.get("line_number"))
-        line = ((payload.get("lines") or {}).get("text") or "").rstrip("\r\n")
+        line = ((dict_field(payload, "lines")).get("text") or "").rstrip("\r\n")
         self.candidate_chars += len(line)
         if self.request.coverage_policy != "exact":
             self.counts_by_file[path] = self.counts_by_file.get(path, 0) + 1
-        submatches = payload.get("submatches") or []
-        first = submatches[0] if submatches else {}
+        submatches: list[Any] = list_field(payload, "submatches")
+        first: Any = submatches[0] if submatches else {}
         byte_start = safe_int(first.get("start"))
         byte_end = safe_int(first.get("end"))
         declared, is_relevant_decl = _is_relevant_declaration(self.request, line)
@@ -967,7 +1006,9 @@ def _query_intent(
     return symbol_candidates, semantic_candidate, query_intent, broad_query
 
 
-def _select_hits(hits: list[SearchHit], *, limit: int, per_file: int) -> list[SearchHit]:
+def _select_hits(
+    hits: list[SearchHit], *, limit: int, per_file: int
+) -> list[SearchHit]:
     selected: list[SearchHit] = []
     per_path: Counter[str] = Counter()
     for hit in hits:
@@ -1014,12 +1055,7 @@ def _search_files(
         grouped[hit.path].append(hit)
     ordered_paths = sorted(
         grouped,
-        key=lambda path: (
-            min(_PRIORITY.get(hit.kind, 9) for hit in grouped[path]),
-            _ROLE_PRIORITY.get(classify_path(path), 9),
-            -counts_by_file.get(path, 0),
-            path,
-        ),
+        key=lambda path: _file_hit_rank(path, grouped[path], counts_by_file),
     )[: request.max_files]
     search_files: list[SearchFile] = []
     visible_hit_ids: set[tuple[str, int, int]] = set()
@@ -1127,16 +1163,7 @@ def search(request: SearchRequest) -> SearchResult:
             return _none_found(request, root, scopes)
         count_quality = "lower-bound" if scan_limited else "exact"
 
-    hits.sort(
-        key=lambda h: (
-            _PRIORITY.get(h.kind, 9),
-            _ROLE_PRIORITY.get(h.role, 9),
-            -counts_by_file.get(h.path, 0),
-            h.path,
-            h.line,
-            h.column,
-        )
-    )
+    hits.sort(key=lambda hit: _hit_rank(hit, counts_by_file))
     (
         symbol_candidates,
         semantic_candidate,
@@ -1301,7 +1328,7 @@ def _follow_up_from_wire(value: Any) -> SearchFollowUp | None:
     if not isinstance(value, Mapping) or "request" not in value:
         return None
     try:
-        return SearchFollowUp.from_wire(value)
+        return SearchFollowUp.from_wire(cast("Mapping[str, Any]", value))
     except ContractError:
         return None
 
@@ -1356,7 +1383,7 @@ def _compact_file_record(item: SearchFile, *, view: str) -> dict[str, Any]:
     if view == "snippets" and item.snippets:
         hits_by_line = {hit.line: hit for hit in item.hits}
         for snippet in item.snippets:
-            lines = []
+            lines: list[dict[str, Any]] = []
             for entry in snippet.lines:
                 row: dict[str, Any] = {"line": entry.line, "text": entry.text}
                 if entry.match:
@@ -1422,7 +1449,7 @@ def _compact_continuation(
     render_budget: bool = False,
 ) -> dict[str, Any] | None:
     shown_by_path = {
-        str(item["path"]): int((item.get("matches") or {}).get("shown", 0))
+        str(item["path"]): int((dict_field(item, "matches")).get("shown", 0))
         for item in files
     }
     shown = sum(shown_by_path.values())
@@ -1465,7 +1492,7 @@ def _compact_payload(
     files: list[dict[str, Any]],
     continuation: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    shown = sum(int((item.get("matches") or {}).get("shown", 0)) for item in files)
+    shown = sum(int((dict_field(item, "matches")).get("shown", 0)) for item in files)
     total = result.total_matching_lines
     matching_files = result.matching_files
     complete = shown >= total and len(files) >= matching_files and result.scan_complete
@@ -1515,7 +1542,7 @@ def compact_search_wire(
     full_continuation = _compact_continuation(result, resume, candidates)
     full = _compact_payload(result, candidates, full_continuation)
     full_chars = len(json.dumps(full, ensure_ascii=False, separators=(",", ":")))
-    selected = candidates
+    selected: list[dict[str, Any]] = candidates
     render_truncated = False
 
     if budget > 0 and full_chars > budget:

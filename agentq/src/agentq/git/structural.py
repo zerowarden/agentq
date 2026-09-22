@@ -6,8 +6,8 @@ import tempfile
 from pathlib import Path
 
 from agentq.core import AgentQError, resolve_repo_path
-from agentq.delivery import compact_line
 from agentq.execution import run_cmd
+from agentq.text import compact_line
 from agentq.tooling import find_executable
 
 from .models import StructuralRequest, StructuralResult

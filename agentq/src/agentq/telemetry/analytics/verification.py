@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, cast
 
-from . import _distribution, _percent
+from . import distribution, percent
 
 
-def _verification_stats(
+def verification_stats(
     events: list[dict[str, Any]], *, detailed: bool
 ) -> dict[str, Any]:
     def metrics(event: dict[str, Any]) -> dict[str, Any]:
         value = event.get("metrics")
-        return value if isinstance(value, dict) else {}
+        return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
     def measured(
         event: dict[str, Any], flag: str, legacy_keys: tuple[str, ...]
@@ -53,7 +53,7 @@ def _verification_stats(
         "unverified",
         "planned",
     }
-    result = {
+    result: dict[str, Any] = {
         "runs": len(events),
         "executed_runs": sum(
             event.get("subject_status") != "planned" for event in events
@@ -91,13 +91,13 @@ def _verification_stats(
         "checks_instrumented_runs": len(checks_measured),
         "files_instrumented_runs": len(files_measured),
         "packages_instrumented_runs": len(packages_measured),
-        "checks_instrumented_percent": _percent(len(checks_measured), len(events)),
-        "files_instrumented_percent": _percent(len(files_measured), len(events)),
-        "packages_instrumented_percent": _percent(len(packages_measured), len(events)),
-        "files_distribution": _distribution([]),
-        "packages_distribution": _distribution([]),
-        "checks_distribution": _distribution([]),
-        "duration_ms_distribution": _distribution([]),
+        "checks_instrumented_percent": percent(len(checks_measured), len(events)),
+        "files_instrumented_percent": percent(len(files_measured), len(events)),
+        "packages_instrumented_percent": percent(len(packages_measured), len(events)),
+        "files_distribution": distribution([]),
+        "packages_distribution": distribution([]),
+        "checks_distribution": distribution([]),
+        "duration_ms_distribution": distribution([]),
         "modes": [],
         "scopes": [],
         "scope_rows": [],
@@ -174,16 +174,16 @@ def _verification_stats(
                 "checks_instrumented_runs": len(local_checks_measured),
                 "files_instrumented_runs": len(local_files_measured),
                 "packages_instrumented_runs": len(local_packages_measured),
-                "files_distribution": _distribution(files),
-                "packages_distribution": _distribution(packages),
-                "checks_distribution": _distribution(checks),
-                "duration_ms_distribution": _distribution(
+                "files_distribution": distribution(files),
+                "packages_distribution": distribution(packages),
+                "checks_distribution": distribution(checks),
+                "duration_ms_distribution": distribution(
                     [int(item.get("duration_ms", 0)) for item in items]
                 ),
             }
         )
 
-    recent = []
+    recent: list[dict[str, Any]] = []
     for event in reversed(events[-12:]):
         event_metrics = metrics(event)
         status = str(event.get("subject_status") or "unknown")
@@ -228,26 +228,26 @@ def _verification_stats(
 
     result.update(
         {
-            "files_distribution": _distribution(
+            "files_distribution": distribution(
                 [
                     int(metrics(event).get("changed_files", 0))
                     for event in files_measured
                 ]
             ),
-            "packages_distribution": _distribution(
+            "packages_distribution": distribution(
                 [
                     int(metrics(event).get("affected_packages", 0))
                     for event in packages_measured
                 ]
             ),
-            "checks_distribution": _distribution(
+            "checks_distribution": distribution(
                 [
                     int(metrics(event).get("executed_steps", 0))
                     for event in checks_measured
                     if event.get("subject_status") != "planned"
                 ]
             ),
-            "duration_ms_distribution": _distribution(
+            "duration_ms_distribution": distribution(
                 [int(event.get("duration_ms", 0)) for event in events]
             ),
             "modes": [

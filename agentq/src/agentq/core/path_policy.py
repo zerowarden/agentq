@@ -11,6 +11,8 @@ import os
 import re
 from pathlib import Path
 
+from .languages import MANIFEST_PATTERN
+
 SENSITIVE_NAMES = {
     ".env",
     ".npmrc",
@@ -38,7 +40,7 @@ ROLE_PATTERNS = {
     "docs": re.compile(r"(^|/)(docs?|examples?)(/|$)|\.(md|mdx|rst|adoc|txt)$", re.I),
     "config": re.compile(
         r"(^|/)(\.github|config|configs|migrations|supabase)(/|$)|"
-        r"(^|/)(package\.json|tsconfig[^/]*\.json|pyproject\.toml|cargo\.toml|"
+        r"(^|/)(" + MANIFEST_PATTERN + r"|tsconfig[^/]*\.json|"
         r"[^/]+\.config\.(?:[cm]?[jt]s|tsx?)|.*\.(?:ya?ml|toml|ini|cfg))$",
         re.I,
     ),

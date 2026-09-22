@@ -11,8 +11,8 @@ from typing import Any
 from agentq.tasking import current_task_state
 
 from ..storage import mapping_field
-from . import _distribution, _percent
-from .failures import _is_expanded_retry
+from . import distribution, percent
+from .failures import is_expanded_retry
 
 VERIFICATION_COMMANDS = {"run", "verify", "verify-changed", "verify-task"}
 
@@ -36,7 +36,7 @@ def _accepted_task_outcome(
         fingerprint = event.get("operation_fingerprint")
         if isinstance(fingerprint, str):
             previous = previous_by_operation.get(fingerprint)
-            if previous and _is_expanded_retry(previous, event):
+            if previous and is_expanded_retry(previous, event):
                 expanded_retries += 1
             previous_by_operation[fingerprint] = event
 
@@ -174,7 +174,7 @@ def task_efficiency(
         "active_age_seconds": active_age,
         "attributed_calls": attributed_count,
         "unattributed_calls": max(0, len(operation_events) - attributed_count),
-        "attribution_percent": _percent(attributed_count, len(operation_events)),
+        "attribution_percent": percent(attributed_count, len(operation_events)),
         "accepted_operation_calls": accepted_calls,
         "accepted_visible_chars": accepted_visible,
         "visible_chars_per_accepted_task": (
@@ -199,11 +199,11 @@ def task_efficiency(
         "correction_calls": sum(int(item["correction_calls"]) for item in outcomes),
         "verification_results": dict(sorted(verification_results.items())),
         "accepted_tasks": outcomes[-20:],
-        "calls_distribution": _distribution(task_calls),
-        "visible_chars_distribution": _distribution(task_visible),
-        "token_proxy_distribution": _distribution([v / 4 for v in task_visible]),
-        "reads_distribution": _distribution(task_reads),
-        "searches_distribution": _distribution(task_searches),
-        "runs_distribution": _distribution(task_runs),
+        "calls_distribution": distribution(task_calls),
+        "visible_chars_distribution": distribution(task_visible),
+        "token_proxy_distribution": distribution([v / 4 for v in task_visible]),
+        "reads_distribution": distribution(task_reads),
+        "searches_distribution": distribution(task_searches),
+        "runs_distribution": distribution(task_runs),
         "note": "task=independently_acceptable_outcome",
     }

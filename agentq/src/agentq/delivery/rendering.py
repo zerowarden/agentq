@@ -7,27 +7,12 @@ They never write to stdout/stderr.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agentq.core import AgentQError, RenderedText, project_json
-from agentq.redaction import redact_text
 
-ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 JSON_FORMATS = frozenset({"json", "compact-json"})
-
-
-def strip_ansi(text: str) -> str:
-    return ANSI_RE.sub("", text)
-
-
-def compact_line(text: str, max_chars: int = 240) -> str:
-    text = strip_ansi(text).replace("\r", "").rstrip("\n")
-    text = redact_text(text)
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 15)] + " …[truncated]"
 
 
 def read_item_header(path: str, start: int, end: int, total_lines: int | None) -> str:
@@ -39,18 +24,6 @@ def read_item_header(path: str, start: int, end: int, total_lines: int | None) -
 def read_line_text(marker: str, number: int, width: int, text: str) -> str:
     """The one rendered source-line format renderers and manifests share."""
     return f"{marker} {number:>{width}} │ {text}"
-
-
-def truncate_line(text: str, max_chars: int = 240) -> str:
-    """Truncate a line that is already redacted (no re-redaction).
-
-    Used by streamed output where :func:`redact_text` has already been applied,
-    so calling it again would mangle already-redacted tokens.
-    """
-    text = strip_ansi(text).replace("\r", "").rstrip("\n")
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 15)] + " …[truncated]"
 
 
 def bound_output(text: str, budget: int) -> tuple[str, bool]:
@@ -79,9 +52,7 @@ def human_bytes(value: int) -> str:
 class Renderer(Protocol):
     """Every renderer accepts the typed value and an optional char budget."""
 
-    def __call__(
-        self, result: Any, /, *, budget: int = 0
-    ) -> str | RenderedText: ...
+    def __call__(self, result: Any, /, *, budget: int = 0) -> str | RenderedText: ...
 
 
 @dataclass(frozen=True)

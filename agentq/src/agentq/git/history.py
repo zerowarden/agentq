@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agentq.core import COMPLETE, typed_coverage
-from agentq.delivery import compact_line
+from agentq.text import compact_line
 
 from .models import CommitRecord, HistoryRequest, HistoryResult
 from .runner import git_command

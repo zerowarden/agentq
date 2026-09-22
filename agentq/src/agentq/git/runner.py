@@ -13,8 +13,8 @@ from agentq.core import (
     Coverage,
     typed_coverage,
 )
-from agentq.delivery import compact_line
 from agentq.execution import Completed, run_cmd
+from agentq.text import compact_line
 
 
 def git_command(

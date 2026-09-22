@@ -62,11 +62,12 @@ class WorkflowCliTests(AgentQIntegrationHarness):
                 inspect,
                 render_inspect,
                 render_ts_nav,
+                ts_nav_from_payload,
             )
             from agentq.navigation.providers import typescript as typescript_provider
 
         def ts_nav_payload(payload: dict) -> TypeScriptNav:
-            return TypeScriptNav.from_payload(
+            return ts_nav_from_payload(
                 payload, coverage=typed_from_wire(payload["coverage"])
             )
 

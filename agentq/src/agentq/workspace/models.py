@@ -1,7 +1,9 @@
-"""Typed workspace models: packages, manifests, and discovery results.
+"""Typed workspace models: Node packages, manifests, and discovery results.
 
-A discovered workspace is a mapping of repository-relative package paths to
-:class:`Package` units. Graph behavior lives in :mod:`agentq.workspace.graph`.
+Node-specific metadata stays in :class:`NodePackage` / :class:`NodeWorkspace`.
+Unit identity and dependency edges live in the ecosystem-neutral
+:class:`~agentq.workspace.graph.ProjectGraph`, keyed by
+:class:`~agentq.workspace.graph.UnitId`.
 """
 
 from __future__ import annotations
@@ -10,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+from .graph import ProjectGraph, UnitId
 
 
 class PackageManager(str, Enum):
@@ -22,25 +26,30 @@ class PackageManager(str, Enum):
 
 
 @dataclass(frozen=True)
-class Package:
-    """One package unit and its declared dependency edges.
+class NodePackage:
+    """Node-only package metadata; the graph owns identity and edges.
 
-    ``dependencies`` holds names of sibling local packages only;
-    ``dependency_kinds`` records which manifest fields declared each edge.
     ``declared_dependencies`` keeps every declared name (local or external) and
     ``runtime_dependencies`` keeps the runtime/dev subset used for root-level
     tooling detection.
     """
 
-    path: str
     name: str
     root: bool = False
     private: bool = False
-    scripts: Mapping[str, str] = field(default_factory=dict)
-    dependencies: frozenset[str] = frozenset()
-    dependency_kinds: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    scripts: Mapping[str, str] = field(default_factory=dict[str, str])
     declared_dependencies: frozenset[str] = frozenset()
     runtime_dependencies: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class NodeWorkspace:
+    """A discovered Node workspace: manager, patterns, graph, and metadata."""
+
+    manager: PackageManager
+    patterns: tuple[str, ...]
+    graph: ProjectGraph
+    packages: Mapping[UnitId, NodePackage]
 
 
 @dataclass(frozen=True)
@@ -49,12 +58,3 @@ class ManifestUnit:
 
     key: str
     path: Path
-
-
-@dataclass(frozen=True)
-class Workspace:
-    """A discovered package workspace: manager, patterns, and packages."""
-
-    manager: PackageManager
-    patterns: tuple[str, ...]
-    packages: Mapping[str, Package]

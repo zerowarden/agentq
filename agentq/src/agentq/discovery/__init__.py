@@ -23,6 +23,7 @@ from .outline import (
     OutlineResult,
     OutlineSymbol,
     outline,
+    python_outline,
 )
 from .read import (
     ReadContinuation,
@@ -113,6 +114,8 @@ __all__ = [
     "is_skipped",
     "list_repo_files",
     "outline",
+    "python_outline",
+    "python_outline",
     "parse_json_lines",
     "read",
     "render_files",

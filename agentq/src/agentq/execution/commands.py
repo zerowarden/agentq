@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agentq.core import AgentQError
-from agentq.delivery import compact_line
+from agentq.text import compact_line
 
 from .models import ExecutionSpec, StopReason, StreamMode
 

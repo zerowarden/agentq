@@ -10,9 +10,9 @@ by the CLI adapter and the statistics tests.
 
 from __future__ import annotations
 
-from .analytics.chains import _build_context_index
-from .analytics.efficiency import _cohort_comparison, read_efficiency
-from .analytics.verification import _verification_stats
+from .analytics.chains import build_context_index
+from .analytics.efficiency import cohort_comparison, read_efficiency
+from .analytics.verification import verification_stats
 from .archive import (
     archive_file,
     archive_hot_events,
@@ -22,7 +22,7 @@ from .archive import (
     storage_data,
 )
 from .models import ComparisonIdentity, TelemetryEvent
-from .recorder import _fingerprint_key, _fingerprint_key_at, record_event
+from .recorder import fingerprint_key, fingerprint_key_at, record_event
 from .recording import (
     Observation,
     OutcomeFacts,
@@ -31,7 +31,7 @@ from .recording import (
     record_success,
 )
 from .report import (
-    _event_facets,
+    event_facets,
     print_stats,
     render_archive,
     render_persistence,
@@ -47,10 +47,10 @@ from .report import (
 from .storage import (
     ACCEPTED_SCHEMAS,
     SCHEMA,
-    _append_jsonl_many_unlocked,
-    _normalize_event,
+    append_jsonl_many_unlocked,
     hot_file,
     load_events,
+    normalize_event,
 )
 
 __all__ = [
@@ -60,14 +60,14 @@ __all__ = [
     "OutcomeFacts",
     "SCHEMA",
     "TelemetryEvent",
-    "_append_jsonl_many_unlocked",
-    "_build_context_index",
-    "_cohort_comparison",
-    "_event_facets",
-    "_fingerprint_key",
-    "_fingerprint_key_at",
-    "_normalize_event",
-    "_verification_stats",
+    "append_jsonl_many_unlocked",
+    "build_context_index",
+    "cohort_comparison",
+    "event_facets",
+    "fingerprint_key",
+    "fingerprint_key_at",
+    "normalize_event",
+    "verification_stats",
     "archive_file",
     "archive_hot_events",
     "hot_file",

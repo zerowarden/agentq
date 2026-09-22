@@ -1,8 +1,11 @@
-"""Workspace manifest parsing and package discovery.
+"""Node workspace discovery plus generic manifest utilities.
 
-This module owns how a repository declares packages: package-manager
-detection, workspace glob patterns, manifest parsing, and the discovery walk
-that produces a typed :class:`~agentq.workspace.models.Workspace`.
+This module owns how a Node repository declares packages: package-manager
+detection, workspace glob patterns, package.json parsing, and the discovery
+walk that produces a typed :class:`~agentq.workspace.models.NodeWorkspace`.
+Other ecosystems have their own adapters in
+:mod:`agentq.workspace.ecosystems`; all of them emit the same
+:class:`~agentq.workspace.graph.ProjectGraph`.
 """
 
 from __future__ import annotations
@@ -13,12 +16,14 @@ import re
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
-from agentq.core import relpath
+from agentq.core import as_dict, as_list, dict_field, relpath
+from agentq.core.languages import ECOSYSTEMS
 from agentq.discovery import PackageManifest, list_repo_files
 
-from .models import ManifestUnit, Package, PackageManager, Workspace
+from .graph import DependencyEdge, ProjectGraph, ProjectUnit, UnitId
+from .models import ManifestUnit, NodePackage, NodeWorkspace, PackageManager
 
 DEPENDENCY_FIELDS = (
     "dependencies",
@@ -33,7 +38,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return value if isinstance(value, dict) else {}
+    return as_dict(value)
 
 
 def package_manager(root: Path) -> PackageManager:
@@ -94,9 +99,11 @@ def _package_json_workspace_patterns(root: Path) -> list[str]:
     obj = _read_json(root / "package.json")
     value = obj.get("workspaces")
     if isinstance(value, list):
-        return [str(item) for item in value if isinstance(item, str)]
-    if isinstance(value, dict) and isinstance(value.get("packages"), list):
-        return [str(item) for item in value["packages"] if isinstance(item, str)]
+        return [str(item) for item in as_list(value) if isinstance(item, str)]
+    if isinstance(value, dict):
+        packages = cast("dict[str, Any]", value).get("packages")
+        if isinstance(packages, list):
+            return [str(item) for item in as_list(packages) if isinstance(item, str)]
     return []
 
 
@@ -157,44 +164,41 @@ def _allowed_by_patterns(path: str, patterns: Sequence[str]) -> bool:
 
 
 def _package_scripts(obj: dict[str, Any]) -> dict[str, str]:
-    scripts_obj = obj.get("scripts")
+    scripts_obj = dict_field(obj, "scripts")
     return {
         str(key): str(value)
-        for key, value in (scripts_obj.items() if isinstance(scripts_obj, dict) else [])
+        for key, value in scripts_obj.items()
         if isinstance(value, str)
     }
 
 
-def _dependency_edges(
-    obj: dict[str, Any], local_names: set[str]
-) -> tuple[frozenset[str], dict[str, tuple[str, ...]], frozenset[str], frozenset[str]]:
-    local: set[str] = set()
+def _dependency_declarations(
+    obj: dict[str, Any],
+) -> tuple[dict[str, tuple[str, ...]], frozenset[str], frozenset[str]]:
+    """Declared dependency names by field, all declared names, and runtime ones."""
+    kinds: dict[str, list[str]] = defaultdict(list)
     declared: set[str] = set()
     runtime: set[str] = set()
-    kinds: dict[str, list[str]] = defaultdict(list)
     for field_name in DEPENDENCY_FIELDS:
         value = obj.get(field_name)
         if not isinstance(value, dict):
             continue
-        for dependency in value:
-            dependency_name = str(dependency)
-            declared.add(dependency_name)
+        for dependency in cast("dict[str, Any]", value):
+            name = str(dependency)
+            declared.add(name)
             if field_name in {"dependencies", "devDependencies"}:
-                runtime.add(dependency_name)
-            if dependency_name in local_names:
-                local.add(dependency_name)
-                kinds[dependency_name].append(field_name)
+                runtime.add(name)
+            kinds[name].append(field_name)
     return (
-        frozenset(local),
         {key: tuple(value) for key, value in kinds.items()},
         frozenset(declared),
         frozenset(runtime),
     )
 
 
-def discover_workspace(root: Path) -> Workspace:
-    """Discover every workspace package declared by the repository manifests."""
-    patterns = workspace_patterns(root)
+def _node_manifests(
+    root: Path, patterns: Sequence[str]
+) -> list[tuple[str, dict[str, Any], bool]]:
     manifests = [
         rel
         for rel in list_repo_files(root)
@@ -202,7 +206,6 @@ def discover_workspace(root: Path) -> Workspace:
     ]
     if (root / "package.json").is_file() and "package.json" not in manifests:
         manifests.insert(0, "package.json")
-
     raw: list[tuple[str, dict[str, Any], bool]] = []
     for rel in sorted(set(manifests)):
         package_path = PurePosixPath(rel).parent.as_posix()
@@ -214,33 +217,72 @@ def discover_workspace(root: Path) -> Workspace:
         if not obj:
             continue
         raw.append((package_path, obj, is_root))
+    return raw
 
-    names = {
-        str(obj.get("name")): path
-        for path, obj, _ in raw
-        if isinstance(obj.get("name"), str) and obj.get("name")
-    }
-    packages: dict[str, Package] = {}
+
+def _node_units(
+    root: Path, raw: Sequence[tuple[str, dict[str, Any], bool]]
+) -> tuple[dict[UnitId, ProjectUnit], dict[str, list[UnitId]]]:
+    units: dict[UnitId, ProjectUnit] = {}
+    by_name: dict[str, list[UnitId]] = defaultdict(list)
     for path, obj, is_root in raw:
         name = str(
             obj.get("name") or (root.name if is_root else PurePosixPath(path).name)
         )
-        dependencies, dependency_kinds, declared, runtime = _dependency_edges(
-            obj, set(names)
-        )
-        packages[path] = Package(
-            path=path,
+        unit_id = UnitId("node", path)
+        manifest = "package.json" if path == "." else f"{path}/package.json"
+        units[unit_id] = ProjectUnit(
+            id=unit_id,
             name=name,
+            manifest=manifest,
             root=is_root,
             private=bool(obj.get("private")),
+        )
+        by_name[name].append(unit_id)
+    return units, by_name
+
+
+def _node_packages(
+    raw: Sequence[tuple[str, dict[str, Any], bool]],
+    units: dict[UnitId, ProjectUnit],
+    by_name: dict[str, list[UnitId]],
+) -> tuple[dict[UnitId, NodePackage], list[DependencyEdge]]:
+    packages: dict[UnitId, NodePackage] = {}
+    edges: list[DependencyEdge] = []
+    for path, obj, is_root in raw:
+        unit_id = UnitId("node", path)
+        unit = units[unit_id]
+        kinds, declared, runtime = _dependency_declarations(obj)
+        packages[unit_id] = NodePackage(
+            name=unit.name,
+            root=is_root,
+            private=unit.private,
             scripts=_package_scripts(obj),
-            dependencies=dependencies,
-            dependency_kinds=dependency_kinds,
             declared_dependencies=declared,
             runtime_dependencies=runtime,
         )
-    return Workspace(
-        manager=package_manager(root), patterns=patterns, packages=packages
+        for dependency_name, fields in kinds.items():
+            for target in by_name.get(dependency_name, []):
+                if target == unit_id:
+                    continue
+                for field_name in fields:
+                    edges.append(
+                        DependencyEdge(source=unit_id, target=target, kind=field_name)
+                    )
+    return packages, edges
+
+
+def discover_node(root: Path) -> NodeWorkspace:
+    """Discover every Node workspace package declared by the repository."""
+    patterns = workspace_patterns(root)
+    raw = _node_manifests(root, patterns)
+    units, by_name = _node_units(root, raw)
+    packages, edges = _node_packages(raw, units, by_name)
+    return NodeWorkspace(
+        manager=package_manager(root),
+        patterns=patterns,
+        graph=ProjectGraph.from_units(units, edges),
+        packages=packages,
     )
 
 
@@ -264,25 +306,25 @@ def nearest_manifest(root: Path, target: Path) -> PackageManifest | None:
     """Walk up from target to the repository root looking for a package manifest."""
     current = target if target.is_dir() else target.parent
     while True:
-        for name, kind in (
-            ("package.json", "npm"),
-            ("Cargo.toml", "cargo"),
-            ("pyproject.toml", "python"),
-        ):
-            path = current / name
-            if not path.exists():
-                continue
-            relative = relpath(root, path)
-            if name != "package.json":
-                return PackageManifest(path=relative, kind=kind)
-            try:
-                obj = json.loads(path.read_text(encoding="utf-8"))
-                scripts = tuple(sorted((obj.get("scripts") or {}).keys()))
-            except Exception:
-                return PackageManifest(path=relative, kind=kind)
-            return PackageManifest(
-                path=relative, kind=kind, name=obj.get("name"), scripts=scripts
-            )
+        for profile in ECOSYSTEMS:
+            for name in profile.manifests:
+                path = current / name
+                if not path.exists():
+                    continue
+                relative = relpath(root, path)
+                if profile.id != "node":
+                    return PackageManifest(path=relative, kind=profile.manifest_kind)
+                try:
+                    obj = json.loads(path.read_text(encoding="utf-8"))
+                    scripts = tuple(sorted((dict_field(obj, "scripts")).keys()))
+                except Exception:
+                    return PackageManifest(path=relative, kind=profile.manifest_kind)
+                return PackageManifest(
+                    path=relative,
+                    kind=profile.manifest_kind,
+                    name=obj.get("name"),
+                    scripts=scripts,
+                )
         if current == root:
             break
         current = current.parent

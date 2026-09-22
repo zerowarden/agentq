@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from agentq.core import AgentQError
-from agentq.delivery import compact_line
 from agentq.execution import run_cmd
+from agentq.text import compact_line
 from agentq.tooling import find_executable
 
 
@@ -56,7 +56,7 @@ def _hyperfine_benchmark(
                 compact_line(result.stderr or result.stdout or "hyperfine failed", 600)
             )
         obj = json.loads(output.read_text(encoding="utf-8"))
-        results = []
+        results: list[dict[str, Any]] = []
         for item in obj.get("results", []):
             results.append(
                 {
@@ -84,7 +84,7 @@ def _fallback_benchmark(
 ) -> dict[str, Any]:
     # Out-of-scope subprocess use: the fallback timing harness intentionally runs
     # user shell commands with DEVNULL and is not an agent command lifecycle.
-    results = []
+    results: list[dict[str, Any]] = []
     for command in commands:
         if prepare:
             subprocess.run(
@@ -103,7 +103,7 @@ def _fallback_benchmark(
                 stderr=subprocess.DEVNULL,
                 check=True,
             )
-        times = []
+        times: list[float] = []
         for _ in range(runs):
             if prepare:
                 subprocess.run(

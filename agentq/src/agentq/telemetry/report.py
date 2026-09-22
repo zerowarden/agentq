@@ -15,27 +15,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agentq.core import AgentQError, repo_id, stable_id
+from agentq.core import AgentQError, dict_field, list_field, repo_id, stable_id
 from agentq.delivery import bound_output, human_bytes
 
-from .analytics import _fallback_session_contexts, _percent
+from .analytics import fallback_session_contexts, percent
 from .analytics.chains import (
-    _build_context_index,
+    build_context_index,
     command_chains,
     operation_transitions,
     read_chain_behavior,
 )
 from .analytics.efficiency import (
-    _COHORT_WINDOW_SECONDS,
-    _cohort_comparison,
-    _command_rows,
-    _output_profile_rows,
-    _search_format_usage,
+    COHORT_WINDOW_SECONDS,
+    cohort_comparison,
+    command_rows,
+    output_profile_rows,
     read_efficiency,
+    search_format_usage,
 )
-from .analytics.failures import _retry_behavior, failure_breakdown
+from .analytics.failures import failure_breakdown, retry_behavior
 from .analytics.tasks import task_efficiency
-from .analytics.verification import _verification_stats
+from .analytics.verification import verification_stats
 from .archive import archive_hot_events
 from .recorder import MEASURED_COMMANDS
 from .storage import SCHEMA, load_events, mapping_field
@@ -104,8 +104,8 @@ def render_archive(data: dict[str, Any], *, budget: int = 0) -> str:
 def _resolve_read_file_labels(root: Path, reads: dict[str, Any]) -> None:
     """Resolve current repository paths for detailed display without persisting them."""
     rows = [
-        *list(reads.get("top_files") or []),
-        *list(reads.get("fully_covered_range_rows") or []),
+        *list(list_field(reads, "top_files")),
+        *list(list_field(reads, "fully_covered_range_rows")),
     ]
     wanted = {str(row.get("file_id")) for row in rows if row.get("file_id")}
     labels: dict[str, str] = {}
@@ -148,7 +148,7 @@ def _parse_since(value: str, now: float) -> float | None:
 
 
 def _gap_session_count(events: list[dict[str, Any]], gap_seconds: int = 30 * 60) -> int:
-    return len(set(_fallback_session_contexts(events, gap_seconds).values()))
+    return len(set(fallback_session_contexts(events, gap_seconds).values()))
 
 
 def _activity_step(span: float) -> int:
@@ -188,7 +188,7 @@ def _activity_buckets(
     ]
 
 
-def _event_facets(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def event_facets(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     thread_ids: set[str] = set()
     repositories: Counter[str] = Counter()
     errors: Counter[str] = Counter()
@@ -247,7 +247,7 @@ def _event_facets(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 {
                     "action": action,
                     "calls": count,
-                    "percent": _percent(count, semantic_calls),
+                    "percent": percent(count, semantic_calls),
                 }
                 for action, count in semantic_actions.most_common()
             ],
@@ -281,20 +281,20 @@ def stats_data(
     selected = events
     operation_events = [event for event in selected if event.get("command") != "task"]
 
-    command_rows, aggregate = _command_rows(operation_events)
+    command_rows_data, aggregate = command_rows(operation_events)
     measurement = aggregate["measurement"]
     visible_chars = int(measurement["total_visible_chars"])
     tool_ok = int(aggregate["tool_ok"])
     tool_errors = len(operation_events) - tool_ok
-    facets = _event_facets(operation_events)
+    facets = event_facets(operation_events)
     thread_ids = facets["thread_ids"]
     fallback_sessions = _gap_session_count(operation_events)
 
     project_commands = facets["project_commands"]
     verification_events = facets["verification_events"]
-    verification = _verification_stats(verification_events, detailed=detailed)
+    verification = verification_stats(verification_events, detailed=detailed)
 
-    recent_events = []
+    recent_events: list[dict[str, Any]] = []
     if recent > 0:
         for event in reversed(operation_events[-recent:]):
             metrics = mapping_field(event.get("metrics"))
@@ -325,7 +325,7 @@ def stats_data(
     reads = read_efficiency(operation_events, detailed=detailed)
     if detailed and not all_repos:
         _resolve_read_file_labels(root, reads)
-    context_index = _build_context_index(events, operation_events) if detailed else None
+    context_index = build_context_index(events, operation_events) if detailed else None
     if context_index:
         reads.update(read_chain_behavior(operation_events, context_index["selected"]))
     navigation = facets["navigation"]
@@ -342,31 +342,31 @@ def stats_data(
         operation_transitions(context_index["selected"]) if context_index else []
     )
     chains = command_chains(context_index["selected"]) if context_index else []
-    failures_detail = (
+    failures_detail: dict[str, Any] = (
         failure_breakdown(operation_events)
         if detailed
         else {"rows": [], "signatures": []}
     )
-    output_profiles = _output_profile_rows(operation_events) if detailed else []
-    search_format_usage = _search_format_usage(operation_events)
-    retry_behavior = (
-        _retry_behavior(operation_events) if detailed else _retry_behavior([])
+    output_profiles = output_profile_rows(operation_events) if detailed else []
+    search_format_data = search_format_usage(operation_events)
+    retry_data = (
+        retry_behavior(operation_events) if detailed else retry_behavior([])
     )
     error_categories = facets["errors"]
     if since == "7d":
         cohort_events, _ = load_events(
-            cutoff=now - 2 * _COHORT_WINDOW_SECONDS,
+            cutoff=now - 2 * COHORT_WINDOW_SECONDS,
             repository_id=None if all_repos else repository_id,
             operations=set(operations) if operations else None,
             compact=True,
             ordered=False,
         )
-        cohort_comparison = {
+        cohort_data = {
             "available": True,
-            **_cohort_comparison(cohort_events, now),
+            **cohort_comparison(cohort_events, now),
         }
     else:
-        cohort_comparison = {
+        cohort_data = {
             "available": False,
             "reason": "seven-day comparison requires --since 7d",
         }
@@ -384,11 +384,11 @@ def stats_data(
         "sessions": len(thread_ids) + fallback_sessions,
         "tool_ok": tool_ok,
         "tool_errors": tool_errors,
-        "tool_reliability": _percent(tool_ok, len(operation_events)),
+        "tool_reliability": percent(tool_ok, len(operation_events)),
         # v1.2.0 JSON aliases; these now refer only to agentq/tool health.
         "successes": tool_ok,
         "failures": tool_errors,
-        "success_rate": _percent(tool_ok, len(operation_events)),
+        "success_rate": percent(tool_ok, len(operation_events)),
         "duration_ms": int(aggregate["duration_ms"]),
         "visible_chars": visible_chars,
         "visible_token_proxy": round(visible_chars / 4),
@@ -400,7 +400,7 @@ def stats_data(
         "suppressed_chars": None,
         "reduction_percent": measurement["reduction_percent"],
         "project_commands": project_commands,
-        "commands": command_rows,
+        "commands": command_rows_data,
         "activity": activity,
         "recent": recent_events,
         "detailed": bool(detailed),
@@ -412,9 +412,9 @@ def stats_data(
         "command_chains": chains,
         "failures_detail": failures_detail,
         "output_profiles": output_profiles,
-        "search_format_usage": search_format_usage,
-        "cohort_comparison": cohort_comparison,
-        "retry_behavior": retry_behavior,
+        "search_format_usage": search_format_data,
+        "cohort_comparison": cohort_data,
+        "retry_behavior": retry_data,
         "error_categories": dict(error_categories),
         "repositories": [
             {"name": name, "events": count} for name, count in repos.most_common(10)
@@ -504,10 +504,10 @@ def _presentation_row(
 
 def _stats_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the prioritized findings shown by the detailed stats view."""
-    project = data.get("project_commands") or {}
-    measured = data.get("measurement") or {}
-    reads = data.get("reads") or {}
-    verification = data.get("verification") or {}
+    project: dict[str, Any] = dict_field(data, "project_commands")
+    measured: dict[str, Any] = dict_field(data, "measurement")
+    reads: dict[str, Any] = dict_field(data, "reads")
+    verification: dict[str, Any] = dict_field(data, "verification")
     total_calls = int(data.get("events", 0))
     findings: list[dict[str, Any]] = []
 
@@ -525,18 +525,18 @@ def _stats_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
         failure_rows = sorted(
             (row for row in data.get("commands", []) if int(row.get("tool_errors", 0))),
             key=lambda row: (
-                -float(_percent(int(row["tool_errors"]), int(row["calls"])) or 0),
+                -float(percent(int(row["tool_errors"]), int(row["calls"])) or 0),
                 str(row["command"]),
             ),
         )
         rates = ", ".join(
-            f"{row['command']} {_pct(_percent(int(row['tool_errors']), int(row['calls'])))}"
+            f"{row['command']} {_pct(percent(int(row['tool_errors']), int(row['calls'])))}"
             for row in failure_rows[:3]
         )
         finding(
             10,
             "WARN",
-            f"Failures: {tool_errors}/{total_calls} ({_pct(_percent(tool_errors, total_calls))})"
+            f"Failures: {tool_errors}/{total_calls} ({_pct(percent(tool_errors, total_calls))})"
             + (f", top: {rates}" if rates else ""),
         )
 
@@ -560,7 +560,7 @@ def _stats_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
         finding(
             40,
             "REVIEW",
-            f"Same-task rereads: {reread_lines:,}/{tracked_lines:,} lines ({_pct(_percent(reread_lines, tracked_lines))}), "
+            f"Same-task rereads: {reread_lines:,}/{tracked_lines:,} lines ({_pct(percent(reread_lines, tracked_lines))}), "
             f"fully covered: {int(reads.get('fully_redundant_ranges', 0)):,}/{int(reads.get('ranges', 0)):,} ranges",
         )
 
@@ -583,8 +583,8 @@ def _stats_findings(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _health_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the health section rows."""
-    project = data.get("project_commands") or {}
-    verification = data.get("verification") or {}
+    project: dict[str, Any] = dict_field(data, "project_commands")
+    verification: dict[str, Any] = dict_field(data, "verification")
     total_calls = int(data.get("events", 0))
     tool_errors = int(data.get("tool_errors", 0))
     project_failed = int(project.get("failed", 0)) + int(project.get("timed_out", 0))
@@ -677,9 +677,9 @@ def _health_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _output_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the output section rows."""
-    measured = data.get("measurement") or {}
-    cohort = data.get("cohort_comparison") or {}
-    search_formats = data.get("search_format_usage") or {}
+    measured: dict[str, Any] = dict_field(data, "measurement")
+    cohort: dict[str, Any] = dict_field(data, "cohort_comparison")
+    search_formats: dict[str, Any] = dict_field(data, "search_format_usage")
     total_calls = int(data.get("events", 0))
     candidate_calls = int(measured.get("instrumented_calls", 0))
     output_rows = [
@@ -721,8 +721,8 @@ def _output_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
         ),
     ]
     if cohort.get("available"):
-        current_cohort = cohort.get("current") or {}
-        previous_cohort = cohort.get("previous") or {}
+        current_cohort: dict[str, Any] = dict_field(cohort, "current")
+        previous_cohort: dict[str, Any] = dict_field(cohort, "previous")
         output_rows.append(
             _presentation_row(
                 "Comparable cohort",
@@ -747,7 +747,7 @@ def _output_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             output_rows.append(_presentation_row("Efficiency change", "-"))
     if int(search_formats.get("calls", 0)):
-        formats = search_formats.get("formats") or {}
+        formats: dict[str, Any] = dict_field(search_formats, "formats")
         output_rows.append(
             _presentation_row(
                 "Search formats",
@@ -760,7 +760,7 @@ def _output_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _reading_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the reading section rows."""
-    reads = data.get("reads") or {}
+    reads: dict[str, Any] = dict_field(data, "reads")
     reread_lines = int(reads.get("same_context_overlap_lines", 0))
     tracked_lines = int(reads.get("total_lines", 0))
     read_calls = int(reads.get("calls", 0))
@@ -769,7 +769,7 @@ def _reading_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     else:
         activity_value = "none"
     if tracked_lines:
-        reread_value = f"{reread_lines:,}/{tracked_lines:,} lines ({_pct(_percent(reread_lines, tracked_lines))})"
+        reread_value = f"{reread_lines:,}/{tracked_lines:,} lines ({_pct(percent(reread_lines, tracked_lines))})"
     else:
         reread_value = "-"
     read_ranges = int(reads.get("ranges", 0))
@@ -796,7 +796,7 @@ def _reading_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _workflow_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the workflow section rows."""
-    tasks = data.get("tasks") or {}
+    tasks: dict[str, Any] = dict_field(data, "tasks")
     total_calls = int(data.get("events", 0))
     accepted = int(tasks.get("accepted", 0))
     task_bits = [f"{accepted} accepted", f"{int(tasks.get('active', 0))} active"]
@@ -826,8 +826,8 @@ def _workflow_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
                 f"{tasks.get('calls_per_accepted_task')} calls, ~{_compact_int(int(tasks.get('token_proxy_per_accepted_task', 0)))} tokens",
             )
         )
-        calls_dist = tasks.get("calls_distribution") or {}
-        output_dist = tasks.get("visible_chars_distribution") or {}
+        calls_dist: dict[str, Any] = dict_field(tasks, "calls_distribution")
+        output_dist: dict[str, Any] = dict_field(tasks, "visible_chars_distribution")
         if calls_dist.get("p50") is not None:
             workflow_rows.append(
                 _presentation_row(
@@ -855,7 +855,7 @@ def _operation_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
             "calls": int(row.get("calls", 0)),
             "failures": int(row.get("tool_errors", 0)),
             "failure_rate": _pct(
-                _percent(int(row.get("tool_errors", 0)), int(row.get("calls", 0)))
+                percent(int(row.get("tool_errors", 0)), int(row.get("calls", 0)))
             ),
             "p50": _duration(int(row.get("median_ms", 0))),
             "output": human_bytes(int(row.get("visible_chars", 0))),
@@ -882,9 +882,9 @@ def _output_attribution_section(
     ]
     if not profile_rows:
         return None
-    attribution_rows = []
+    attribution_rows: list[dict[str, Any]] = []
     for row in profile_rows[:16]:
-        attribution = row.get("output_attribution") or {}
+        attribution: dict[str, Any] = dict_field(row, "output_attribution")
         parts = [
             f"evidence {human_bytes(int(attribution.get('unique_evidence_chars', 0)))}",
             f"duplicate {human_bytes(int(attribution.get('duplicate_evidence_chars', 0)))}",
@@ -905,15 +905,17 @@ def _output_attribution_section(
 
 def _cohort_detail_section(cohort: dict[str, Any]) -> dict[str, Any] | None:
     """Build the comparable seven-day cohort detail section."""
-    cohort_rows = cohort.get("rows") or []
+    cohort_rows: list[Any] = list_field(cohort, "rows")
+    current: dict[str, Any] = dict_field(cohort, "current")
+    previous: dict[str, Any] = dict_field(cohort, "previous")
     if not cohort.get("available") or not (
         cohort_rows
-        or int((cohort.get("current") or {}).get("calls", 0))
-        or int((cohort.get("previous") or {}).get("calls", 0))
+        or int(current.get("calls", 0))
+        or int(previous.get("calls", 0))
     ):
         return None
-    current_excluded = (cohort.get("current") or {}).get("excluded") or {}
-    previous_excluded = (cohort.get("previous") or {}).get("excluded") or {}
+    current_excluded: dict[str, Any] = dict_field(current, "excluded")
+    previous_excluded: dict[str, Any] = dict_field(previous, "excluded")
     comparison_rows = [
         _presentation_row(
             "Current exclusions",
@@ -1078,15 +1080,14 @@ def _semantic_navigation_section(
     """Build the semantic navigation detail section."""
     if not navigation.get("semantic_calls"):
         return None
+    semantic_sources: dict[str, Any] = dict_field(navigation, "semantic_sources")
     navigation_rows = [
         _presentation_row(
             "Semantic calls",
             f"{int(navigation['semantic_calls'])} calls, {int(navigation.get('semantic_ambiguous', 0))} ambiguous, sources: "
             + ", ".join(
                 f"{name} {count}"
-                for name, count in sorted(
-                    (navigation.get("semantic_sources") or {}).items()
-                )
+                for name, count in sorted(semantic_sources.items())
             ),
         )
     ]
@@ -1198,23 +1199,24 @@ def _detail_sections(
     data: dict[str, Any], operations: list[dict[str, Any]], *, utc: bool
 ) -> list[dict[str, Any]]:
     """Build the optional detail sections for the stats presentation model."""
-    reads = data.get("reads") or {}
-    cohort = data.get("cohort_comparison") or {}
-    navigation = data.get("navigation") or {}
-    retry = data.get("retry_behavior") or {}
-    verification = data.get("verification") or {}
-    tasks = data.get("tasks") or {}
+    reads: dict[str, Any] = dict_field(data, "reads")
+    cohort: dict[str, Any] = dict_field(data, "cohort_comparison")
+    navigation: dict[str, Any] = dict_field(data, "navigation")
+    retry: dict[str, Any] = dict_field(data, "retry_behavior")
+    verification: dict[str, Any] = dict_field(data, "verification")
+    tasks: dict[str, Any] = dict_field(data, "tasks")
+    output_profiles: list[Any] = list_field(data, "output_profiles")
     candidates = [
-        _output_attribution_section(data.get("output_profiles") or []),
+        _output_attribution_section(output_profiles),
         _cohort_detail_section(cohort),
         _retry_section(retry) if data.get("detailed") else None,
-        _failure_section((data.get("failures_detail") or {}).get("rows") or []),
+        _failure_section((dict_field(data, "failures_detail")).get("rows") or []),
         _output_contributors_section(operations),
         _reading_contributors_section(reads),
         _semantic_navigation_section(navigation),
-        _command_chains_section(data.get("command_chains") or []),
-        _accepted_tasks_section(tasks.get("accepted_tasks") or []),
-        _verification_scope_section(verification.get("scope_rows") or []),
+        _command_chains_section(list_field(data, "command_chains")),
+        _accepted_tasks_section(list_field(tasks, "accepted_tasks")),
+        _verification_scope_section(list_field(verification, "scope_rows")),
         _recent_section(data, utc=utc),
     ]
     return [section for section in candidates if section is not None]
@@ -1256,8 +1258,8 @@ def _ansi(text: str, code: str, enabled: bool) -> str:
 def _render_segments(row: dict[str, Any], *, ansi: bool) -> str:
     if not ansi:
         return str(row["value"])
-    parts = []
-    for segment in row.get("segments", []):
+    parts: list[str] = []
+    for segment in list_field(row, "segments"):
         text = str(segment.get("text", ""))
         style = str(segment.get("style", ""))
         colour = next(

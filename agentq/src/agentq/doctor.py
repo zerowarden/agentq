@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agentq import VERSION
-from agentq.core import telemetry_enabled
+from agentq.core import dict_field, telemetry_enabled
 from agentq.tooling import find_executable, tool_version
 
 TOOLS = [
@@ -68,8 +68,8 @@ def _skill_installation_state() -> dict[str, Any]:
 def doctor_data(root: Path) -> dict[str, Any]:
     from .telemetry import archive_file, hot_file
 
-    items = []
-    missing_required = []
+    items: list[dict[str, Any]] = []
+    missing_required: list[str] = []
     for name, required, purpose in TOOLS:
         exe = find_executable(name)
         item = {
@@ -115,7 +115,7 @@ def render_doctor(data: dict[str, Any], *, budget: int = 0) -> str:
         f"telemetry hot: {data['telemetry']['hot']}",
         f"stats renderer: {data['stats_renderer']}",
     ]
-    installation = data.get("installation") or {}
+    installation: dict[str, Any] = dict_field(data, "installation")
     if installation:
         path_match = installation.get("path_matches_runtime")
         path_state = (

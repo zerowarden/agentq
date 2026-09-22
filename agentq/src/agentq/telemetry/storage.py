@@ -12,10 +12,10 @@ except ImportError:
 import json
 import os
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import secure_dir, telemetry_hot_dir
 from agentq.output_attribution import empty_attribution
@@ -35,7 +35,7 @@ def hot_file() -> Path:
 
 
 @contextmanager
-def _telemetry_lock() -> Iterator[None]:
+def telemetry_lock() -> Generator[None]:
     path = secure_dir(hot_dir()) / "telemetry.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT, stat.S_IRUSR | stat.S_IWUSR)
     try:
@@ -84,7 +84,7 @@ def _event_payload(event: dict[str, Any]) -> bytes:
     return (payload + "\n").encode("utf-8")
 
 
-def _append_jsonl_many_unlocked(path: Path, events: Iterable[dict[str, Any]]) -> int:
+def append_jsonl_many_unlocked(path: Path, events: Iterable[dict[str, Any]]) -> int:
     secure_dir(path.parent)
     _rotate_hot(path) if path == hot_file() else None
     fd = os.open(
@@ -104,17 +104,17 @@ def _append_jsonl_many_unlocked(path: Path, events: Iterable[dict[str, Any]]) ->
     return count
 
 
-def _append_jsonl(path: Path, event: dict[str, Any]) -> None:
-    with _telemetry_lock():
-        _append_jsonl_many_unlocked(path, [event])
+def append_jsonl(path: Path, event: dict[str, Any]) -> None:
+    with telemetry_lock():
+        append_jsonl_many_unlocked(path, [event])
 
 
 def mapping_field(value: Any) -> dict[str, Any]:
     """The dictionary view of a decoded event field, or an empty dictionary."""
-    return value if isinstance(value, dict) else {}
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
-def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
+def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     schema = int(event.get("schema", 1))
     if schema == SCHEMA:
         normalized = dict(event)
@@ -260,7 +260,7 @@ def _compact_stats_event(event: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _iter_jsonl(
+def iter_jsonl(
     path: Path,
     *,
     cutoff: float | None = None,
@@ -274,12 +274,14 @@ def _iter_jsonl(
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
+                decoded = cast("dict[str, Any]", event)
                 if (
-                    isinstance(event, dict)
-                    and event.get("id")
-                    and int(event.get("schema", 1)) in ACCEPTED_SCHEMAS
+                    decoded.get("id")
+                    and int(decoded.get("schema", 1)) in ACCEPTED_SCHEMAS
                 ):
-                    normalized = _normalize_event(event)
+                    normalized = normalize_event(decoded)
                     if cutoff is not None and float(normalized.get("time", 0)) < cutoff:
                         continue
                     if (
@@ -314,7 +316,7 @@ def load_events(
     sources: dict[str, int] = {}
     for path in paths:
         count = 0
-        for event in _iter_jsonl(
+        for event in iter_jsonl(
             path,
             cutoff=cutoff,
             repository_id=repository_id,

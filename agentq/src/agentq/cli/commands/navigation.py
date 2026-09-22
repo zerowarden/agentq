@@ -14,7 +14,7 @@ from ..parser import build_parser
 from ..registry import Outcome
 
 
-def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
+def run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.navigation import TypeScriptNavRequest, render_ts_nav, ts_nav
 
     action = {
@@ -66,13 +66,11 @@ def _run_ts_nav(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, data, render_ts_nav, result=nav.with_wire_continuation(data))
 
 
-def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
+def run_continue(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.continuations import (
-        ArtifactPage,
         QueryFollowUp,
         dispatch_argv,
         load_cursor,
-        resolve_page_handler,
     )
     from agentq.core import ContractError
 
@@ -82,14 +80,6 @@ def _run_continue(args: argparse.Namespace, root: Path) -> Outcome:
     if resolved is None:
         raise AgentQError(f"unknown or expired continuation cursor: {args.cursor}")
     record = resolved.record
-    if isinstance(record, ArtifactPage):
-        handler = resolve_page_handler(record.operation)
-        if handler is None:
-            raise AgentQError(
-                f"artifact page continuation for {record.operation!r} is not "
-                "available; rerun the original command"
-            )
-        return handler(args, root, record)
     if isinstance(record, QueryFollowUp) and record.guard is not None:
         _validate_follow_up_source(root, record)
     try:
@@ -115,7 +105,7 @@ def _validate_follow_up_source(root: Path, record: QueryFollowUp) -> None:
     validate_diff_guard(root, record.request, guard)
 
 
-def _run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
+def run_inspect(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.navigation import InspectRequest, inspect, render_inspect
 
     def produce():

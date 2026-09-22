@@ -28,28 +28,27 @@ from agentq.discovery import (
 )
 from agentq.requests import search_options_from_args
 
-from ..emit import emit, emit_cached
+from ..emit import emit, emit_cached, invocation_request_id
 from ..registry import Outcome
 
 
-def _run_doctor(args: argparse.Namespace, root: Path) -> Outcome:
+def run_doctor(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.doctor import doctor_data, render_doctor
 
     return emit(args, doctor_data(root), render_doctor)
 
 
-def _run_task(args: argparse.Namespace, root: Path) -> Outcome:
+def run_task(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.tasking import render_task, task_data
 
     return emit(args, task_data(root, args.action), render_task)
 
 
-def _run_stats(args: argparse.Namespace, root: Path) -> Outcome:
+def run_stats(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.delivery import (
         DeliveryContext,
         RenderedOutput,
         finalize_output,
-        request_identity,
     )
     from agentq.telemetry import (
         archive_hot_events,
@@ -115,9 +114,7 @@ def _run_stats(args: argparse.Namespace, root: Path) -> Outcome:
         data,
         rendered=RenderedOutput(visible=""),
         context=DeliveryContext(
-            request_id=request_identity(
-                "stats", str(args.repo), args.format, args.budget
-            ),
+            request_id=invocation_request_id(args),
             repo_id=None,
             record_receipt=False,
         ),
@@ -164,7 +161,7 @@ def _watch_stats(
     )
 
 
-def _run_files(args: argparse.Namespace, root: Path) -> Outcome:
+def run_files(args: argparse.Namespace, root: Path) -> Outcome:
     result = files(
         FilesRequest(
             root=root,
@@ -177,7 +174,7 @@ def _run_files(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, result.to_wire(), render_files, result=result)
 
 
-def _run_search(args: argparse.Namespace, root: Path) -> Outcome:
+def run_search(args: argparse.Namespace, root: Path) -> Outcome:
     from agentq.core import resolve_repo_path
 
     trailing_paths: list[str] = []
@@ -271,7 +268,7 @@ def _run_search(args: argparse.Namespace, root: Path) -> Outcome:
     )
 
 
-def _run_read(args: argparse.Namespace, root: Path) -> Outcome:
+def run_read(args: argparse.Namespace, root: Path) -> Outcome:
     if (args.line_anchors or args.line_ranges) and (
         args.start is not None or args.end is not None or args.around is not None
     ):
@@ -303,7 +300,7 @@ def _run_read(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, wire, render_read, root=root, result=result)
 
 
-def _run_repo_map(args: argparse.Namespace, root: Path) -> Outcome:
+def run_repo_map(args: argparse.Namespace, root: Path) -> Outcome:
     result = repo_map(
         RepoMapRequest(
             root=root, max_dirs=args.max_dirs, max_manifests=args.max_manifests
@@ -312,7 +309,7 @@ def _run_repo_map(args: argparse.Namespace, root: Path) -> Outcome:
     return emit(args, result.to_wire(), render_repo_map, result=result)
 
 
-def _run_outline(args: argparse.Namespace, root: Path) -> Outcome:
+def run_outline(args: argparse.Namespace, root: Path) -> Outcome:
     request = OutlineRequest(
         root=root,
         paths=tuple(args.paths),

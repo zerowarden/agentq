@@ -3,29 +3,53 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 from agentq.core import relpath
-from agentq.workspace import ChangeSet, DependencyGraph, Package, manifest_units
+from agentq.workspace import (
+    ChangeSet,
+    ProjectUnit,
+    PythonTooling,
+    UnitId,
+    discover_python,
+    matches_pattern,
+)
 
-from ..models import CheckKind, CheckSpec, ProviderPlan, VerifyConfig
+from ..models import CheckKind, CheckSpec, PackageRow, ProviderPlan, VerifyConfig
 from ..planning import (
     candidate_tests as candidate_test_files,
 )
 from ..planning import (
-    dependency_name,
     dependent_depth,
     group_by_units,
     make_check,
     package_row,
-    read_toml,
     sorted_checks,
 )
 
 PY_TEST_RE = re.compile(r"(?:^|/)test_[^/]+\.py$|(?:^|/)[^/]+_test\.py$", re.I)
+PY_CONTRACT_NAMES = frozenset({"__init__.py", "__main__.py", "py.typed"})
+
+
+def _python_contract_changed(changes: ChangeSet, config: VerifyConfig) -> bool:
+    """Python-owned public surface detection: package entry points and typing.
+
+    ``__init__.py`` is where a Python package re-exports its public API and
+    ``py.typed`` declares the distribution as typed, so both can change the
+    surface dependents rely on. Configured patterns widen the predicate.
+    """
+    for path in changes.files:
+        normalized = path.replace("\\", "/").lower()
+        if PurePosixPath(normalized).name in PY_CONTRACT_NAMES:
+            return True
+        if any(
+            matches_pattern(normalized.strip("/"), pattern)
+            for pattern in config.contract_patterns
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -58,39 +82,36 @@ class PythonVerificationProvider:
         mode: str,
         dependents: str,
         include_build: bool,
-        contract_changed: bool,
         config: VerifyConfig,
     ) -> ProviderPlan:
-        packages, tooling = self._packages(root, repo_files)
-        graph = DependencyGraph.from_packages(packages)
+        contract_changed = _python_contract_changed(changes, config)
+        workspace = discover_python(root, repo_files)
+        graph = workspace.graph
+        units = graph.units
         depth = dependent_depth(mode, dependents)
-        grouped, unowned = group_by_units(changes.files, packages, config)
-        direct_changed_keys = set(grouped)
+        grouped, unowned = group_by_units(changes.files, units, config)
+        direct_changed = set(grouped)
         docs_only = changes.docs_only
-        distances = (
-            {}
-            if depth == 0
-            else graph.dependents(set(direct_changed_keys), depth=depth)
-        )
-        ordered = graph.dependency_order(set(direct_changed_keys) | set(distances))
-        order_rank = {key: index for index, key in enumerate(ordered)}
+        distances = {} if depth == 0 else graph.dependents(direct_changed, depth=depth)
+        ordered = graph.dependency_order(direct_changed | set(distances))
+        order_rank = {unit_id.path: index for index, unit_id in enumerate(ordered)}
 
-        rows = []
+        rows: list[PackageRow] = []
         checks: list[CheckSpec] = []
-        for key in ordered:
-            package = packages[key]
-            unit_dir = root if key == "." else root / key
-            owned_files = sorted(grouped.get(key, []))
+        for unit_id in ordered:
+            unit = units[unit_id]
+            unit_dir = root if unit_id.path == "." else root / unit_id.path
+            owned_files = sorted(grouped.get(unit_id, []))
             local_files = [relpath(unit_dir, root / path) for path in owned_files]
-            scope = "changed" if key in direct_changed_keys else "dependent"
-            distance = int(distances.get(key, 0))
+            scope = "changed" if unit_id in direct_changed else "dependent"
+            distance = int(distances.get(unit_id, 0))
             facts = self._unit_facts(
-                key, root, unit_dir, local_files, owned_files, repo_files
+                unit_id, root, unit_dir, local_files, owned_files, repo_files
             )
             rows.append(
                 package_row(
-                    package.name,
-                    key,
+                    unit.name,
+                    unit_id.path,
                     scope,
                     distance,
                     local_files,
@@ -102,12 +123,12 @@ class PythonVerificationProvider:
                 continue
             checks.extend(
                 self._unit_checks(
-                    package,
-                    key,
+                    unit,
+                    unit_id,
                     scope,
                     distance,
                     facts,
-                    tooling.get(key, {}),
+                    workspace.tooling[unit_id],
                     mode,
                     contract_changed,
                     limit,
@@ -134,74 +155,22 @@ class PythonVerificationProvider:
             global_changes=(),
             unowned=tuple(unowned),
             changed_packages=tuple(
-                sorted(packages[key].name for key in direct_changed_keys)
+                sorted(units[unit_id].name for unit_id in direct_changed)
             ),
-            dependent_packages=tuple(sorted(packages[key].name for key in distances)),
-            affected_packages=tuple(
-                packages[key].name for key in ordered if key in packages
+            dependent_packages=tuple(
+                sorted(units[unit_id].name for unit_id in distances)
             ),
+            affected_packages=tuple(units[unit_id].name for unit_id in ordered),
             packages=tuple(rows),
             checks=sorted_checks(checks, order_rank),
             notes=tuple(notes),
-            workspace_packages=len(packages),
-            workspace_edges=graph.edges(),
+            workspace_packages=len(units),
+            workspace_edges=graph.edge_count(),
         )
-
-    def _packages(
-        self, root: Path, repo_files: Sequence[str]
-    ) -> tuple[dict[str, Package], dict[str, dict[str, bool]]]:
-        units: dict[str, Package] = {}
-        tooling: dict[str, dict[str, bool]] = {}
-        declared_by_name: dict[str, set[str]] = {}
-        for manifest in manifest_units(root, repo_files, "pyproject.toml"):
-            key = manifest.key
-            obj = read_toml(manifest.path)
-            project_raw = obj.get("project")
-            project: dict[str, Any] = project_raw if isinstance(project_raw, dict) else {}
-            name = str(
-                project.get("name")
-                or (root.name if key == "." else PurePosixPath(key).name)
-            )
-            tools_raw = obj.get("tool")
-            tools: dict[str, Any] = tools_raw if isinstance(tools_raw, dict) else {}
-            declared = {
-                dependency_name(item)
-                for item in (project.get("dependencies") or [])
-                if isinstance(item, str)
-            }
-            optional = project.get("optional-dependencies")
-            if isinstance(optional, dict):
-                for group in optional.values():
-                    declared.update(
-                        dependency_name(item)
-                        for item in group
-                        if isinstance(item, str)
-                    )
-            declared_by_name[name] = declared
-            tooling[key] = {
-                "pytest": "pytest" in tools or "pytest" in declared,
-                "mypy": "mypy" in tools,
-                "pyright": "pyright" in tools,
-                "ruff": "ruff" in tools,
-            }
-            units[key] = Package(path=key, name=name)
-        by_name = {package.name: key for key, package in units.items()}
-        packages = {
-            key: replace(
-                package,
-                dependencies=frozenset(
-                    dependency
-                    for dependency in declared_by_name.get(package.name, set())
-                    if by_name.get(dependency) not in (None, key)
-                ),
-            )
-            for key, package in units.items()
-        }
-        return packages, tooling
 
     def _unit_facts(
         self,
-        key: str,
+        unit_id: UnitId,
         root: Path,
         unit_dir: Path,
         local_files: Sequence[str],
@@ -220,7 +189,7 @@ class PythonVerificationProvider:
             if owned_files
             else ()
         )
-        unit_prefix = "" if key == "." else key.rstrip("/") + "/"
+        unit_prefix = "" if unit_id.path == "." else unit_id.path.rstrip("/") + "/"
         return _PythonUnitFacts(
             source_files=tuple(
                 path
@@ -243,12 +212,12 @@ class PythonVerificationProvider:
 
     def _unit_checks(
         self,
-        package: Package,
-        key: str,
+        unit: ProjectUnit,
+        unit_id: UnitId,
         scope: str,
         distance: int,
         facts: _PythonUnitFacts,
-        tools: Mapping[str, bool],
+        tools: PythonTooling,
         mode: str,
         contract_changed: bool,
         limit: int,
@@ -261,12 +230,12 @@ class PythonVerificationProvider:
             "discover",
             "-q",
             "-s",
-            "." if key == "." else key,
+            "." if unit_id.path == "." else unit_id.path,
         ]
         if scope == "changed":
             checks = self._changed_python_checks(
-                package,
-                key,
+                unit,
+                unit_id,
                 facts,
                 tools,
                 pytest_argv,
@@ -275,8 +244,8 @@ class PythonVerificationProvider:
             )
         else:
             checks = self._dependent_python_checks(
-                package,
-                key,
+                unit,
+                unit_id,
                 distance,
                 tools,
                 pytest_argv,
@@ -289,35 +258,35 @@ class PythonVerificationProvider:
             )
         return [
             *checks,
-            *self._checker_checks(package, key, scope, distance, tools),
+            *self._checker_checks(unit, unit_id, scope, distance, tools),
         ]
 
     def _changed_python_checks(
         self,
-        package: Package,
-        key: str,
+        unit: ProjectUnit,
+        unit_id: UnitId,
         facts: _PythonUnitFacts,
-        tools: Mapping[str, bool],
+        tools: PythonTooling,
         pytest_argv: list[str],
         unittest_argv: list[str],
         limit: int,
     ) -> list[CheckSpec]:
+        key = unit_id.path
         checks: list[CheckSpec] = []
-        if tools.get("pytest") and facts.changed_tests:
+        if tools.pytest and facts.changed_tests:
             checks.append(
                 make_check(
                     kind=CheckKind.DIRECT_TESTS,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=[*pytest_argv, *facts.changed_tests[:limit], "-q"],
                     reason="changed test files are the earliest falsifying check",
-                    priority=10,
                     scope="changed",
                 )
             )
         if (
-            tools.get("pytest")
+            tools.pytest
             and facts.source_files
             and not facts.config_changed
             and facts.candidate_tests
@@ -325,22 +294,21 @@ class PythonVerificationProvider:
             checks.append(
                 make_check(
                     kind=CheckKind.CANDIDATE_TESTS,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=[*pytest_argv, *facts.candidate_tests[:limit], "-q"],
                     reason="candidate tests share module names with changed files",
-                    priority=25,
                     scope="changed",
                 )
             )
-        if tools.get("pytest") and (
+        if tools.pytest and (
             facts.config_changed or not facts.source_files or not facts.candidate_tests
         ):
             checks.append(
                 make_check(
                     kind=CheckKind.PACKAGE_TESTS,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=[*pytest_argv, "-q"],
@@ -348,15 +316,14 @@ class PythonVerificationProvider:
                         "focused selection was not possible, so the package suite "
                         "is planned"
                     ),
-                    priority=30,
                     scope="changed",
                 )
             )
-        elif not tools.get("pytest") and facts.test_files_exist:
+        elif not tools.pytest and facts.test_files_exist:
             checks.append(
                 make_check(
                     kind=CheckKind.PACKAGE_TESTS,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=unittest_argv,
@@ -364,7 +331,6 @@ class PythonVerificationProvider:
                         "pytest is not configured; unittest discovery covers the "
                         "unit's test files"
                     ),
-                    priority=30,
                     scope="changed",
                 )
             )
@@ -372,33 +338,30 @@ class PythonVerificationProvider:
 
     def _dependent_python_checks(
         self,
-        package: Package,
-        key: str,
+        unit: ProjectUnit,
+        unit_id: UnitId,
         distance: int,
-        tools: Mapping[str, bool],
+        tools: PythonTooling,
         pytest_argv: list[str],
         unittest_argv: list[str],
         test_files_exist: bool,
         *,
         run_tests: bool,
     ) -> list[CheckSpec]:
-        if not run_tests or not (tools.get("pytest") or test_files_exist):
+        if not run_tests or not (tools.pytest or test_files_exist):
             return []
-        command = (
-            [*pytest_argv, "-q"] if tools.get("pytest") else list(unittest_argv)
-        )
+        command = [*pytest_argv, "-q"] if tools.pytest else list(unittest_argv)
         return [
             make_check(
                 kind=CheckKind.DEPENDENT_TESTS,
-                package=package.name,
-                package_key=key,
-                cwd=key,
+                package=unit.name,
+                package_key=unit_id.path,
+                cwd=unit_id.path,
                 command=command,
                 reason=(
                     "a dependent package may encode expectations of the changed "
                     "public contract"
                 ),
-                priority=50,
                 scope="dependent",
                 distance=distance,
             )
@@ -406,56 +369,52 @@ class PythonVerificationProvider:
 
     def _checker_checks(
         self,
-        package: Package,
-        key: str,
+        unit: ProjectUnit,
+        unit_id: UnitId,
         scope: str,
         distance: int,
-        tools: Mapping[str, bool],
+        tools: PythonTooling,
     ) -> list[CheckSpec]:
         dependent = scope != "changed"
-        priority = 45 if dependent else 40
         kind = CheckKind.DEPENDENT_TYPECHECK if dependent else CheckKind.TYPECHECK
-        lint_priority = 65 if dependent else 60
         lint_kind = CheckKind.DEPENDENT_LINT if dependent else CheckKind.LINT
+        key = unit_id.path
         checks: list[CheckSpec] = []
-        if tools.get("mypy"):
+        if tools.mypy:
             checks.append(
                 make_check(
                     kind=kind,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=["python3", "-m", "mypy", "."],
                     reason="mypy is configured in pyproject.toml",
-                    priority=priority,
                     scope=scope,
                     distance=distance,
                 )
             )
-        if tools.get("pyright"):
+        if tools.pyright:
             checks.append(
                 make_check(
                     kind=kind,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=["pyright"],
                     reason="pyright is configured in pyproject.toml",
-                    priority=priority,
                     scope=scope,
                     distance=distance,
                 )
             )
-        if tools.get("ruff"):
+        if tools.ruff:
             checks.append(
                 make_check(
                     kind=lint_kind,
-                    package=package.name,
+                    package=unit.name,
                     package_key=key,
                     cwd=key,
                     command=["ruff", "check", "."],
                     reason="ruff is configured in pyproject.toml",
-                    priority=lint_priority,
                     scope=scope,
                     distance=distance,
                 )

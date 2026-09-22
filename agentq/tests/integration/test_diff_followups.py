@@ -17,7 +17,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from agentq.core import AgentQError, ContractError
@@ -351,9 +350,7 @@ class DiffFollowUpHarness(unittest.TestCase):
             return stopped
 
         with mock.patch.dict(os.environ, self.env, clear=False):
-            with mock.patch(
-                "agentq.git.diff._stream_diff", side_effect=racing_stream
-            ):
+            with mock.patch("agentq.git.diff._stream_diff", side_effect=racing_stream):
                 result = git_diff(
                     DiffRequest(
                         root=self.repo,
@@ -369,9 +366,9 @@ class DiffFollowUpHarness(unittest.TestCase):
         self.assertTrue(all(hunk.follow_up is None for hunk in result.hunks or ()))
 
 
-class ArtifactStorageTests(unittest.TestCase):
+class FollowUpStorageTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(prefix="agentq-artifact-")
+        self.temp = tempfile.TemporaryDirectory(prefix="agentq-followup-")
         self.base = Path(self.temp.name)
         self.env = {
             "AGENTQ_STATE_DB": str(self.base / "state.db"),
@@ -380,40 +377,6 @@ class ArtifactStorageTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
-
-    def test_artifact_round_trip_size_limit_and_expiry(self) -> None:
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            from agentq import continuations
-
-            payload = b"retained evidence"
-            self.assertTrue(continuations.store_artifact("repo1", "a1", payload))
-            self.assertEqual(continuations.load_artifact("repo1", "a1"), payload)
-            self.assertFalse(
-                continuations.store_artifact("repo1", "big", b"x" * 100, max_bytes=10)
-            )
-            self.assertTrue(
-                continuations.store_artifact(
-                    "repo1", "short", payload, now=100.0, ttl_seconds=5
-                )
-            )
-            self.assertIsNone(continuations.load_artifact("repo1", "short", now=200.0))
-
-    def test_artifact_quota_evicts_oldest_payloads(self) -> None:
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            from agentq import continuations
-
-            for index in range(3):
-                self.assertTrue(
-                    continuations.store_artifact(
-                        "repo2",
-                        f"a{index}",
-                        b"x" * 40,
-                        now=100.0 + index,
-                        quota_bytes=80,
-                    )
-                )
-            self.assertIsNone(continuations.load_artifact("repo2", "a0", now=200.0))
-            self.assertIsNotNone(continuations.load_artifact("repo2", "a2", now=200.0))
 
     def test_disabled_context_storage_keeps_a_literal_display_command(self) -> None:
         env = {**self.env, "AGENTQ_CONTEXT_CACHE": "0"}
@@ -435,39 +398,6 @@ class ArtifactStorageTests(unittest.TestCase):
 
         self.assertNotIn("cursor", block)
         self.assertIn("agentq git-diff --staged", block["command"])
-
-    def test_artifact_page_cursor_dispatches_through_the_page_handler(self) -> None:
-        env = {**self.env, "AGENTQ_STATE_DB": str(self.base / "page.db")}
-        seen: list = []
-
-        def handler(args, root, page):
-            seen.append((root, page))
-            return 0
-
-        with mock.patch.dict(os.environ, env, clear=False):
-            from agentq import continuations
-            from agentq.cli.commands import navigation as navigation_commands
-
-            block = continuations.artifact_page_block(
-                artifact_id="artifact1",
-                position=4,
-                request_id="request1",
-                operation="search",
-                repo_id_value="repo",
-                worktree_id="worktree",
-            )
-            stored = continuations.store_block(self.base, block)
-            self.assertIsNotNone(stored)
-            assert stored is not None
-            continuations.register_page_handler("search", handler)
-            outcome = navigation_commands._run_continue(
-                SimpleNamespace(cursor=stored.cursor), self.base
-            )
-
-        self.assertEqual(outcome, 0)
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0][1].position, 4)
-        self.assertEqual(seen[0][1].artifact_id, "artifact1")
 
 
 class ContinuationRecordTests(unittest.TestCase):
@@ -513,7 +443,9 @@ class ContinuationRecordTests(unittest.TestCase):
             from agentq import persistence as persistence_module
 
             self.assertIsNone(
-                persistence_module.load_continuation("repo", "ctx", "abcd1234", now=time.time())
+                persistence_module.load_continuation(
+                    "repo", "ctx", "abcd1234", now=time.time()
+                )
             )
             columns = {
                 row[1]
@@ -585,7 +517,9 @@ class ContinuationRecordTests(unittest.TestCase):
         from agentq.core import OperationRequest
 
         record = self._search_record()
-        self.assertEqual(continuations.QueryFollowUp.from_wire(record.to_wire()), record)
+        self.assertEqual(
+            continuations.QueryFollowUp.from_wire(record.to_wire()), record
+        )
         command = continuations.display_command(record)
         self.assertTrue(command is not None and command.startswith("agentq search"))
         with self.assertRaises(ContractError):

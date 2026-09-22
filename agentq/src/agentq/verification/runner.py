@@ -6,6 +6,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentq.core import (
+    COMPLETE,
+    EXECUTION_INCOMPLETE,
+    PARTIAL,
+    SAMPLED,
+    STEP_LIMIT,
+    Coverage,
+    typed_coverage,
+)
 from agentq.execution import RunProfile, RunRequest, RunResult, run
 
 from .models import (
@@ -15,6 +24,7 @@ from .models import (
     CheckStatus,
     VerificationPlan,
     VerificationRun,
+    VerificationSelection,
     VerificationStatus,
 )
 
@@ -38,7 +48,9 @@ class RunSettings:
 
 
 def _safe_label(kind: str, package: str | None) -> str:
-    value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{kind}-{package or 'package'}").strip("-")
+    value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", f"{kind}-{package or 'package'}").strip(
+        "-"
+    )
     return value[:80] or "verify"
 
 
@@ -69,6 +81,23 @@ def _check_result(check: CheckSpec, execution: RunResult, index: int) -> CheckRe
     )
 
 
+def _selection(
+    available: tuple[CheckSpec, ...], max_steps: int
+) -> VerificationSelection:
+    selected = available[:max_steps]
+    omitted = available[max_steps:]
+    coverage = (
+        typed_coverage(SAMPLED, STEP_LIMIT) if omitted else typed_coverage(COMPLETE)
+    )
+    return VerificationSelection(selected=selected, omitted=omitted, coverage=coverage)
+
+
+def _execution_coverage(executed: int, selected: int) -> Coverage:
+    if executed < selected:
+        return typed_coverage(PARTIAL, EXECUTION_INCOMPLETE)
+    return typed_coverage(COMPLETE)
+
+
 def _outcome(
     plan: VerificationPlan,
     status: VerificationStatus,
@@ -76,9 +105,8 @@ def _outcome(
     ok: bool,
     exit_code: int,
     settings: RunSettings,
-    available: tuple[CheckSpec, ...],
-    selected: tuple[CheckSpec, ...],
-    steps_limited: bool,
+    selection: VerificationSelection,
+    execution_coverage: Coverage | None = None,
     results: tuple[CheckResult, ...] = (),
     duration_seconds: float = 0.0,
     raw_output_chars: int = 0,
@@ -92,10 +120,13 @@ def _outcome(
         exit_code=exit_code,
         dry_run=settings.dry_run,
         scope=settings.scope,
-        available_checks=available,
-        selected_checks=selected,
+        selection=selection,
         results=results,
-        steps_limited=steps_limited,
+        execution_coverage=(
+            execution_coverage
+            if execution_coverage is not None
+            else _execution_coverage(len(results), len(selection.selected))
+        ),
         raw_output_chars=raw_output_chars,
         raw_output_lines=raw_output_lines,
         duration_seconds=round(duration_seconds, 3),
@@ -112,18 +143,15 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
         for check in plan.checks
         if not (settings.skip_lint and check.kind in _LINT_KINDS)
     )
-    selected = available[: settings.max_steps]
-    steps_limited = len(available) > len(selected)
-    if not plan.changed_files:
+    selection = _selection(available, settings.max_steps)
+    if not plan.changes.files:
         return _outcome(
             plan,
             VerificationStatus.CLEAN,
             ok=True,
             exit_code=0,
             settings=settings,
-            available=available,
-            selected=selected,
-            steps_limited=steps_limited,
+            selection=selection,
         )
     if settings.dry_run:
         return _outcome(
@@ -132,11 +160,9 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
             ok=True,
             exit_code=0,
             settings=settings,
-            available=available,
-            selected=selected,
-            steps_limited=steps_limited,
+            selection=selection,
         )
-    if not selected:
+    if not selection.selected:
         status = (
             VerificationStatus.SKIPPED_DOCS
             if plan.docs_only
@@ -148,9 +174,7 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
             ok=plan.docs_only,
             exit_code=0 if plan.docs_only else 3,
             settings=settings,
-            available=available,
-            selected=selected,
-            steps_limited=steps_limited,
+            selection=selection,
         )
 
     results: list[CheckResult] = []
@@ -158,7 +182,7 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
     total_duration = 0.0
     raw_chars = 0
     raw_lines = 0
-    for index, check in enumerate(selected, 1):
+    for index, check in enumerate(selection.selected, 1):
         execution = run(
             RunRequest(
                 root=settings.root,
@@ -184,10 +208,15 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
                 break
 
     executed = len(results)
-    steps_incomplete = steps_limited or executed < len(selected)
+    execution_coverage = _execution_coverage(executed, len(selection.selected))
+    incomplete = (
+        selection.limited
+        or not plan.inference_coverage.is_complete()
+        or executed < len(selection.selected)
+    )
     if failed:
         status, exit_code, ok = VerificationStatus.FAILED, 1, False
-    elif steps_incomplete:
+    elif incomplete:
         status, exit_code, ok = VerificationStatus.PARTIAL, 3, False
     else:
         status, exit_code, ok = VerificationStatus.PASSED, 0, True
@@ -197,9 +226,8 @@ def run_verification(plan: VerificationPlan, settings: RunSettings) -> Verificat
         ok=ok,
         exit_code=exit_code,
         settings=settings,
-        available=available,
-        selected=selected,
-        steps_limited=steps_limited,
+        selection=selection,
+        execution_coverage=execution_coverage,
         results=tuple(results),
         duration_seconds=total_duration,
         raw_output_chars=raw_chars,

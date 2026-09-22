@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .models import Package, PackageManager
+from .models import NodePackage, PackageManager
 
 SCRIPT_ALIASES: Mapping[str, tuple[str, ...]] = {
     "test": ("test", "test:unit", "unit"),
@@ -15,7 +15,7 @@ SCRIPT_ALIASES: Mapping[str, tuple[str, ...]] = {
 }
 
 
-def find_script(package: Package, category: str) -> str | None:
+def find_script(package: NodePackage, category: str) -> str | None:
     """The declared script name for ``category``, honoring known aliases."""
     for candidate in SCRIPT_ALIASES.get(category, (category,)):
         if candidate in package.scripts:
@@ -44,14 +44,13 @@ def package_exec_argv(manager: PackageManager, argv: Sequence[str]) -> list[str]
 
 
 def has_vitest(
-    package: Package, root: Path, packages: Mapping[str, Package] | None = None
+    package: NodePackage, root: Path, root_package: NodePackage | None = None
 ) -> bool:
     """True when this package (or the root package) declares vitest tooling."""
     if "vitest" in package.declared_dependencies or any(
         "vitest" in command for command in package.scripts.values()
     ):
         return True
-    root_package = (packages or {}).get(".")
     if (
         root_package is not None
         and root_package is not package

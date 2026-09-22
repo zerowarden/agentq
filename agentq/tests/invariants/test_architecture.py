@@ -342,3 +342,124 @@ class TelemetryObservationTests(unittest.TestCase):
                     ),
                     source,
                 )
+
+
+DISCOVERY_ROOT = "agentq.discovery"
+NAVIGATION_ROOT = "agentq.navigation"
+SYNTAX_ROOT = "agentq.syntax"
+DELIVERY_ROOT = "agentq.delivery"
+VERIFICATION_ROOT = "agentq.verification"
+VERIFICATION_PROVIDERS_ROOT = "agentq.verification.providers"
+TEXT_HELPERS = frozenset({"compact_line", "strip_ansi", "truncate_line"})
+CONCRETE_PAYLOAD_NAMES = frozenset(
+    {
+        "TypeScriptNav",
+        "TypeScriptCandidateSearch",
+        "TypeScriptSymbolOverview",
+        "TypeScriptLocations",
+        "TypeScriptLocation",
+        "TypeScriptSection",
+        "PythonOverview",
+        "PythonReference",
+        "PythonReferenceSection",
+    }
+)
+_VERIFICATION_REGISTRY_NAMES = frozenset(
+    {
+        "PROVIDER_NAMES",
+        "VERIFICATION_PROVIDERS",
+    }
+)
+
+
+class DependencyDirectionTests(unittest.TestCase):
+    def test_discovery_does_not_import_navigation(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for module, path, package in _iter_modules():
+            if not _under(module, DISCOVERY_ROOT):
+                continue
+            hits = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if _under(item, NAVIGATION_ROOT)
+            )
+            if hits:
+                offenders[module] = hits
+        self.assertFalse(offenders, f"discovery importing navigation: {offenders}")
+
+    def test_syntax_sits_below_discovery_and_navigation(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for module, path, package in _iter_modules():
+            if not _under(module, SYNTAX_ROOT):
+                continue
+            hits = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if _under(item, DISCOVERY_ROOT) or _under(item, NAVIGATION_ROOT)
+            )
+            if hits:
+                offenders[module] = hits
+        self.assertFalse(offenders, f"syntax importing capabilities: {offenders}")
+
+    def test_capabilities_do_not_import_text_helpers_from_delivery(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for module, path, package in _iter_modules():
+            if _is_adapter(module) or _under(module, DELIVERY_ROOT):
+                continue
+            hits = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if _under(item, DELIVERY_ROOT)
+                and item.rsplit(".", 1)[-1] in TEXT_HELPERS
+            )
+            if hits:
+                offenders[module] = hits
+        self.assertFalse(
+            offenders, f"modules importing text helpers from delivery: {offenders}"
+        )
+
+
+class NavigationProviderBoundaryTests(unittest.TestCase):
+    def test_orchestration_does_not_import_concrete_payload_classes(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        for relative in ("navigation/inspect.py", "navigation/resolution.py"):
+            module = f"{ROOT}.{relative[:-3].replace('/', '.')}"
+            package = module.rsplit(".", 1)[0]
+            path = PACKAGE_DIR / relative
+            hits = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if item.rsplit(".", 1)[-1] in CONCRETE_PAYLOAD_NAMES
+            )
+            if hits:
+                offenders[module] = hits
+        self.assertFalse(
+            offenders, f"orchestration importing concrete payloads: {offenders}"
+        )
+
+
+class VerificationRegistryTests(unittest.TestCase):
+    def test_planner_only_imports_the_provider_registry(self) -> None:
+        path = PACKAGE_DIR / "verification/planner.py"
+        imports = _imports_from_source(path.read_text(), VERIFICATION_ROOT)
+        concrete = sorted(
+            item
+            for item in imports
+            if _under(item, VERIFICATION_PROVIDERS_ROOT)
+            and item != VERIFICATION_PROVIDERS_ROOT
+            and item.rsplit(".", 1)[-1] not in _VERIFICATION_REGISTRY_NAMES
+        )
+        self.assertFalse(concrete, f"planner importing concrete providers: {concrete}")
+
+
+class CoreOperationRegistryTests(unittest.TestCase):
+    def test_core_does_not_enumerate_operations(self) -> None:
+        source = (PACKAGE_DIR / "core/request.py").read_text()
+        self.assertNotIn("KNOWN_OPERATIONS", source)
+
+
+class WorkspacePolicyTests(unittest.TestCase):
+    def test_generic_graph_has_no_node_package_manager_policy(self) -> None:
+        source = (PACKAGE_DIR / "workspace/graph.py").read_text().lower()
+        for token in ("npm", "pnpm", "yarn", "bun", "package.json"):
+            self.assertNotIn(token, source)

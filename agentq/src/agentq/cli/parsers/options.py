@@ -6,10 +6,10 @@ import argparse
 import difflib
 import re
 import sys
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol, cast
 
 from agentq.core import AgentQError
-from agentq.delivery import compact_line
+from agentq.text import compact_line
 
 
 class SubParsers(Protocol):
@@ -18,20 +18,27 @@ class SubParsers(Protocol):
     def add_parser(self, name: str, **kwargs: Any) -> argparse.ArgumentParser: ...
 
 
+class _SubParserChoices(Protocol):
+    """Structural type for a subparser action's selected-parser mapping."""
+
+    choices: dict[str, argparse.ArgumentParser]
+
+
 class AgentQArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("allow_abbrev", False)
         super().__init__(*args, **kwargs)
 
-    def error(self, message: str) -> None:
-        active = self
+    def error(self, message: str) -> NoReturn:
+        active: argparse.ArgumentParser = self
         for action in self._actions:
-            if isinstance(action, argparse._SubParsersAction):
+            if isinstance(action, argparse._SubParsersAction):  # pyright: ignore[reportPrivateUsage]
+                choices = cast("_SubParserChoices", action).choices
                 selected = next(
-                    (value for value in sys.argv[1:] if value in action.choices), None
+                    (value for value in sys.argv[1:] if value in choices), None
                 )
                 if selected:
-                    active = action.choices[selected]
+                    active = choices[selected]
                     break
         hint = None
         option = re.search(r"unrecognized arguments?:\s+(--[A-Za-z0-9-]+)", message)

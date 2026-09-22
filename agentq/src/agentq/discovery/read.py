@@ -10,7 +10,7 @@ import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentq.core import (
     COMPLETE,
@@ -19,16 +19,18 @@ from agentq.core import (
     SAMPLED,
     AgentQError,
     Coverage,
+    dict_field,
     ensure_within,
     is_sensitive_path,
+    list_field,
     relpath,
     typed_coverage,
     typed_from_wire,
 )
-from agentq.delivery import compact_line
 from agentq.discovery.files import list_repo_files
 from agentq.execution import run_cmd
 from agentq.redaction import StreamingRedactor
+from agentq.text import compact_line
 
 
 @dataclass(frozen=True)
@@ -101,7 +103,7 @@ class ReadItem:
                     text=str(item.get("text", "")),
                     anchor=bool(item.get("anchor")),
                 )
-                for item in payload.get("lines") or []
+                for item in list_field(payload, "lines")
             ),
             truncated=bool(payload.get("truncated")),
             suppressed=bool(payload.get("suppressed")),
@@ -138,11 +140,13 @@ class ReadOverlap:
     fully_covered_indices: tuple[int, ...]
     scope: str
     exact: bool
-    unseen: Mapping[int, tuple[tuple[int, int], ...]] = field(default_factory=dict)
+    unseen: Mapping[int, tuple[tuple[int, int], ...]] = field(
+        default_factory=dict[int, tuple[tuple[int, int], ...]]
+    )
 
     @classmethod
     def from_advice(cls, payload: Mapping[str, Any]) -> ReadOverlap:
-        unseen_raw = payload.get("_unseen_ranges") or {}
+        unseen_raw: dict[str, Any] = dict_field(payload, "_unseen_ranges")
         unseen = {
             int(index): tuple((int(left), int(right)) for left, right in intervals)
             for index, intervals in unseen_raw.items()
@@ -179,7 +183,7 @@ class ReadOverlap:
             overlap_percent=float(payload.get("overlap_percent", 0.0) or 0.0),
             fully_covered_ranges=int(payload.get("fully_covered_ranges", 0) or 0),
             fully_covered_indices=tuple(
-                int(index) for index in payload.get("fully_covered_indices") or []
+                int(index) for index in list_field(payload, "fully_covered_indices")
             ),
             scope=str(payload.get("scope", "session")),
             exact=bool(payload.get("exact")),
@@ -294,26 +298,25 @@ class ReadResult:
     def with_wire_continuations(self, wire: Mapping[str, Any]) -> ReadResult:
         """Reflect a cursor display command attached to the wire payload."""
         block = wire.get("continuation")
-        if (
-            self.continuation is None
-            or not isinstance(block, Mapping)
-            or not isinstance(block.get("command"), str)
-        ):
+        if self.continuation is None or not isinstance(block, Mapping):
+            return self
+        command = cast("Mapping[str, Any]", block).get("command")
+        if not isinstance(command, str):
             return self
         return replace(
             self,
-            continuation=replace(self.continuation, command=block["command"]),
+            continuation=replace(self.continuation, command=command),
         )
 
     @classmethod
     def from_wire(cls, payload: Mapping[str, Any]) -> ReadResult:
         continuation = payload.get("continuation")
         overlap = payload.get("read_overlap")
-        ranges = payload.get("requested_ranges")
+        ranges = list_field(payload, "requested_ranges")
         return cls(
             repo_root=str(payload.get("repo_root", "")),
             items=tuple(
-                ReadItem.from_wire(item) for item in payload.get("items") or []
+                ReadItem.from_wire(item) for item in list_field(payload, "items")
             ),
             truncated=bool(payload.get("truncated")),
             coverage=typed_from_wire(payload.get("coverage")),
@@ -329,23 +332,25 @@ class ReadResult:
             provenance=str(payload.get("provenance", LEXICAL)),
             render_budget=payload.get("render_budget"),
             continuation=(
-                ReadContinuation.from_wire(continuation)
+                ReadContinuation.from_wire(cast("Mapping[str, Any]", continuation))
                 if isinstance(continuation, Mapping)
                 else None
             ),
             path=payload.get("path"),
             total_lines=payload.get("total_lines"),
-            anchors=tuple(int(item) for item in payload.get("anchors") or []),
+            anchors=tuple(int(item) for item in list_field(payload, "anchors")),
             requested_ranges=tuple(
                 RequestedRange(
                     start=int(item.get("start", 0) or 0),
                     end=int(item.get("end", 0) or 0),
                 )
-                for item in ranges or []
+                for item in ranges
             ),
             redaction=payload.get("redaction"),
             read_overlap=(
-                ReadOverlap.from_wire(overlap) if isinstance(overlap, Mapping) else None
+                ReadOverlap.from_wire(cast("Mapping[str, Any]", overlap))
+                if isinstance(overlap, Mapping)
+                else None
             ),
         )
 
@@ -357,10 +362,10 @@ class _SourceState:
     path: str
     version: str | None = None
     redaction: Mapping[str, int] | None = None
-    safe_lines: list[str] = field(default_factory=list)
-    anchor_set: set[int] = field(default_factory=set)
-    ranges: list[tuple[int, int]] = field(default_factory=list)
-    windows: list[tuple[int, int]] = field(default_factory=list)
+    safe_lines: list[str] = field(default_factory=list[str])
+    anchor_set: set[int] = field(default_factory=set[int])
+    ranges: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
+    windows: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
     windowed: bool = False
     refused: bool = False
     reason: str | None = None

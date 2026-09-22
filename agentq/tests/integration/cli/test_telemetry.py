@@ -352,10 +352,10 @@ class TelemetryCliTests(AgentQIntegrationHarness):
                 repository_id="r1",
                 operations={"search"},
             )
-            telemetry_module._fingerprint_key_at.cache_clear()
-            first = telemetry_module._fingerprint_key()
-            second = telemetry_module._fingerprint_key()
-            cache = telemetry_module._fingerprint_key_at.cache_info()
+            telemetry_module.fingerprint_key_at.cache_clear()
+            first = telemetry_module.fingerprint_key()
+            second = telemetry_module.fingerprint_key()
+            cache = telemetry_module.fingerprint_key_at.cache_info()
         self.assertEqual([event["id"] for event in loaded], ["keep", "task"])
         self.assertEqual(sources["archive"], 2)
         self.assertEqual(first, second)
@@ -569,9 +569,9 @@ class TelemetryCliTests(AgentQIntegrationHarness):
 
     def test_schema_five_events_gain_safe_attribution_defaults(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.telemetry import _normalize_event
+            from agentq.telemetry import normalize_event
 
-        migrated = _normalize_event(
+        migrated = normalize_event(
             {"schema": 5, "command": "search", "visible_chars": 10}
         )
         self.assertEqual(migrated["schema"], 6)
@@ -579,7 +579,7 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         self.assertEqual(migrated["output_format"], "unknown")
         self.assertFalse(migrated["output_attributed"])
         self.assertEqual(sum(migrated["output_attribution"].values()), 0)
-        current = _normalize_event(
+        current = normalize_event(
             {"schema": 6, "command": "search", "visible_chars": 0}
         )
         self.assertEqual(current["source_schema"], 6)
