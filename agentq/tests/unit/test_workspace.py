@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agentq.workspace import (
     ChangeSet,
@@ -247,6 +250,29 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
             self.assertEqual(manifest.name, "root")
             self.assertEqual(manifest.scripts, ("test",))
 
+    def test_nearest_manifest_respects_ecosystem_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "package.json").write_text(
+                json.dumps({"name": "root"}), encoding="utf-8"
+            )
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "py-root"\n', encoding="utf-8"
+            )
+            python_file = root / "backend.py"
+            python_file.write_text("x = 1\n", encoding="utf-8")
+
+            catalog_default = nearest_manifest(root, python_file)
+            self.assertIsNotNone(catalog_default)
+            assert catalog_default is not None
+            self.assertEqual(catalog_default.kind, "npm")
+
+            scoped = nearest_manifest(root, python_file, ecosystem="python")
+            self.assertIsNotNone(scoped)
+            assert scoped is not None
+            self.assertEqual(scoped.path, "pyproject.toml")
+            self.assertEqual(scoped.kind, "python")
+
 
 class EcosystemAdapterTests(unittest.TestCase):
     def test_python_names_normalize_separators(self) -> None:
@@ -310,6 +336,63 @@ class EcosystemAdapterTests(unittest.TestCase):
                 workspace.graph.dependencies(UnitId("cargo", "crates/app")),
                 frozenset({UnitId("cargo", "crates/core")}),
             )
+
+    def _cargo_inheritance_fixture(self, root: Path) -> list[str]:
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/*"]\n\n'
+            '[workspace.dependencies]\ncore = { path = "crates/core" }\n',
+            encoding="utf-8",
+        )
+        core = root / "crates" / "core"
+        core.mkdir(parents=True)
+        (core / "Cargo.toml").write_text(
+            '[package]\nname = "core"\nversion = "0.1.0"\n', encoding="utf-8"
+        )
+        app = root / "crates" / "app"
+        app.mkdir(parents=True)
+        (app / "Cargo.toml").write_text(
+            textwrap.dedent("""
+                [package]
+                name = "app"
+                version = "0.1.0"
+
+                [dependencies]
+                core.workspace = true
+
+                [build-dependencies]
+                core = { path = "../core" }
+
+                [target.'cfg(unix)'.dependencies]
+                core = { path = "../core" }
+            """),
+            encoding="utf-8",
+        )
+        return ["crates/core/Cargo.toml", "crates/app/Cargo.toml"]
+
+    def _assert_app_depends_on_core(self, root: Path, repo_files: list[str]) -> None:
+        workspace = discover_cargo(root, repo_files)
+        self.assertEqual(
+            workspace.graph.dependencies(UnitId("cargo", "crates/app")),
+            frozenset({UnitId("cargo", "crates/core")}),
+        )
+
+    def test_cargo_manifest_fallback_resolves_inherited_and_kind_dependencies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo_files = self._cargo_inheritance_fixture(root)
+            with mock.patch(
+                "agentq.workspace.ecosystems.shutil.which", return_value=None
+            ):
+                self._assert_app_depends_on_core(root, repo_files)
+
+    @unittest.skipUnless(shutil.which("cargo") is not None, "cargo is not installed")
+    def test_cargo_metadata_resolves_inherited_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo_files = self._cargo_inheritance_fixture(root)
+            self._assert_app_depends_on_core(root, repo_files)
 
 
 if __name__ == "__main__":

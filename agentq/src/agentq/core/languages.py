@@ -29,6 +29,7 @@ class EcosystemProfile:
     manifest_kind: str
     manifests: tuple[str, ...]
     locks: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
 
 
 LANGUAGES: tuple[LanguageProfile, ...] = (
@@ -70,12 +71,19 @@ ECOSYSTEMS: tuple[EcosystemProfile, ...] = (
         "npm",
         ("package.json",),
         ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb"),
+        languages=("typescript", "tsx", "javascript", "jsx"),
     ),
-    EcosystemProfile("cargo", "cargo", ("Cargo.toml",), ("Cargo.lock",)),
     EcosystemProfile(
-        "python", "python", ("pyproject.toml",), ("uv.lock", "poetry.lock")
+        "cargo", "cargo", ("Cargo.toml",), ("Cargo.lock",), languages=("rust",)
     ),
-    EcosystemProfile("go", "go", ("go.mod",), ("go.sum",)),
+    EcosystemProfile(
+        "python",
+        "python",
+        ("pyproject.toml",),
+        ("uv.lock", "poetry.lock"),
+        languages=("python",),
+    ),
+    EcosystemProfile("go", "go", ("go.mod",), ("go.sum",), languages=("go",)),
 )
 
 WORKSPACE_NAMES = frozenset({"pnpm-workspace.yaml", "pnpm-workspace.yml"})
@@ -84,6 +92,9 @@ _BY_SUFFIX: dict[str, LanguageProfile] = {
     suffix: profile for profile in LANGUAGES for suffix in profile.suffixes
 }
 _BY_ID: dict[str, LanguageProfile] = {profile.id: profile for profile in LANGUAGES}
+_ECOSYSTEM_BY_LANGUAGE: dict[str, EcosystemProfile] = {
+    language: profile for profile in ECOSYSTEMS for language in profile.languages
+}
 _MANIFEST_PROFILES: dict[str, EcosystemProfile] = {
     name.lower(): profile for profile in ECOSYSTEMS for name in profile.manifests
 }
@@ -117,6 +128,19 @@ def suffixes_for(*language_ids: str) -> frozenset[str]:
 def ecosystem_for_manifest(name: str) -> EcosystemProfile | None:
     """The ecosystem declaring the manifest basename ``name``, if any."""
     return _MANIFEST_PROFILES.get(name.lower())
+
+
+def ecosystem_for_language(language_id: str | None) -> str | None:
+    """The ecosystem id owning ``language_id`` files, if any.
+
+    Ownership lookup needs provider context: in a polyglot repository a Python
+    declaration must resolve to the Python ecosystem's manifest even when a
+    package.json shares the same directory.
+    """
+    if language_id is None:
+        return None
+    profile = _ECOSYSTEM_BY_LANGUAGE.get(language_id)
+    return profile.id if profile is not None else None
 
 
 TS_JS_SUFFIXES = suffixes_for("typescript", "tsx", "javascript", "jsx")

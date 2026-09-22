@@ -111,17 +111,11 @@ class CoverageMergeLawTests(unittest.TestCase):
         self.assertIn(evidence.PARSE_ERROR, merged.reasons)
         self.assertIn(evidence.PROVIDER_UNAVAILABLE, merged.reasons)
 
-    def test_counts_merge_idempotently_and_unknown_dominates(self) -> None:
-        merged = evidence.merge_typed(
-            evidence.typed_coverage(
-                evidence.COMPLETE, matched=2, count_quality=evidence.EXACT
-            ),
-            evidence.typed_coverage(
-                evidence.COMPLETE, matched=3, count_quality=evidence.EXACT
-            ),
+    def test_identical_measurements_preserve_counts(self) -> None:
+        measured = evidence.typed_coverage(
+            evidence.COMPLETE, matched=2, count_quality=evidence.EXACT
         )
-        self.assertEqual(merged.matched, 3)
-        self.assertEqual(merged.count_quality, evidence.EXACT)
+        self.assertEqual(evidence.merge_typed(measured, measured), measured)
         unknown = evidence.merge_typed(
             evidence.typed_coverage(
                 evidence.COMPLETE, matched=2, count_quality=evidence.EXACT
@@ -130,6 +124,51 @@ class CoverageMergeLawTests(unittest.TestCase):
         )
         self.assertIsNone(unknown.matched)
         self.assertEqual(unknown.count_quality, evidence.UNKNOWN_COUNT)
+
+    def test_counts_are_never_combined_across_measurements(self) -> None:
+        merged = evidence.merge_typed(
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
+                scope="package-a",
+                matched=50,
+                count_quality=evidence.EXACT,
+            ),
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="files",
+                scope="package-b",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+        )
+        self.assertIsNone(merged.domain)
+        self.assertIsNone(merged.scope)
+        self.assertIsNone(merged.matched)
+        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
+
+    def test_shared_scope_keeps_scope_but_drops_disagreeing_counts(self) -> None:
+        merged = evidence.merge_typed(
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
+                scope="package-a",
+                matched=50,
+                count_quality=evidence.EXACT,
+            ),
+            evidence.typed_coverage(
+                evidence.COMPLETE,
+                domain="references",
+                scope="package-a",
+                matched=12,
+                count_quality=evidence.EXACT,
+            ),
+        )
+        self.assertEqual(merged.domain, "references")
+        self.assertEqual(merged.scope, "package-a")
+        self.assertIsNone(merged.matched)
+        self.assertIsNone(merged.scanned)
+        self.assertEqual(merged.count_quality, evidence.UNKNOWN_COUNT)
 
     def test_sampled_plus_parse_error_keeps_both_causes(self) -> None:
         merged = evidence.merge_typed(

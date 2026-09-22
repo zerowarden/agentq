@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from agentq.core import relpath
+from agentq.core import COMPLETE, Coverage, relpath, typed_coverage
 from agentq.workspace import (
     ChangeSet,
     ProjectUnit,
@@ -98,6 +98,7 @@ class PythonVerificationProvider:
 
         rows: list[PackageRow] = []
         checks: list[CheckSpec] = []
+        coverage = typed_coverage(COMPLETE)
         for unit_id in ordered:
             unit = units[unit_id]
             unit_dir = root if unit_id.path == "." else root / unit_id.path
@@ -121,19 +122,19 @@ class PythonVerificationProvider:
             )
             if docs_only:
                 continue
-            checks.extend(
-                self._unit_checks(
-                    unit,
-                    unit_id,
-                    scope,
-                    distance,
-                    facts,
-                    workspace.tooling[unit_id],
-                    mode,
-                    contract_changed,
-                    limit,
-                )
+            unit_checks, unit_coverage = self._unit_checks(
+                unit,
+                unit_id,
+                scope,
+                distance,
+                facts,
+                workspace.tooling[unit_id],
+                mode,
+                contract_changed,
+                limit,
             )
+            checks.extend(unit_checks)
+            coverage = coverage.weakest(unit_coverage)
 
         notes = [
             "Python checks run through the local interpreter; activate the project environment first.",
@@ -166,6 +167,11 @@ class PythonVerificationProvider:
             notes=tuple(notes),
             workspace_packages=len(units),
             workspace_edges=graph.edge_count(),
+            coverage=coverage,
+            limitations=(
+                "Candidate test selection matches module names; import-graph "
+                "resolution is outside the model",
+            ),
         )
 
     def _unit_facts(
@@ -183,7 +189,6 @@ class PythonVerificationProvider:
                 unit_dir,
                 root,
                 repo_files,
-                limit=8,
                 is_test=PY_TEST_RE.search,
             )
             if owned_files
@@ -221,7 +226,7 @@ class PythonVerificationProvider:
         mode: str,
         contract_changed: bool,
         limit: int,
-    ) -> list[CheckSpec]:
+    ) -> tuple[list[CheckSpec], Coverage]:
         pytest_argv = ["python3", "-m", "pytest"]
         unittest_argv = [
             "python3",
@@ -233,7 +238,7 @@ class PythonVerificationProvider:
             "." if unit_id.path == "." else unit_id.path,
         ]
         if scope == "changed":
-            checks = self._changed_python_checks(
+            checks, coverage = self._changed_python_checks(
                 unit,
                 unit_id,
                 facts,
@@ -256,10 +261,14 @@ class PythonVerificationProvider:
                     or (mode == "standard" and contract_changed and distance == 1)
                 ),
             )
-        return [
-            *checks,
-            *self._checker_checks(unit, unit_id, scope, distance, tools),
-        ]
+            coverage = typed_coverage(COMPLETE)
+        return (
+            [
+                *checks,
+                *self._checker_checks(unit, unit_id, scope, distance, tools),
+            ],
+            coverage,
+        )
 
     def _changed_python_checks(
         self,
@@ -270,34 +279,64 @@ class PythonVerificationProvider:
         pytest_argv: list[str],
         unittest_argv: list[str],
         limit: int,
-    ) -> list[CheckSpec]:
+    ) -> tuple[list[CheckSpec], Coverage]:
+        """Plan test execution without silently truncating the target set.
+
+        A focused check runs only when its complete target set fits ``limit``;
+        otherwise the package suite runs instead, which executes the same
+        targets plus their neighbours by construction.
+        """
         key = unit_id.path
+        direct_targets = facts.changed_tests if tools.pytest else ()
+        candidate_targets = (
+            facts.candidate_tests
+            if tools.pytest
+            and facts.source_files
+            and not facts.config_changed
+            and facts.candidate_tests
+            else ()
+        )
+        if any(
+            len(targets) > limit for targets in (direct_targets, candidate_targets)
+        ):
+            return (
+                [
+                    make_check(
+                        kind=CheckKind.PACKAGE_TESTS,
+                        package=unit.name,
+                        package_key=key,
+                        cwd=key,
+                        command=[*pytest_argv, "-q"],
+                        reason=(
+                            "the focused target set exceeds the verification "
+                            "argument bound, so the package suite runs instead"
+                        ),
+                        scope="changed",
+                    )
+                ],
+                typed_coverage(COMPLETE),
+            )
         checks: list[CheckSpec] = []
-        if tools.pytest and facts.changed_tests:
+        if direct_targets:
             checks.append(
                 make_check(
                     kind=CheckKind.DIRECT_TESTS,
                     package=unit.name,
                     package_key=key,
                     cwd=key,
-                    command=[*pytest_argv, *facts.changed_tests[:limit], "-q"],
+                    command=[*pytest_argv, *direct_targets, "-q"],
                     reason="changed test files are the earliest falsifying check",
                     scope="changed",
                 )
             )
-        if (
-            tools.pytest
-            and facts.source_files
-            and not facts.config_changed
-            and facts.candidate_tests
-        ):
+        if candidate_targets:
             checks.append(
                 make_check(
                     kind=CheckKind.CANDIDATE_TESTS,
                     package=unit.name,
                     package_key=key,
                     cwd=key,
-                    command=[*pytest_argv, *facts.candidate_tests[:limit], "-q"],
+                    command=[*pytest_argv, *candidate_targets, "-q"],
                     reason="candidate tests share module names with changed files",
                     scope="changed",
                 )
@@ -334,7 +373,7 @@ class PythonVerificationProvider:
                     scope="changed",
                 )
             )
-        return checks
+        return checks, typed_coverage(COMPLETE)
 
     def _dependent_python_checks(
         self,

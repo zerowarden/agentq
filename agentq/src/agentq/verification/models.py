@@ -343,7 +343,14 @@ class ChangeSummary:
 
 @dataclass(frozen=True)
 class ProviderPlan:
-    """One ecosystem's typed planning result before cross-ecosystem merging."""
+    """One ecosystem's typed planning result before cross-ecosystem merging.
+
+    ``coverage`` states how completely this provider's own inference captured
+    its verification target set; it is composed into the merged plan's
+    inference coverage. ``limitations`` records capability gaps of the model
+    itself (for example reverse dependencies that are not derived), which are
+    distinct from coverage failures and do not downgrade the run.
+    """
 
     provider: str
     manager: str
@@ -359,6 +366,15 @@ class ProviderPlan:
     notes: tuple[str, ...]
     workspace_packages: int
     workspace_edges: int
+    coverage: Coverage = field(default_factory=lambda: typed_coverage(COMPLETE))
+    limitations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.coverage, Coverage):
+            raise ContractError("provider plan coverage must be a Coverage")
+        for limitation in self.limitations:
+            if not isinstance(limitation, str):
+                raise ContractError("provider plan limitations must be strings")
 
     def to_wire(self, *, display_limit: int) -> dict[str, Any]:
         limit = display_limit if display_limit > 0 else len(self.packages)
@@ -378,6 +394,8 @@ class ProviderPlan:
             "packages_truncated": len(packages) < len(self.packages),
             "steps_total": len(self.checks),
             "notes": list(self.notes),
+            "coverage": self.coverage.to_wire(),
+            "limitations": list(self.limitations),
         }
 
 
@@ -450,9 +468,26 @@ class VerificationPlan:
 
     @property
     def inference_coverage(self) -> Coverage:
-        if self.coverage is not None:
-            return self.coverage
-        return typed_coverage(COMPLETE)
+        """How completely the merged plan captured its verification targets.
+
+        The change-attribution coverage is composed with every provider's own
+        inference coverage, so a provider that had to omit a target set cannot
+        be masked by another provider's completeness.
+        """
+        base = self.coverage if self.coverage is not None else typed_coverage(COMPLETE)
+        if not self.providers:
+            return base
+        return base.weakest(*(provider.coverage for provider in self.providers))
+
+    @property
+    def limitations(self) -> tuple[str, ...]:
+        """Provider capability gaps, deduplicated in provider order."""
+        found: list[str] = []
+        for provider in self.providers:
+            for limitation in provider.limitations:
+                if limitation not in found:
+                    found.append(limitation)
+        return tuple(found)
 
     def _render_omitted(self) -> bool:
         limit = self.display_limit
@@ -497,6 +532,7 @@ class VerificationPlan:
             "provenance": HEURISTIC,
             "coverage": self.visible_coverage.to_wire(),
             "inference_coverage": self.inference_coverage.to_wire(),
+            "limitations": list(self.limitations),
             "notes": list(self.notes),
         }
 
@@ -591,6 +627,7 @@ class VerificationRun:
             "omitted_steps": len(self.selection.omitted),
             "steps_limited": self.steps_limited,
             "notes": list(plan.notes),
+            "limitations": list(plan.limitations),
             "provenance": HEURISTIC,
             "coverage": self.visible_coverage.to_wire(),
             "inference_coverage": plan.inference_coverage.to_wire(),

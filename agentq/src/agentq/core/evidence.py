@@ -16,7 +16,7 @@ unknown counts are represented as ``None``, never as zero.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -51,6 +51,7 @@ RESULT_LIMIT = "result_limit"
 REFERENCE_LIMIT = "reference_limit"
 LINE_CAP = "line_cap"
 STEP_LIMIT = "step_limit"
+SELECTION_LIMIT = "selection_limit"
 PARSE_ERROR = "parse_error"
 PROVIDER_ERROR = "provider_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
@@ -111,7 +112,15 @@ class Coverage:
         return self.status == COMPLETE
 
     def weakest(self, *others: Coverage) -> Coverage:
-        """Return the weakest of the given coverages without ever upgrading."""
+        """Return the weakest of the given coverages without ever upgrading.
+
+        Generic composition owns ``status`` and ``reasons``. Measurement
+        metadata (``domain``, ``scope``, counts) survives only while every
+        operand describes the same measurement: counts are preserved only when
+        the count vectors are identical, so composition never fabricates a
+        cardinality. Aggregating counts across measurements belongs to
+        domain-specific aggregation, not to the generic lattice.
+        """
         blocks = (self, *others)
         weakest = min(
             (block.status for block in blocks), key=lambda value: _COVERAGE_RANK[value]
@@ -119,13 +128,15 @@ class Coverage:
         reasons: list[str] = []
         for block in blocks:
             reasons.extend(block.reasons)
+        domain, scope = _common_measurement(blocks)
+        identical = _identical_measurements(blocks)
         return Coverage(
             status=weakest,
             reasons=tuple(reasons),
-            domain=self.domain,
-            scope=self.scope,
-            count_quality=_merged_count_quality(blocks),
-            **_merged_counts(blocks),
+            domain=domain,
+            scope=scope,
+            count_quality=blocks[0].count_quality if identical else UNKNOWN_COUNT,
+            **_merged_counts(blocks, identical=identical),
         )
 
     def with_omission(
@@ -185,27 +196,39 @@ class Coverage:
         return wire
 
 
-def _merged_count_quality(blocks: Iterable[Coverage]) -> str:
-    qualities = {block.count_quality for block in blocks}
-    if len(qualities) == 1:
-        return next(iter(qualities))
-    return UNKNOWN_COUNT
+def _common_measurement(blocks: Sequence[Coverage]) -> tuple[str | None, str | None]:
+    """The shared ``(domain, scope)`` when every operand describes the same one."""
+    first = blocks[0]
+    if all(
+        block.domain == first.domain and block.scope == first.scope for block in blocks
+    ):
+        return first.domain, first.scope
+    return None, None
 
 
-def _merged_counts(blocks: Iterable[Coverage]) -> dict[str, int | None]:
-    """Combine counts idempotently: unknown dominates, otherwise the maximum.
+def _identical_measurements(blocks: Sequence[Coverage]) -> bool:
+    """Whether every operand reports the exact same count vector."""
+    first = blocks[0]
+    return all(
+        block.count_quality == first.count_quality
+        and all(getattr(block, name) == getattr(first, name) for name in _COUNT_FIELDS)
+        for block in blocks
+    )
 
-    Summation would double-count when the same coverage is merged twice, so the
-    conservative maximum keeps merge idempotent and monotone.
+
+def _merged_counts(
+    blocks: Sequence[Coverage], *, identical: bool
+) -> dict[str, int | None]:
+    """Preserve counts only for identical measurements; never combine them.
+
+    Merging is idempotent either way, but maximum/sum combination invents a
+    cardinality that no operand observed, so differing measurements drop counts
+    entirely.
     """
-    items = list(blocks)
-    merged: dict[str, int | None] = {}
-    for name in _COUNT_FIELDS:
-        values = [getattr(block, name) for block in items]
-        merged[name] = (
-            max(values) if all(value is not None for value in values) else None
-        )
-    return merged
+    first = blocks[0]
+    if not identical:
+        return dict.fromkeys(_COUNT_FIELDS, None)
+    return {name: getattr(first, name) for name in _COUNT_FIELDS}
 
 
 @dataclass(frozen=True)

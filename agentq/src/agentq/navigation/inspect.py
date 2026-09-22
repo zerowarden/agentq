@@ -28,7 +28,7 @@ from agentq.core import (
     status_of,
     typed_coverage,
 )
-from agentq.core.languages import language_for
+from agentq.core.languages import ecosystem_for_language, language_for, language_id_for
 from agentq.discovery import (
     OutlineRequest,
     ReadRequest,
@@ -425,7 +425,11 @@ def _selected_target_evidence(root: Path, target: str, selected: CandidateRef) -
     tuple[str, ...],
 ]:
     tests, tests_coverage = _test_references(root, target)
-    package = nearest_manifest(root, root / selected.path)
+    package = nearest_manifest(
+        root,
+        root / selected.path,
+        ecosystem=ecosystem_for_language(selected.provider),
+    )
     return (
         tests,
         tests_coverage,
@@ -745,7 +749,11 @@ def _file_result(
             outline=outline_result,
             intent=request.intent,
         )
-    package = nearest_manifest(root, candidate_path)
+    package = nearest_manifest(
+        root,
+        candidate_path,
+        ecosystem=ecosystem_for_language(language_id_for(relative)),
+    )
     verification = (
         [
             f"run {package.kind} checks for {package.name or package.path} "

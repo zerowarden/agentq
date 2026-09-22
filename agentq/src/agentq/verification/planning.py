@@ -69,10 +69,15 @@ def candidate_tests(
     package_dir: Path,
     root: Path,
     all_files: Sequence[str],
-    limit: int,
     is_test: Callable[[str], Any],
 ) -> tuple[str, ...]:
-    """Test files whose names or locations match the changed files."""
+    """Every test file whose name or location matches the changed files.
+
+    The full candidate set is returned without an internal cap: providers must
+    know the complete target set to decide between a focused check and a
+    package-suite widening, and a truncated candidate set could silently omit
+    verification targets.
+    """
     pkg_rel = relpath(root, package_dir)
     prefix = "" if pkg_rel == "." else pkg_rel.rstrip("/") + "/"
     tests = [path for path in all_files if path.startswith(prefix) and is_test(path)]
@@ -88,8 +93,6 @@ def candidate_tests(
             selected.append(
                 test[len(prefix) :] if prefix and test.startswith(prefix) else test
             )
-            if len(selected) >= limit:
-                break
     return tuple(selected)
 
 

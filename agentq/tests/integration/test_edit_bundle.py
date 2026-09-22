@@ -661,5 +661,43 @@ class EditBundleCliTests(unittest.TestCase):
         self.assertTrue(forced["edit"]["declaration"]["items"][0]["lines"])
 
 
+class PolyglotOwnershipTests(unittest.TestCase):
+    """Ecosystem ownership follows the inspected language, not catalog order."""
+
+    def _repo(self) -> tuple[tempfile.TemporaryDirectory, Path]:
+        return make_repo(
+            {
+                "package.json": json.dumps(
+                    {"name": "web", "scripts": {"test": "jest"}}
+                ),
+                "pyproject.toml": '[project]\nname = "backend"\n',
+                "backend.py": "def handler():\n    return 1\n",
+            }
+        )
+
+    def test_python_symbol_edit_resolves_the_python_manifest(self) -> None:
+        temp, root = self._repo()
+        try:
+            result = edit_result(root, "handler", ["."], lang="python")
+            bundle = result.to_wire()["edit"]
+            self.assertEqual(bundle["resolution"], "resolved")
+            self.assertEqual(bundle["package"]["path"], "pyproject.toml")
+            self.assertEqual(bundle["package"]["kind"], "python")
+            self.assertTrue(
+                any("python checks" in item for item in bundle["verification"])
+            )
+        finally:
+            temp.cleanup()
+
+    def test_python_file_edit_resolves_the_python_manifest(self) -> None:
+        temp, root = self._repo()
+        try:
+            data = inspect_result(root, "backend.py", ["."], intent="edit").to_wire()
+            self.assertEqual(data["package"]["path"], "pyproject.toml")
+            self.assertEqual(data["package"]["kind"], "python")
+        finally:
+            temp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

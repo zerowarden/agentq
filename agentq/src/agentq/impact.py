@@ -23,7 +23,7 @@ from agentq.discovery import (
     search,
 )
 
-from .core.languages import MANIFEST_PATTERN
+from .core.languages import MANIFEST_PATTERN, ecosystem_for_language, language_id_for
 from .workspace import nearest_manifest
 
 SHARED_RISK_RE = re.compile(
@@ -247,7 +247,11 @@ def impact_data(
     tests = [hit for hit in refs.hits if hit.role == "test"]
     docs_config = [hit for hit in refs.hits if hit.role in {"docs", "config"}]
     source_refs = [hit for hit in refs.hits if hit.role == "source"]
-    package = nearest_manifest(root, target_path if exists else root)
+    package = nearest_manifest(
+        root,
+        target_path if exists else root,
+        ecosystem=ecosystem_for_language(language_id_for(target)),
+    )
     unique_source_files: set[str] = {
         item.path for item in refs.match_file_summary if item.role == "source"
     }

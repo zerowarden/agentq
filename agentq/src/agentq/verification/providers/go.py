@@ -110,6 +110,10 @@ class GoVerificationProvider:
             notes=tuple(notes),
             workspace_packages=len(units),
             workspace_edges=graph.edge_count(),
+            limitations=(
+                "Go package reverse dependencies are not modelled, so checks "
+                "stay module-wide",
+            ),
         )
 
     def _module_checks(

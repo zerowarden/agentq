@@ -164,6 +164,9 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertTrue(python["references_omitted"])
 
     def test_inspect_edit_intent_bundles_declaration_tests_and_package(self) -> None:
+        (self.repo / "packages/a/pyproject.toml").write_text(
+            '[project]\nname = "apy"\n', encoding="utf-8"
+        )
         (self.repo / "packages/a/src/edited.py").write_text(
             "class Edited:\n    def method(self) -> int:\n        return 7\n",
             encoding="utf-8",
@@ -191,8 +194,9 @@ class InspectCliTests(AgentQIntegrationHarness):
             any("class Edited" in line["text"] for line in declaration["lines"])
         )
         self.assertTrue(any("edited.test.ts" in hit["path"] for hit in edit["tests"]))
-        self.assertEqual(data["package"]["path"], "packages/a/package.json")
-        self.assertTrue(data["verification"])
+        self.assertEqual(data["package"]["path"], "packages/a/pyproject.toml")
+        self.assertEqual(data["package"]["kind"], "python")
+        self.assertTrue(any("python checks" in item for item in data["verification"]))
         rendered = subprocess.run(
             [
                 str(AGENTQ),

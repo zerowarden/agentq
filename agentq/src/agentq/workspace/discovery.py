@@ -302,11 +302,23 @@ def manifest_units(
     return tuple(units)
 
 
-def nearest_manifest(root: Path, target: Path) -> PackageManifest | None:
-    """Walk up from target to the repository root looking for a package manifest."""
+def nearest_manifest(
+    root: Path, target: Path, *, ecosystem: str | None = None
+) -> PackageManifest | None:
+    """Walk up from target to the repository root looking for a package manifest.
+
+    ``ecosystem`` restricts the walk to one ecosystem's manifests, so a Python
+    declaration in a polyglot repository resolves to ``pyproject.toml`` instead
+    of whichever manifest happens to appear first in the ecosystem catalog.
+    """
+    profiles = tuple(
+        profile
+        for profile in ECOSYSTEMS
+        if ecosystem is None or profile.id == ecosystem
+    )
     current = target if target.is_dir() else target.parent
     while True:
-        for profile in ECOSYSTEMS:
+        for profile in profiles:
             for name in profile.manifests:
                 path = current / name
                 if not path.exists():

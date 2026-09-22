@@ -100,6 +100,37 @@ class VerifyCliTests(AgentQIntegrationHarness):
         plan = self.data("test-plan")
         self.assertIn("direct-tests", [step["kind"] for step in plan["steps"]])
 
+    def test_python_candidate_overflow_widens_to_the_package_suite(self) -> None:
+        self._make_single_ecosystem()
+        (self.repo / "pyproject.toml").write_text(
+            '[project]\nname = "pyapp"\n\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+            encoding="utf-8",
+        )
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (self.repo / "pkg" / "core.py").write_text(
+            "def add(a, b):\n    return a + b\n", encoding="utf-8"
+        )
+        (self.repo / "tests").mkdir()
+        for index in range(3):
+            (self.repo / "tests" / f"test_core_{index}.py").write_text(
+                "def test_ok():\n    assert True\n", encoding="utf-8"
+            )
+        self.git("add", ".")
+        self.git("commit", "-qm", "python candidate fixture")
+        (self.repo / "pkg" / "core.py").write_text(
+            "def add(a, b):\n    return a + b + 1\n", encoding="utf-8"
+        )
+
+        plan = self.data("test-plan", "--limit", "2")
+        kinds = [step["kind"] for step in plan["steps"]]
+        self.assertNotIn("candidate-tests", kinds)
+        package = next(
+            step for step in plan["steps"] if step["kind"] == "package-tests"
+        )
+        self.assertEqual(package["argv"], ["python3", "-m", "pytest", "-q"])
+        self.assertEqual(plan["inference_coverage"]["status"], "complete")
+
     def test_cargo_verification_provider(self) -> None:
         self._make_single_ecosystem()
         (self.repo / "Cargo.toml").write_text(

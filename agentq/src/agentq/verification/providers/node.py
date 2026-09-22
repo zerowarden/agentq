@@ -10,7 +10,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from agentq.core import relpath
+from agentq.core import (
+    COMPLETE,
+    PARTIAL,
+    SELECTION_LIMIT,
+    Coverage,
+    relpath,
+    typed_coverage,
+)
 from agentq.core.languages import TS_JS_SUFFIXES
 from agentq.workspace import (
     ChangeSet,
@@ -144,6 +151,7 @@ class NodeVerificationProvider:
         order_rank = {unit_id.path: index for index, unit_id in enumerate(ordered)}
         rows: list[PackageRow] = []
         checks: list[CheckSpec] = []
+        coverage = typed_coverage(COMPLETE)
         for unit_id in ordered:
             pkg = packages[unit_id]
             scope = self._scope(
@@ -175,20 +183,20 @@ class NodeVerificationProvider:
             )
             if docs_only:
                 continue
-            checks.extend(
-                self._package_checks(
-                    pkg,
-                    unit_id,
-                    scope,
-                    distance,
-                    facts,
-                    manager,
-                    limit,
-                    mode,
-                    include_build,
-                    contract_changed,
-                )
+            unit_checks, unit_coverage = self._package_checks(
+                pkg,
+                unit_id,
+                scope,
+                distance,
+                facts,
+                manager,
+                limit,
+                mode,
+                include_build,
+                contract_changed,
             )
+            checks.extend(unit_checks)
+            coverage = coverage.weakest(unit_coverage)
 
         return ProviderPlan(
             provider=self.name,
@@ -205,6 +213,11 @@ class NodeVerificationProvider:
             notes=tuple(self._notes(docs_only, bool(global_changes), unowned)),
             workspace_packages=len(units),
             workspace_edges=graph.edge_count(),
+            coverage=coverage,
+            limitations=(
+                "Vitest related follows static imports; dynamic imports and "
+                "runtime test registration are outside the model",
+            ),
         )
 
     @staticmethod
@@ -261,7 +274,6 @@ class NodeVerificationProvider:
                     package_dir,
                     root,
                     repo_files,
-                    limit=8,
                     is_test=TEST_RE.search,
                 )
                 if owned_files
@@ -283,51 +295,60 @@ class NodeVerificationProvider:
         mode: str,
         include_build: bool,
         contract_changed: bool,
-    ) -> list[CheckSpec]:
+    ) -> tuple[list[CheckSpec], Coverage]:
         scripts = {
             category: find_script(pkg, category)
             for category in ("test", "typecheck", "lint", "build")
         }
         key = unit_id.path
         if scope in {"changed", "global"}:
-            return [
-                *self._test_checks(pkg, key, scope, facts, scripts, manager, limit),
-                *self._script_checks(
+            test_checks, coverage = self._test_checks(
+                pkg, key, scope, facts, scripts, manager, limit
+            )
+            return (
+                [
+                    *test_checks,
+                    *self._script_checks(
+                        pkg,
+                        key,
+                        scope,
+                        0,
+                        scripts,
+                        manager,
+                        mode,
+                        include_build,
+                        changed=True,
+                    ),
+                ],
+                coverage,
+            )
+        return (
+            [
+                *self._dependent_checks(
                     pkg,
                     key,
                     scope,
-                    0,
+                    distance,
                     scripts,
                     manager,
                     mode,
                     include_build,
-                    changed=True,
+                    contract_changed,
                 ),
-            ]
-        return [
-            *self._dependent_checks(
-                pkg,
-                key,
-                scope,
-                distance,
-                scripts,
-                manager,
-                mode,
-                include_build,
-                contract_changed,
-            ),
-            *self._script_checks(
-                pkg,
-                key,
-                scope,
-                distance,
-                scripts,
-                manager,
-                mode,
-                include_build,
-                changed=False,
-            ),
-        ]
+                *self._script_checks(
+                    pkg,
+                    key,
+                    scope,
+                    distance,
+                    scripts,
+                    manager,
+                    mode,
+                    include_build,
+                    changed=False,
+                ),
+            ],
+            typed_coverage(COMPLETE),
+        )
 
     def _test_checks(
         self,
@@ -338,9 +359,51 @@ class NodeVerificationProvider:
         scripts: Mapping[str, str | None],
         manager: PackageManager,
         limit: int,
-    ) -> list[CheckSpec]:
+    ) -> tuple[list[CheckSpec], Coverage]:
+        """Plan test execution without silently truncating the target set.
+
+        A focused check runs only when its complete target set fits ``limit``.
+        Otherwise the provider widens to the package suite, which executes the
+        same targets plus their neighbours. When no suite exists to widen to,
+        the contribution is explicitly incomplete rather than silently passing.
+        """
+        test_script = scripts["test"]
+        direct_targets = facts.changed_tests if facts.vitest else ()
+        related_targets = (
+            facts.source_files
+            if facts.vitest and facts.source_files and not facts.config_changed
+            else ()
+        )
+        candidate_targets = (
+            facts.candidate_tests
+            if not related_targets
+            and facts.candidate_tests
+            and test_script
+            and not facts.config_changed
+            else ()
+        )
+        if any(
+            len(targets) > limit
+            for targets in (direct_targets, related_targets, candidate_targets)
+        ):
+            widened = self._package_suite_check(
+                pkg,
+                key,
+                scope,
+                facts,
+                scripts,
+                manager,
+                reason=(
+                    "the focused target set exceeds the verification argument "
+                    "bound, so the package suite runs instead"
+                ),
+            )
+            if widened is None:
+                return [], typed_coverage(PARTIAL, SELECTION_LIMIT)
+            return [widened], typed_coverage(COMPLETE)
+
         checks: list[CheckSpec] = []
-        if facts.vitest and facts.changed_tests:
+        if direct_targets:
             checks.append(
                 make_check(
                     kind=CheckKind.DIRECT_TESTS,
@@ -349,18 +412,13 @@ class NodeVerificationProvider:
                     cwd=key,
                     command=package_exec_argv(
                         manager,
-                        [
-                            "vitest",
-                            "run",
-                            "--reporter=minimal",
-                            *facts.changed_tests[:limit],
-                        ],
+                        ["vitest", "run", "--reporter=minimal", *direct_targets],
                     ),
                     reason="changed test files are the earliest falsifying check",
                     scope=scope,
                 )
             )
-        if facts.vitest and facts.source_files and not facts.config_changed:
+        if related_targets:
             checks.append(
                 make_check(
                     kind=CheckKind.RELATED_TESTS,
@@ -374,7 +432,7 @@ class NodeVerificationProvider:
                             "related",
                             "--run",
                             "--reporter=minimal",
-                            *facts.source_files[:limit],
+                            *related_targets,
                         ],
                     ),
                     reason=(
@@ -383,7 +441,7 @@ class NodeVerificationProvider:
                     scope=scope,
                 )
             )
-        elif facts.candidate_tests and scripts["test"] and not facts.config_changed:
+        elif candidate_targets and test_script is not None:
             checks.append(
                 make_check(
                     kind=CheckKind.CANDIDATE_TESTS,
@@ -391,9 +449,9 @@ class NodeVerificationProvider:
                     package_key=key,
                     cwd=key,
                     command=[
-                        *script_argv(manager, scripts["test"]),
+                        *script_argv(manager, test_script),
                         "--",
-                        *facts.candidate_tests,
+                        *candidate_targets,
                     ],
                     reason=(
                         "candidate tests share names or locations with changed files"
@@ -401,8 +459,11 @@ class NodeVerificationProvider:
                     scope=scope,
                 )
             )
-        elif scripts["test"] and (
-            facts.config_changed or scope == "global" or not facts.source_files
+        if (
+            not related_targets
+            and not candidate_targets
+            and test_script
+            and (facts.config_changed or scope == "global" or not facts.source_files)
         ):
             checks.append(
                 make_check(
@@ -410,7 +471,7 @@ class NodeVerificationProvider:
                     package=pkg.name,
                     package_key=key,
                     cwd=key,
-                    command=script_argv(manager, scripts["test"]),
+                    command=script_argv(manager, test_script),
                     reason=(
                         "configuration or package-wide behavior changed, so focused "
                         "selection may be unsound"
@@ -418,7 +479,45 @@ class NodeVerificationProvider:
                     scope=scope,
                 )
             )
-        return checks
+        if (
+            facts.candidate_tests
+            and not facts.vitest
+            and not test_script
+            and not facts.config_changed
+        ):
+            return checks, typed_coverage(PARTIAL, SELECTION_LIMIT)
+        return checks, typed_coverage(COMPLETE)
+
+    @staticmethod
+    def _package_suite_check(
+        pkg: NodePackage,
+        key: str,
+        scope: str,
+        facts: _PackageFacts,
+        scripts: Mapping[str, str | None],
+        manager: PackageManager,
+        *,
+        reason: str,
+    ) -> CheckSpec | None:
+        """The package-wide test check, or ``None`` when no runner exists."""
+        test_script = scripts["test"]
+        if test_script:
+            command = script_argv(manager, test_script)
+        elif facts.vitest:
+            command = package_exec_argv(
+                manager, ["vitest", "run", "--reporter=minimal"]
+            )
+        else:
+            return None
+        return make_check(
+            kind=CheckKind.PACKAGE_TESTS,
+            package=pkg.name,
+            package_key=key,
+            cwd=key,
+            command=command,
+            reason=reason,
+            scope=scope,
+        )
 
     def _dependent_checks(
         self,

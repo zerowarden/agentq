@@ -162,6 +162,11 @@ class CargoVerificationProvider:
             notes=tuple(notes),
             workspace_packages=len(units),
             workspace_edges=graph.edge_count(),
+            limitations=(
+                "Cargo edges cover local manifest declarations (path, "
+                "workspace-inherited, dev, build, and target-specific); registry "
+                "and source-level dependencies are not workspace edges",
+            ),
         )
 
     @staticmethod
