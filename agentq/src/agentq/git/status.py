@@ -70,7 +70,9 @@ class _StatusParser:
 
     def _renamed_item(self, record: str) -> StatusFile:
         parts = record.split(" ", 9)
-        original = self._records[self._index] if self._index < len(self._records) else ""
+        original = (
+            self._records[self._index] if self._index < len(self._records) else ""
+        )
         self._index += 1
         item = _status_item(parts[1], parts[9])
         return StatusFile(

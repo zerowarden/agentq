@@ -7,7 +7,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from unittest import mock
@@ -19,31 +18,6 @@ from tests.support.cli_harness import (
 
 
 class RuntimeCliTests(AgentQIntegrationHarness):
-    def test_runtime_cache_ignores_unwritable_home_cache(self) -> None:
-        env = self.env.copy()
-        env["HOME"] = "/proc/agentq-no-home"
-        env.pop("XDG_CACHE_HOME", None)
-        env.pop("AGENTQ_CACHE_HOME", None)
-        argv = [
-            str(AGENTQ),
-            "run",
-            "--repo",
-            str(self.repo),
-            "--format",
-            "json",
-            "--isolated-cache",
-            "--keep-log",
-            "--",
-            "python3",
-            "-c",
-            "print('ok')",
-        ]
-        result = subprocess.run(argv, text=True, capture_output=True, env=env)
-        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
-        data = json.loads(result.stdout)
-        self.assertTrue(data["log"].startswith(tempfile.gettempdir()))
-        self.assertNotIn("/.cache/", data["log"])
-
     def test_agentq_wrapper_works_through_symlink(self) -> None:
         link = Path(self.temp.name) / "agentq-link"
         link.symlink_to(AGENTQ)
@@ -118,8 +92,6 @@ class RuntimeCliTests(AgentQIntegrationHarness):
                     str(AGENTQ),
                     "search",
                     "OldName",
-                    "--repo",
-                    str(self.repo),
                     "--format",
                     "json",
                     "--budget",
@@ -162,10 +134,6 @@ class RuntimeCliTests(AgentQIntegrationHarness):
     def test_common_agent_conventions_are_accepted_or_get_one_concise_hint(
         self,
     ) -> None:
-        summary = self.data("git-diff", "--stat")
-        self.assertNotIn("patch", summary)
-        self.assertNotIn("hunks", summary)
-
         include_source = self.aq(
             "inspect",
             "packages/a/src/index.ts",
@@ -175,8 +143,8 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         self.assertIn("use --line N or --lines START:END", include_source.stderr)
         self.assertLess(len(include_source.stderr), 600)
 
-        typo = self.aq("search", "OldName", "--max-reslts", "20", expect=2)
-        self.assertIn("did you mean --max-results?", typo.stderr)
+        typo = self.aq("search", "OldName", "--budgt", "2000", expect=2)
+        self.assertIn("did you mean --budget?", typo.stderr)
         invalid_command = subprocess.run(
             [str(AGENTQ), "searh"],
             text=True,
@@ -195,21 +163,13 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         self.assertIn("path", payload["error"])
         self.assertNotIn("Traceback", invalid.stderr)
 
-    def test_compatibility_aliases_avoid_common_agent_cli_failures(self) -> None:
-        read = self.data("read", "packages/a/src/index.ts", "--lines", "1:3")
-        self.assertEqual(read["items"][0]["start"], 1)
-        self.assertEqual(read["items"][0]["end"], 3)
-
+    def test_search_scope_and_missing_path_errors_are_concise(self) -> None:
         search = self.data(
             "search",
             "OldName",
             "--path",
             "packages/a",
             "packages/b",
-            "--max-results",
-            "180",
-            "--samples-per-file",
-            "20",
         )
         self.assertGreaterEqual(search["matching_files"], 2)
         self.assertGreaterEqual(search["total_matching_lines"], 3)
@@ -218,24 +178,3 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         self.assertIn("search path does not exist", missing.stderr)
         self.assertNotIn("rg exited", missing.stderr)
         self.assertNotIn("usage:", missing.stderr)
-
-        trailing_scope = self.data("search", "OldName", "packages/a")
-        self.assertTrue(
-            all(
-                item["path"].startswith("packages/a/")
-                for item in trailing_scope["files"]
-            )
-        )
-        self.assertNotIn(
-            "packages/b/src/index.ts",
-            {item["path"] for item in trailing_scope["files"]},
-        )
-
-        unexpected = self.aq("search", "OldName", "not-a-repository-path", expect=2)
-        self.assertIn("search accepts one QUERY", unexpected.stderr)
-        self.assertIn("agentq search QUERY --path PATH", unexpected.stderr)
-        self.assertLess(len(unexpected.stderr), 600)
-
-        canonical_files = self.data("files", "index", "--limit", "2")
-        alias_files = self.data("files", "index", "--max-results", "2")
-        self.assertEqual(alias_files["files"], canonical_files["files"])

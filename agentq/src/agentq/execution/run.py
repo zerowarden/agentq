@@ -314,7 +314,9 @@ class _LogCollector:
         return self._redactor.stats()
 
 
-def _failure_diagnostics(outcome: ExecutionOutcome, command: tuple[str, ...]) -> tuple[str, ...]:
+def _failure_diagnostics(
+    outcome: ExecutionOutcome, command: tuple[str, ...]
+) -> tuple[str, ...]:
     if outcome.stop_reason in {StopReason.CONSUMER_ERROR, StopReason.CAPTURE_ERROR}:
         return (outcome.error_detail or "command output capture failed",)
     if is_spawn_failure(outcome.stop_reason):
@@ -418,11 +420,7 @@ def run(request: RunRequest) -> RunResult:
 
 def render_run(result: RunResult, *, budget: int = 0) -> str:
     status = (
-        "TIMEOUT"
-        if result.timed_out
-        else "PASS"
-        if result.exit_code == 0
-        else "FAIL"
+        "TIMEOUT" if result.timed_out else "PASS" if result.exit_code == 0 else "FAIL"
     )
     lines = [
         f"{status}: {' '.join(result.command)}",

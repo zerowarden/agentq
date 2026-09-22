@@ -20,7 +20,7 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         script = (
             "import sys;"
             "from agentq.cli import main;"
-            f"sys.argv = ['agentq', 'files', 'zzz-none', '--repo', {str(self.repo)!r}];"
+            f"sys.argv = ['agentq', 'search', 'zzz-none', '--repo', {str(self.repo)!r}];"
             "main();"
             "assert 'agentq.telemetry' not in sys.modules, 'telemetry module imported';"
             "print('LAZY-OK')"
@@ -34,53 +34,6 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         self.assertIn("LAZY-OK", result.stdout)
-
-    def test_read_telemetry_distinguishes_source_and_render_budget_caps(self) -> None:
-        path = self.repo / "packages/a/src/capped.py"
-        path.write_text(
-            "".join(f"line {index}\n" for index in range(1, 101)), encoding="utf-8"
-        )
-
-        self.data(
-            "read",
-            "packages/a/src/capped.py:1-100",
-            "--max-lines",
-            "2",
-            "--budget",
-            "1000000",
-            "--repeat",
-        )
-        # A budget this small still renders evidence plus a recovery command in
-        # text; the JSON projection would reduce to a non-progressing page,
-        # which the emission layer now refuses with an explicit budget error.
-        self.aq(
-            "read",
-            "packages/a/src/capped.py:1-100",
-            "--max-lines",
-            "100",
-            "--budget",
-            "300",
-            "--repeat",
-            "--format",
-            "text",
-        )
-
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if json.loads(line).get("command") == "read"
-        ]
-        self.assertTrue(events[0]["source_cap_truncated"])
-        self.assertFalse(events[0]["render_budget_truncated"])
-        self.assertFalse(events[1]["source_cap_truncated"])
-        self.assertTrue(events[1]["render_budget_truncated"])
-
-        stats = self.data("stats", "--since", "all")
-        read = next(row for row in stats["commands"] if row["command"] == "read")
-        self.assertEqual(read["source_cap_truncations"], 1)
-        self.assertEqual(read["truncations"], 1)
 
     def test_output_attribution_partitions_json_and_text_exactly(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
@@ -137,12 +90,12 @@ class TelemetryCliTests(AgentQIntegrationHarness):
     def test_text_output_records_exact_attribution_and_view(self) -> None:
         argv = [
             str(AGENTQ),
-            "read",
-            "--repo",
-            str(self.repo),
+            "inspect",
             "--format",
             "text",
-            "packages/a/src/index.ts:1-3",
+            "packages/a/src/index.ts",
+            "--lines",
+            "1:3",
         ]
         result = subprocess.run(
             argv, text=True, capture_output=True, env=self.env, cwd=self.repo
@@ -155,43 +108,15 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             .splitlines()[-1]
         )
         self.assertEqual(event["output_format"], "text")
-        self.assertEqual(event["output_view"], "windowed")
+        self.assertEqual(event["output_view"], "source-windows")
         self.assertTrue(event["output_attributed"])
         self.assertEqual(sum(event["output_attribution"].values()), len(visible))
         self.assertGreater(event["output_attribution"]["unique_evidence_chars"], 0)
 
-    def test_compatibility_alias_events_are_labeled(self) -> None:
-        self.data("files", "index", "--max-results", "2")
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if line.strip()
-        ]
-        alias_event = next(
-            event for event in reversed(events) if event.get("command") == "files"
-        )
-        self.assertEqual(alias_event["compatibility_alias"], "files-max-results")
-
-    def test_verification_events_record_mode_and_affected_packages(self) -> None:
-        self.change_a()
-        self.data("verify-changed", "--skip-lint")
-        events = [
-            json.loads(line)
-            for line in (self.telemetry / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        event = events[-1]
-        self.assertEqual(event["command"], "verify-changed")
-        self.assertEqual(event["metrics"]["verification_mode"], "standard")
-        self.assertGreaterEqual(event["metrics"]["affected_packages"], 2)
-
-    def test_telemetry_is_private_minimized_and_stats_are_aggregated(self) -> None:
+    def test_telemetry_is_private_and_minimized(self) -> None:
         secret_query = "SENSITIVE_QUERY_VALUE_91fdb"
         self.data("search", secret_query)
-        self.data("run", "--", "python3", "-c", "print('x' * 500)")
+        self.data("inspect", "OldName", "--path", "packages")
         event_file = self.telemetry / "events.jsonl"
         self.assertTrue(event_file.is_file())
         self.assertEqual(self.telemetry.stat().st_mode & 0o777, 0o700)
@@ -199,19 +124,6 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         raw = event_file.read_text(encoding="utf-8")
         self.assertNotIn(secret_query, raw)
         self.assertNotIn(str(self.repo), raw)
-        stats = self.data("stats", "--since", "all")
-        self.assertGreaterEqual(stats["events"], 2)
-        commands = {row["command"] for row in stats["commands"]}
-        self.assertIn("search", commands)
-        self.assertIn("run", commands)
-        self.assertGreater(stats["visible_chars"], 0)
-        self.assertIn("tokens=visible_chars/4", stats["measurement_note"])
-        self.assertEqual(stats["successes"], stats["tool_ok"])
-        self.assertEqual(stats["failures"], stats["tool_errors"])
-        self.assertEqual(stats["success_rate"], stats["tool_reliability"])
-        for row in stats["commands"]:
-            self.assertEqual(row["successes"], row["tool_ok"])
-            self.assertEqual(row["failures"], row["tool_errors"])
 
     def test_disabled_context_cache_advice_does_not_access_storage(self) -> None:
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
@@ -455,9 +367,8 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             subprocess.Popen(
                 [
                     str(AGENTQ),
-                    "doctor",
-                    "--repo",
-                    str(self.repo),
+                    "search",
+                    "OldName",
                     "--format",
                     "json",
                     "--budget",
@@ -505,43 +416,42 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             "AGENTQ_CONTEXT_CACHE_HOME": str(disabled_cache),
         }
 
-        first_read = self.data(
-            "read", "packages/a/src/index.ts:1-3", extra_env=disabled_env
-        )
-        second_read = self.data(
-            "read", "packages/a/src/index.ts:1-3", extra_env=disabled_env
-        )
-        self.assertEqual(len(first_read["items"][0]["lines"]), 3)
-        self.assertEqual(len(second_read["items"][0]["lines"]), 3)
-        self.assertFalse(second_read["items"][0].get("suppressed", False))
+        first_search = self.data("search", "OldName", extra_env=disabled_env)
+        second_search = self.data("search", "OldName", extra_env=disabled_env)
+        self.assertGreaterEqual(first_search["shown"], 1)
+        self.assertFalse(second_search.get("repeat_suppressed", False))
 
-        self.change_a("\nexport const telemetryDisabled = true\n")
-        first_diff = self.data("git-diff", "--patch", extra_env=disabled_env)
-        second_diff = self.data("git-diff", "--patch", extra_env=disabled_env)
-        self.assertTrue(first_diff["patch"])
-        self.assertEqual(second_diff["patch"], first_diff["patch"])
-        self.assertFalse(second_diff.get("repeat_suppressed", False))
+        first_inspect = self.data(
+            "inspect", "packages/a/src/index.ts", "--lines", "1:3",
+            extra_env=disabled_env,
+        )
+        second_inspect = self.data(
+            "inspect", "packages/a/src/index.ts", "--lines", "1:3",
+            extra_env=disabled_env,
+        )
+        self.assertTrue(first_inspect["source"]["items"][0]["lines"])
+        self.assertTrue(second_inspect["source"]["items"][0]["lines"])
+        self.assertFalse(second_inspect.get("repeat_suppressed", False))
 
-        doctor = self.data("doctor", extra_env=disabled_env)
-        self.assertFalse(doctor["telemetry"]["enabled"])
         self.assertFalse(disabled_hot.exists())
         self.assertFalse(disabled_state.parent.exists())
         self.assertFalse(disabled_cache.exists())
 
-    def test_telemetry_records_private_fingerprints_transitions_and_coverage(
-        self,
-    ) -> None:
+    def test_telemetry_records_private_fingerprints_and_transitions(self) -> None:
         secret = "QUERY_THAT_MUST_NOT_APPEAR_74ca"
-        self.data("task", "begin")
         self.data("search", secret)
-        self.data("read", "packages/a/src/index.ts:1-2")
-        self.data("task", "accept")
-        stats = self.data("stats", "--since", "all", "--detailed")
+        self.data("inspect", "packages/a/src/index.ts", "--lines", "1:2")
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq import telemetry as telemetry_module
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            stats = telemetry_module.stats_data(self.repo, since="all", detailed=True)
         self.assertGreaterEqual(stats["invocation_chars"], 1)
         self.assertTrue(
-            any(item["transition"] == "search → read" for item in stats["transitions"])
+            any(
+                item["transition"] == "search → inspect"
+                for item in stats["transitions"]
+            )
         )
-        self.assertIsNotNone(stats["tasks"]["calls_distribution"]["p50"])
         self.assertIn("instrumented_call_percent", stats["measurement"])
         raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
         self.assertNotIn(secret, raw)
@@ -558,39 +468,33 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         secret_path = "private-path-91fdb.ts"
         secret_source = "PRIVATE_SOURCE_FRAGMENT_91fdb"
         secret_option = "--private-option-91fdb"
-        secret_choice = "private_choice_91fdb"
         secret_trailing = "private-trailing-path-91fdb"
         (self.repo / secret_path).write_text(
             f"export const value = '{secret_source}'\n", encoding="utf-8"
         )
 
         self.data("search", secret_query)
-        self.data("read", secret_path)
+        self.data("inspect", secret_path, "--lines", "1:2")
         self.aq("search", secret_query, secret_trailing, expect=2)
         self.aq("inspect", secret_path, secret_option, expect=2)
-        self.aq("ts-nav", secret_choice, expect=2)
 
         hot_raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
-        self.data("stats", "--archive-only", "--all-repos")
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq import telemetry as telemetry_module
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            telemetry_module.archive_hot_events()
         archive_raw = self.archive.read_text(encoding="utf-8")
         for raw in (hot_raw, archive_raw):
             self.assertNotIn(secret_query, raw)
             self.assertNotIn(secret_path, raw)
             self.assertNotIn(secret_source, raw)
             self.assertNotIn(secret_option, raw)
-            self.assertNotIn(secret_choice, raw)
             self.assertNotIn(secret_trailing, raw)
             events = [json.loads(line) for line in raw.splitlines() if line.strip()]
             signatures = [str(event.get("error_signature", "")) for event in events]
             self.assertTrue(
                 any(
                     signature.startswith("invalid-option:inspect:hmac-")
-                    for signature in signatures
-                )
-            )
-            self.assertTrue(
-                any(
-                    signature.startswith("invalid-choice:ts-nav:hmac-")
                     for signature in signatures
                 )
             )
@@ -637,24 +541,24 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         (self.telemetry / "events.jsonl").write_text(
             json.dumps(legacy) + "\n", encoding="utf-8"
         )
-        stats = self.data("stats", "--since", "all")
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq import telemetry as telemetry_module
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            stats = telemetry_module.stats_data(self.repo, since="all")
         self.assertEqual(stats["tool_errors"], 0)
         self.assertEqual(stats["project_commands"]["failed"], 1)
 
-    def test_read_overlap_is_version_aware_and_private(self) -> None:
-        self.data("task", "begin")
-        first = self.data("read", "packages/a/src/index.ts:1-3")
-        self.assertNotIn("read_overlap", first)
-        second = self.data("read", "packages/a/src/index.ts:2-4")
-        self.assertEqual(second["read_overlap"]["overlap_lines"], 2)
-        self.assertEqual(second["read_overlap"]["scope"], "task")
-
-        stats = self.data("stats", "--since", "all")
-        self.assertEqual(stats["reads"]["tracked_calls"], 2)
-        self.assertEqual(stats["reads"]["unique_files"], 1)
-        self.assertEqual(stats["reads"]["reread_ranges"], 1)
-        self.assertEqual(stats["reads"]["overlap_lines"], 0)
-        self.assertEqual(stats["reads"]["online_cache_overlap_lines"], 2)
+    def test_inspect_read_overlap_is_version_aware_and_private(self) -> None:
+        session = {**self.env, "AGENTQ_SESSION_ID": "read-overlap"}
+        first = self.data(
+            "inspect", "packages/a/src/index.ts", "--lines", "1:3", extra_env=session
+        )
+        self.assertNotIn("read_overlap", first["source"])
+        second = self.data(
+            "inspect", "packages/a/src/index.ts", "--lines", "2:4", extra_env=session
+        )
+        self.assertEqual(second["source"]["read_overlap"]["overlap_lines"], 2)
+        self.assertEqual(second["source"]["read_overlap"]["scope"], "session")
 
         raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("packages/a/src/index.ts", raw)
@@ -664,5 +568,7 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             path.read_text(encoding="utf-8") + "\nexport const versionChanged = 1\n",
             encoding="utf-8",
         )
-        third = self.data("read", "packages/a/src/index.ts:2-4")
-        self.assertNotIn("read_overlap", third)
+        third = self.data(
+            "inspect", "packages/a/src/index.ts", "--lines", "2:4", extra_env=session
+        )
+        self.assertNotIn("read_overlap", third["source"])

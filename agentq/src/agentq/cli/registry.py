@@ -19,9 +19,7 @@ from agentq.delivery import DispatchResult
 from .parsers.options import (
     SubParsers,
     add_common,
-    add_plan_options,
     add_scope,
-    add_sensitive,
 )
 
 Outcome = int | DispatchResult
@@ -33,15 +31,11 @@ class Group(str, Enum):
 
     COMMON = "common"
     SCOPE = "scope"
-    SENSITIVE = "sensitive"
-    PLAN = "plan"
 
 
 _GROUP_ADDERS: dict[Group, Callable[[argparse.ArgumentParser], None]] = {
     Group.COMMON: add_common,
     Group.SCOPE: add_scope,
-    Group.SENSITIVE: add_sensitive,
-    Group.PLAN: add_plan_options,
 }
 
 
@@ -74,15 +68,9 @@ def register_commands(sub: SubParsers, commands: Sequence[CommandSpec]) -> None:
 
 def all_commands() -> tuple[CommandSpec, ...]:
     """Every registered command, assembled from the CLI domain modules."""
-    from .parsers import discovery, execution, git, mutation, navigation
+    from .parsers import discovery, navigation
 
-    return (
-        *discovery.COMMANDS,
-        *git.COMMANDS,
-        *mutation.COMMANDS,
-        *execution.COMMANDS,
-        *navigation.COMMANDS,
-    )
+    return (*discovery.COMMANDS, *navigation.COMMANDS)
 
 
 def execute(args: argparse.Namespace, root: Path) -> Outcome:

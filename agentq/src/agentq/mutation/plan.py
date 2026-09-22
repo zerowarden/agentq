@@ -251,7 +251,9 @@ def _ast_plan_files(
             original = (request.root / rel).read_bytes()
             postimage = (staging / rel).read_bytes()
             files.append(
-                _planned_file(rel, original, postimage, count, span_edits(original, postimage))
+                _planned_file(
+                    rel, original, postimage, count, span_edits(original, postimage)
+                )
             )
     finally:
         shutil.rmtree(staging, ignore_errors=True)

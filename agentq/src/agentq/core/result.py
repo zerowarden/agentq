@@ -124,7 +124,9 @@ class ProviderResult(Generic[PayloadT]):
         }
 
     @classmethod
-    def from_wire(cls, value: Any, *, what: str = "provider result") -> ProviderResult[Any]:
+    def from_wire(
+        cls, value: Any, *, what: str = "provider result"
+    ) -> ProviderResult[Any]:
         payload = require_mapping(value, what)
         reject_unknown_keys(
             payload,

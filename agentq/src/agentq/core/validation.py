@@ -64,9 +64,7 @@ def require_mapping(value: Any, what: str) -> dict[str, Any]:
     return cast("dict[str, Any]", value)
 
 
-def is_instance_of(
-    value: Any, expected: type[Any] | tuple[type[Any], ...]
-) -> bool:
+def is_instance_of(value: Any, expected: type[Any] | tuple[type[Any], ...]) -> bool:
     """Runtime type guard for values crossing a dynamic boundary."""
     return isinstance(value, expected)
 

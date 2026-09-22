@@ -61,9 +61,7 @@ def attribution_total(attribution: Any) -> int:
     if not isinstance(attribution, dict):
         return 0
     values = cast("dict[str, Any]", attribution)
-    return sum(
-        max(0, int(values.get(key, 0) or 0)) for key in OUTPUT_ATTRIBUTION_KEYS
-    )
+    return sum(max(0, int(values.get(key, 0) or 0)) for key in OUTPUT_ATTRIBUTION_KEYS)
 
 
 def output_view(command: str, data: dict[str, Any] | None) -> str:

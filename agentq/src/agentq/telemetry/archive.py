@@ -265,9 +265,10 @@ def _rewrite_excluding_repo(path: Path, repo_id: str) -> int:
                 keep = True
                 try:
                     event = json.loads(line)
-                    if isinstance(event, dict) and as_dict(event).get(
-                        "repo_id"
-                    ) == repo_id:
+                    if (
+                        isinstance(event, dict)
+                        and as_dict(event).get("repo_id") == repo_id
+                    ):
                         keep = False
                 except json.JSONDecodeError:
                     pass

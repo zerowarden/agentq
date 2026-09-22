@@ -296,9 +296,7 @@ class PythonVerificationProvider:
             and facts.candidate_tests
             else ()
         )
-        if any(
-            len(targets) > limit for targets in (direct_targets, candidate_targets)
-        ):
+        if any(len(targets) > limit for targets in (direct_targets, candidate_targets)):
             return (
                 [
                     make_check(

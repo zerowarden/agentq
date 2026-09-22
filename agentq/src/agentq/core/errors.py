@@ -1,5 +1,4 @@
-"""Foundational application errors.
-"""
+"""Foundational application errors."""
 
 from __future__ import annotations
 

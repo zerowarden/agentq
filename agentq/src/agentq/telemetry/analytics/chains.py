@@ -127,7 +127,8 @@ def read_chain_behavior(
 ) -> dict[str, Any]:
     reads = [event for event in events if event.get("command") == "read"]
     counts = [
-        int((dict_field(event, "metrics")).get("read_range_count", 0)) for event in reads
+        int((dict_field(event, "metrics")).get("read_range_count", 0))
+        for event in reads
     ]
     consecutive = same_file = adjacent = 0
     for items in contexts.values():
@@ -137,8 +138,12 @@ def read_chain_behavior(
             if float(right.get("time", 0)) - float(left.get("time", 0)) > 30 * 60:
                 continue
             consecutive += 1
-            left_ranges: list[Any] = (dict_field(left, "metrics")).get("read_ranges") or []
-            right_ranges: list[Any] = (dict_field(right, "metrics")).get("read_ranges") or []
+            left_ranges: list[Any] = (dict_field(left, "metrics")).get(
+                "read_ranges"
+            ) or []
+            right_ranges: list[Any] = (dict_field(right, "metrics")).get(
+                "read_ranges"
+            ) or []
             pair_same = pair_adjacent = False
             for lrange in left_ranges:
                 for rrange in right_ranges:

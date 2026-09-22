@@ -261,9 +261,12 @@ class SearchFile:
             role=str(payload.get("role", "source")),
             matching_lines=int(payload.get("matching_lines", 0) or 0),
             kind_counts=dict(dict_field(payload, "kind_counts")),
-            hits=tuple(SearchHit.from_wire(item) for item in list_field(payload, "hits")),
+            hits=tuple(
+                SearchHit.from_wire(item) for item in list_field(payload, "hits")
+            ),
             snippets=tuple(
-                SourceSnippet.from_wire(item) for item in list_field(payload, "snippets")
+                SourceSnippet.from_wire(item)
+                for item in list_field(payload, "snippets")
             ),
         )
 
@@ -557,9 +560,7 @@ class SearchResult:
         continuation = self.continuation
         block = wire.get("continuation")
         if continuation is not None and isinstance(block, Mapping):
-            continuation = continuation.with_display(
-                cast("Mapping[str, Any]", block)
-            )
+            continuation = continuation.with_display(cast("Mapping[str, Any]", block))
         budget = self.budget_continuation
         budget_block = wire.get("budget_continuation")
         if budget is not None and isinstance(budget_block, Mapping):
@@ -578,7 +579,9 @@ class SearchResult:
             mode=str(payload.get("mode", "fixed")),
             word=bool(payload.get("word")),
             paths=tuple(str(item) for item in list_field(payload, "paths")),
-            hits=tuple(SearchHit.from_wire(item) for item in list_field(payload, "hits")),
+            hits=tuple(
+                SearchHit.from_wire(item) for item in list_field(payload, "hits")
+            ),
             files=tuple(
                 SearchFile.from_wire(item) for item in list_field(payload, "files")
             ),

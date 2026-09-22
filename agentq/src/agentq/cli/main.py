@@ -18,26 +18,9 @@ from .parsers.options import expansion_controls
 from .registry import Outcome, execute
 from .transport import detach_stdout, write_stderr
 
-_STATS_ADMIN_FLAGS = (
-    "archive_only",
-    "storage",
-    "install_persistence",
-    "remove_persistence",
-)
-
-
-def _stats_admin_action(args: argparse.Namespace) -> bool:
-    if getattr(args, "command", None) != "stats":
-        return False
-    if any(bool(getattr(args, flag, False)) for flag in _STATS_ADMIN_FLAGS):
-        return True
-    return bool(getattr(args, "reset", False) and getattr(args, "all_repos", False))
-
 
 def _resolve_root(args: argparse.Namespace) -> Path:
-    if _stats_admin_action(args):
-        return Path(args.repo).expanduser().resolve()
-    return repo_root(args.repo)
+    return repo_root(".")
 
 
 def _exit_code(outcome: Outcome) -> int:

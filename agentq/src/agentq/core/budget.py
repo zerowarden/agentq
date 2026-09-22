@@ -72,7 +72,9 @@ def _project(
         projected_items: list[Any] = []
         used = 2
         encoded_items = [_encode(item) for item in values]
-        for index, (item, encoded) in enumerate(zip(values, encoded_items, strict=True)):
+        for index, (item, encoded) in enumerate(
+            zip(values, encoded_items, strict=True)
+        ):
             cost = len(encoded) + (1 if projected_items else 0)
             if used + cost > budget:
                 _record_omission(omitted, path, len(values) - index)

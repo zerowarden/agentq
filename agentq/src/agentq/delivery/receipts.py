@@ -224,9 +224,7 @@ def record_delivery(
     ]
     hints_value = internal.get("delivery")
     hints: Mapping[str, Any] = (
-        cast("Mapping[str, Any]", hints_value)
-        if isinstance(hints_value, dict)
-        else {}
+        cast("Mapping[str, Any]", hints_value) if isinstance(hints_value, dict) else {}
     )
     if not dispatch.render_budget_truncated:
         for kind in ("operation", "result"):

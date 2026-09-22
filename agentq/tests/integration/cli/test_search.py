@@ -1,4 +1,4 @@
-"""Bounded search, files, repo-map, and outline CLI behavior."""
+"""Bounded search CLI behavior."""
 
 from __future__ import annotations
 
@@ -19,25 +19,10 @@ class SearchCliTests(AgentQIntegrationHarness):
         data = self.data("search", "A|B")
         self.assertEqual(data["shown"], 1)
         self.assertEqual(data["hits"][0]["path"], "packages/a/src/index.ts")
-        files = self.data("files", ".env")
-        self.assertEqual(files["shown"], 0)
+        sensitive = self.data("search", "secret-do-not-read")
+        self.assertEqual(sensitive["shown"], 0)
         symbol = self.data("search", "OldName")
         self.assertTrue(symbol["semantic_candidate"])
-
-    def test_search_context_is_bounded_and_returned(self) -> None:
-        data = self.data("search", "makeOldName", "--context", "1", "--limit", "10")
-        self.assertEqual(data["context"], 1)
-        self.assertGreaterEqual(len(data["context_lines"]), 1)
-        self.assertLessEqual(len(data["context_lines"]), 10)
-
-    def test_repo_map_outline_and_dependencies(self) -> None:
-        repo_map = self.data("repo-map")
-        self.assertGreaterEqual(repo_map["files"], 8)
-        outline = self.data("outline", "packages/a/src", "--match", "OldName")
-        self.assertGreaterEqual(outline["shown"], 1)
-        deps = self.data("dependencies", "--target", "@test/a", "--depth", "2")
-        dependents = deps["matches"][0]["dependents"]
-        self.assertTrue(any(item["name"] == "@test/b" for item in dependents))
 
     def test_search_totals_are_truthful_and_sampling_is_explicit(self) -> None:
         path = self.repo / "packages/a/src/many.ts"
@@ -50,14 +35,10 @@ class SearchCliTests(AgentQIntegrationHarness):
             "Needle",
             "--path",
             "packages/a/src/many.ts",
-            "--samples-per-file",
-            "3",
-            "--max-results",
-            "180",
         )
         self.assertEqual(data["total_matching_lines"], 12)
         self.assertEqual(data["matching_files"], 1)
-        self.assertEqual(data["shown"], 3)
+        self.assertEqual(data["shown"], 8)
         self.assertEqual(data["coverage"]["status"], "sampled")
         self.assertEqual(data["coverage"]["reason"], ["result_limit"])
         self.assertEqual(data["match_file_summary"][0]["matching_lines"], 12)
@@ -66,7 +47,7 @@ class SearchCliTests(AgentQIntegrationHarness):
         path = self.repo / "packages/a/src/compact.ts"
         path.write_text(
             "".join(
-                f"export const compact{index} = 'COMPACT_HIT'\n" for index in range(12)
+                f"export const compact{index} = 'COMPACT_HIT'\n" for index in range(6)
             ),
             encoding="utf-8",
         )
@@ -75,13 +56,6 @@ class SearchCliTests(AgentQIntegrationHarness):
             "COMPACT_HIT",
             "--path",
             "packages/a/src/compact.ts",
-            "--context",
-            "1",
-            "--max-results",
-            "12",
-            "--samples-per-file",
-            "12",
-            "--repeat",
         )
         legacy_result = self.aq(*common)
         compact_result = self.aq(*common, "--format", "compact-json")
@@ -92,7 +66,7 @@ class SearchCliTests(AgentQIntegrationHarness):
             {"hits", "files", "context_lines", "match_file_summary"} <= set(legacy)
         )
         self.assertEqual(set(compact), {"summary", "files", "continuation"})
-        self.assertEqual(compact["summary"]["matches"], {"shown": 12, "total": 12})
+        self.assertEqual(compact["summary"]["matches"], {"shown": 6, "total": 6})
         self.assertEqual(compact["summary"]["coverage"]["status"], "complete")
         self.assertIsNone(compact["continuation"])
         self.assertNotIn("hits", compact["files"][0])
@@ -117,15 +91,12 @@ class SearchCliTests(AgentQIntegrationHarness):
             "CONTINUE_HIT",
             "--path",
             "packages/a/src/continuation.ts",
-            "--samples-per-file",
-            "3",
             "--format",
             "compact-json",
-            "--repeat",
         )
         sampled = json.loads(sampled_result.stdout)
         self.assertEqual(sampled["summary"]["coverage"]["status"], "sampled")
-        self.assertEqual(sampled["continuation"]["omitted"]["matches"], 9)
+        self.assertEqual(sampled["continuation"]["omitted"]["matches"], 4)
         continuation_argv = shlex.split(sampled["continuation"]["command"])
         continuation_argv[0] = str(AGENTQ)
         continued = subprocess.run(
@@ -144,8 +115,6 @@ class SearchCliTests(AgentQIntegrationHarness):
             [
                 str(AGENTQ),
                 "search",
-                "--repo",
-                str(self.repo),
                 "--format",
                 "compact-json",
                 "--budget",
@@ -153,11 +122,6 @@ class SearchCliTests(AgentQIntegrationHarness):
                 "CONTINUE_HIT",
                 "--path",
                 "packages/a/src/continuation.ts",
-                "--max-results",
-                "12",
-                "--samples-per-file",
-                "12",
-                "--repeat",
             ],
             cwd=self.repo,
             env=self.env,
@@ -173,7 +137,7 @@ class SearchCliTests(AgentQIntegrationHarness):
         )
 
     def test_search_auto_view_and_text_header_are_concise(self) -> None:
-        exact = self.data("search", "OldName", "--format", "compact-json", "--repeat")
+        exact = self.data("search", "OldName", "--format", "compact-json")
         self.assertEqual(exact["summary"]["intent"], "exact-symbol")
         self.assertEqual(exact["summary"]["view"], "matches")
         kinds = {
@@ -193,13 +157,8 @@ class SearchCliTests(AgentQIntegrationHarness):
             "BROAD_AUTO",
             "--path",
             "packages/a/src/broad.ts",
-            "--max-results",
-            "45",
-            "--samples-per-file",
-            "45",
             "--format",
             "compact-json",
-            "--repeat",
         )
         self.assertEqual(broad["summary"]["intent"], "broad-summary")
         self.assertEqual(broad["summary"]["view"], "summary")
@@ -209,7 +168,7 @@ class SearchCliTests(AgentQIntegrationHarness):
         self.assertTrue(broad["continuation"]["cursor"])
 
         rendered = subprocess.run(
-            [str(AGENTQ), "search", "--repo", str(self.repo), "OldName", "--repeat"],
+            [str(AGENTQ), "search", "OldName"],
             cwd=self.repo,
             env=self.env,
             text=True,
@@ -232,8 +191,6 @@ class SearchCliTests(AgentQIntegrationHarness):
             "CENTER_NEEDLE",
             "--path",
             "packages/a/src/long.ts",
-            "--max-chars",
-            "80",
         )
         self.assertIn("CENTER_NEEDLE", cropped["hits"][0]["text"])
 
@@ -241,7 +198,7 @@ class SearchCliTests(AgentQIntegrationHarness):
         generated = self.repo / "packages/a/src/database.generated.ts"
         config.write_text("export const marker = 'ROLE_MARK'\n", encoding="utf-8")
         generated.write_text("export const marker = 'ROLE_MARK'\n", encoding="utf-8")
-        roles = self.data("search", "ROLE_MARK", "--samples-per-file", "10")
+        roles = self.data("search", "ROLE_MARK")
         by_path = {item["path"]: item["role"] for item in roles["match_file_summary"]}
         self.assertEqual(by_path["vitest.config.ts"], "config")
         self.assertEqual(by_path["packages/a/src/database.generated.ts"], "generated")
@@ -313,8 +270,6 @@ class SearchCliTests(AgentQIntegrationHarness):
             [
                 str(AGENTQ),
                 "search",
-                "--repo",
-                str(self.repo),
                 "--format",
                 "text",
                 "--budget",
@@ -322,12 +277,8 @@ class SearchCliTests(AgentQIntegrationHarness):
                 "lbItem",
                 "--path",
                 "packages/a/src",
-                "--coverage",
-                "fast",
                 "--scan-cap",
                 "30",
-                "--max-results",
-                "5",
             ],
             text=True,
             capture_output=True,

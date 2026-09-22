@@ -86,26 +86,6 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertIn("typescript", rendered)
         self.assertIn("python", rendered)
 
-    def test_inspect_locate_intent_skips_references(self) -> None:
-        (self.repo / "packages/a/src/located.py").write_text(
-            "class Located:\n    pass\n", encoding="utf-8"
-        )
-        data = self.data(
-            "inspect",
-            "Located",
-            "--path",
-            "packages/a/src/located.py",
-            "--intent",
-            "locate",
-            "--lang",
-            "python",
-        )
-        self.assertEqual(data["kind"], "python")
-        python = data["python"]
-        self.assertEqual(python["references"]["results"], [])
-        self.assertEqual(python["references"]["total"], 0)
-        self.assertTrue(python["references_omitted"])
-
     def test_inspect_edit_intent_bundles_declaration_tests_and_package(self) -> None:
         (self.repo / "packages/a/pyproject.toml").write_text(
             '[project]\nname = "apy"\n', encoding="utf-8"
@@ -122,11 +102,9 @@ class InspectCliTests(AgentQIntegrationHarness):
             "inspect",
             "Edited",
             "--path",
-            "packages/a/src",
+            "packages/a/src/edited.py",
             "--intent",
             "edit",
-            "--lang",
-            "python",
         )
         self.assertEqual(data["kind"], "edit")
         self.assertEqual(data["provenance"], "syntactic")
@@ -144,19 +122,15 @@ class InspectCliTests(AgentQIntegrationHarness):
             [
                 str(AGENTQ),
                 "inspect",
-                "--repo",
-                str(self.repo),
                 "--format",
                 "text",
                 "--budget",
                 "100000",
                 "Edited",
                 "--path",
-                "packages/a/src",
+                "packages/a/src/edited.py",
                 "--intent",
                 "edit",
-                "--lang",
-                "python",
             ],
             text=True,
             capture_output=True,
@@ -208,20 +182,7 @@ class InspectCliTests(AgentQIntegrationHarness):
         node_modules.mkdir(exist_ok=True)
         (node_modules / "typescript").symlink_to(global_pkg, target_is_directory=True)
 
-        located = self.data("ts-nav", "locate", "OldName", "--path", "packages")
-        self.assertEqual(located["resolution_mode"], "symbol")
-        self.assertEqual(located["total"], 1)
-        self.assertEqual(located["candidates"][0]["path"], "packages/a/src/index.ts")
-
-        refs = self.data("ts-nav", "refs", "OldName", "--path", "packages")
-        self.assertEqual(refs["resolution_mode"], "symbol")
-        self.assertGreaterEqual(refs["total"], 2)
-        paths = {item["path"] for item in refs["results"]}
-        self.assertIn("packages/b/src/index.ts", paths)
-
-        inspected = self.data(
-            "inspect", "OldName", "--path", "packages", "--limit", "20"
-        )
+        inspected = self.data("inspect", "OldName", "--path", "packages")
         self.assertEqual(inspected["kind"], "semantic")
 
     def test_python_inspect_uses_ast_definitions_and_bounded_lexical_references(
@@ -247,8 +208,6 @@ class InspectCliTests(AgentQIntegrationHarness):
             "calculate_total",
             "--path",
             "packages/a/src/python_nav.py",
-            "--limit",
-            "20",
         )
         self.assertEqual(inspected["kind"], "python")
         python = inspected["python"]
@@ -268,25 +227,3 @@ class InspectCliTests(AgentQIntegrationHarness):
         )
         self.assertGreaterEqual(python["references"]["total"], 2)
         self.assertIn("not semantic proof", python["evidence"])
-
-    def test_inspect_source_window_max_lines_is_bounded(self) -> None:
-        path = self.repo / "packages/a/src/inspect_windows.py"
-        path.write_text(
-            "".join(f"inspect {index}\n" for index in range(1, 181)), encoding="utf-8"
-        )
-        source = self.data(
-            "inspect",
-            "packages/a/src/inspect_windows.py",
-            "--line",
-            "30",
-            "90",
-            "--context",
-            "2",
-            "--limit",
-            "1",
-            "--max-lines",
-            "5",
-        )["source"]
-        self.assertEqual(sum(len(item["lines"]) for item in source["items"]), 5)
-        self.assertTrue(source["truncated"])
-        self.assertIn("continuation", source)

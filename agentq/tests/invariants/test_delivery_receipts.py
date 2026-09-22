@@ -89,17 +89,24 @@ class DeliveryHarness(unittest.TestCase):
             env=self.env,
         )
 
-    def aq(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def aq(
+        self, *args: str, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.env.copy()
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
-            [str(AGENTQ), args[0], "--repo", str(self.repo), *args[1:]],
+            [str(AGENTQ), args[0], *args[1:]],
             text=True,
             capture_output=True,
-            env=self.env,
+            env=env,
             cwd=self.repo,
         )
 
-    def data(self, *args: str) -> dict:
-        result = self.aq(*args, "--format", "json", "--budget", "100000")
+    def data(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
+        result = self.aq(
+            *args, "--format", "json", "--budget", "100000", extra_env=extra_env
+        )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         return json.loads(result.stdout)
 
@@ -138,18 +145,18 @@ class CollectorWritesNothingTests(DeliveryHarness):
         env = _harness_env(self.base, session=None)
         env.update({"AGENTQ_CONTEXT_CACHE": "1"})
 
-        def run_read() -> dict:
+        def run_search() -> dict:
             result = subprocess.run(
                 [
                     str(AGENTQ),
-                    "read",
-                    "--repo",
-                    str(self.repo),
+                    "search",
                     "--format",
                     "json",
                     "--budget",
                     "100000",
-                    "pkg/mod.py:1-3",
+                    "line",
+                    "--path",
+                    "pkg/mod.py",
                 ],
                 text=True,
                 capture_output=True,
@@ -159,15 +166,15 @@ class CollectorWritesNothingTests(DeliveryHarness):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             return json.loads(result.stdout)
 
-        run_read()
-        payload = run_read()
-        self.assertFalse(payload["items"][0].get("suppressed", False))
+        run_search()
+        payload = run_search()
+        self.assertFalse(payload.get("repeat_suppressed", False))
         with mock.patch.dict(os.environ, env, clear=False):
             self.assertEqual(self.ledger_counts(), (0, 0))
 
 
 class EmissionRecordingTests(DeliveryHarness):
-    def test_small_budget_edit_omits_declaration_then_direct_read_returns_it(
+    def test_small_budget_edit_omits_declaration_then_direct_inspect_returns_it(
         self,
     ) -> None:
         (self.repo / "pkg" / "edited.py").write_text(
@@ -176,8 +183,6 @@ class EmissionRecordingTests(DeliveryHarness):
         )
         rendered = self.aq(
             "inspect",
-            "--repo",
-            str(self.repo),
             "--format",
             "text",
             "--budget",
@@ -187,14 +192,13 @@ class EmissionRecordingTests(DeliveryHarness):
             "pkg",
             "--intent",
             "edit",
-            "--lang",
-            "python",
         )
         self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
         self.assertNotIn("return 7", rendered.stdout)
-        direct = self.data("read", "pkg/edited.py:1-3")
-        self.assertEqual(len(direct["items"][0]["lines"]), 3)
-        self.assertNotIn("read_overlap", direct)
+        direct = self.data("inspect", "pkg/edited.py", "--lines", "1:3")
+        source = direct["source"]
+        self.assertEqual(len(source["items"][0]["lines"]), 3)
+        self.assertNotIn("read_overlap", source)
 
     def test_partial_window_records_only_emitted_fragments(self) -> None:
         from dataclasses import replace
@@ -321,7 +325,7 @@ class EmissionRecordingTests(DeliveryHarness):
                 cache_module.read_repeat_advice(self.repo, stale_probe, command="read")
             )
 
-    def test_forced_repeat_reaches_nested_reads(self) -> None:
+    def test_nested_read_suppression_is_context_scoped(self) -> None:
         # A text inspect first: its JSON sibling would be suppressed at the
         # whole-operation level, which is not the nested read under test.
         rendered = self.aq(
@@ -335,33 +339,26 @@ class EmissionRecordingTests(DeliveryHarness):
             "pkg",
             "--intent",
             "edit",
-            "--lang",
-            "python",
         )
         self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
         self.assertIn("return 1", rendered.stdout)
         self.assertGreater(self.ledger_counts()[1], 0)
 
-        nested = self.data(
-            "inspect", "target", "--path", "pkg", "--intent", "edit", "--lang", "python"
-        )
+        nested = self.data("inspect", "target", "--path", "pkg", "--intent", "edit")
         declaration = nested["edit"]["declaration"]["items"][0]
         self.assertTrue(declaration["suppressed"])
         self.assertEqual(declaration["lines"], [])
 
-        forced = self.data(
+        fresh = self.data(
             "inspect",
             "target",
             "--path",
             "pkg",
             "--intent",
             "edit",
-            "--lang",
-            "python",
-            "--repeat",
+            extra_env={"AGENTQ_SESSION_ID": "delivery-fresh"},
         )
-        declaration = forced["edit"]["declaration"]["items"][0]
-        self.assertTrue(forced["edit"]["declaration"]["repeat"])
+        declaration = fresh["edit"]["declaration"]["items"][0]
         self.assertFalse(declaration.get("suppressed", False))
         self.assertTrue(declaration["lines"])
 

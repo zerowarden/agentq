@@ -274,8 +274,6 @@ class AgentQIntegrationHarness(unittest.TestCase):
         argv = [
             str(AGENTQ),
             args[0],
-            "--repo",
-            str(self.repo),
             "--format",
             "json",
             "--budget",

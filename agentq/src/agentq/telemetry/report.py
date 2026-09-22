@@ -349,9 +349,7 @@ def stats_data(
     )
     output_profiles = output_profile_rows(operation_events) if detailed else []
     search_format_data = search_format_usage(operation_events)
-    retry_data = (
-        retry_behavior(operation_events) if detailed else retry_behavior([])
-    )
+    retry_data = retry_behavior(operation_events) if detailed else retry_behavior([])
     error_categories = facets["errors"]
     if since == "7d":
         cohort_events, _ = load_events(
@@ -909,9 +907,7 @@ def _cohort_detail_section(cohort: dict[str, Any]) -> dict[str, Any] | None:
     current: dict[str, Any] = dict_field(cohort, "current")
     previous: dict[str, Any] = dict_field(cohort, "previous")
     if not cohort.get("available") or not (
-        cohort_rows
-        or int(current.get("calls", 0))
-        or int(previous.get("calls", 0))
+        cohort_rows or int(current.get("calls", 0)) or int(previous.get("calls", 0))
     ):
         return None
     current_excluded: dict[str, Any] = dict_field(current, "excluded")
@@ -1086,8 +1082,7 @@ def _semantic_navigation_section(
             "Semantic calls",
             f"{int(navigation['semantic_calls'])} calls, {int(navigation.get('semantic_ambiguous', 0))} ambiguous, sources: "
             + ", ".join(
-                f"{name} {count}"
-                for name, count in sorted(semantic_sources.items())
+                f"{name} {count}" for name, count in sorted(semantic_sources.items())
             ),
         )
     ]
@@ -1178,9 +1173,7 @@ def _verification_scope_section(
     }
 
 
-def _recent_section(
-    data: dict[str, Any], *, utc: bool
-) -> dict[str, Any] | None:
+def _recent_section(data: dict[str, Any], *, utc: bool) -> dict[str, Any] | None:
     """Build the recent events detail section."""
     recent_rows = [
         _presentation_row(

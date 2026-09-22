@@ -30,6 +30,8 @@ from agentq.core import (
     typed_coverage,
     unavailable_result,
 )
+from agentq.core.languages import language_id_for
+from agentq.discovery import list_repo_files
 
 from .models import (
     NavigationProvider,
@@ -46,6 +48,49 @@ LANGUAGE_PROVIDERS: tuple[NavigationProvider, ...] = (
     PythonProvider(),
 )
 LEXICAL_FALLBACK: NavigationProvider = LexicalFallbackProvider()
+
+_PROVIDER_LANGUAGES: dict[str, frozenset[str]] = {
+    "typescript": frozenset({"typescript", "tsx", "javascript", "jsx"}),
+    "python": frozenset({"python"}),
+}
+
+
+def _scope_languages(root: Path, paths: tuple[str, ...]) -> frozenset[str] | None:
+    """Languages present in explicit scopes; ``None`` when not enumerable.
+
+    A provider whose language is absent from every scope is not applicable, so
+    its unavailable runtime cannot downgrade resolution for the scopes.
+    """
+    if not paths:
+        return None
+    try:
+        files = list_repo_files(root)
+    except (AgentQError, OSError):
+        return None
+    languages: set[str] = set()
+    for scope in paths:
+        prefix = scope.rstrip("/") + "/"
+        scoped = [item for item in files if item == scope or item.startswith(prefix)]
+        if not scoped:
+            return None
+        languages.update(
+            language for item in scoped if (language := language_id_for(item))
+        )
+    return frozenset(languages)
+
+
+def _applicable_providers(request: NavigationRequest) -> tuple[NavigationProvider, ...]:
+    scoped = _scope_languages(request.root, request.paths)
+    return tuple(
+        provider
+        for provider in LANGUAGE_PROVIDERS
+        if provider.supports(request)
+        and (
+            scoped is None
+            or request.lang is not None
+            or bool(_PROVIDER_LANGUAGES.get(provider.name, frozenset()) & scoped)
+        )
+    )
 
 
 def query_provider(
@@ -162,8 +207,7 @@ def resolve_symbol(
     )
     outcomes = tuple(
         query_provider(provider, request, include_references)
-        for provider in LANGUAGE_PROVIDERS
-        if provider.supports(request)
+        for provider in _applicable_providers(request)
     )
     resolution = SymbolResolution(outcomes=outcomes)
     if not any(outcome.candidate_count for outcome in outcomes):

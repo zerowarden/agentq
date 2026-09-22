@@ -1,7 +1,4 @@
-"""Presentation renderers for typed Git results.
-
-Renderers are pure text projection: they never collect, mutate, or execute.
-"""
+"""Presentation renderers for typed Git results."""
 
 from __future__ import annotations
 
@@ -17,7 +14,7 @@ from .models import (
 )
 
 
-def render_status(result: StatusResult, *, budget: int = 0) -> str:
+def render_status(result: StatusResult, *, _: int = 0) -> str:
     upstream = (
         f" -> {result.upstream} (+{result.ahead}/-{result.behind})"
         if result.upstream
@@ -40,7 +37,7 @@ def render_status(result: StatusResult, *, budget: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_history(result: HistoryResult, *, budget: int = 0) -> str:
+def render_history(result: HistoryResult, *, _: int = 0) -> str:
     lines = [f"recent commits: {result.shown}"]
     lines += [
         f"  {commit.commit} {commit.date} {commit.author}: {commit.subject}"
@@ -49,7 +46,7 @@ def render_history(result: HistoryResult, *, budget: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_structural(result: StructuralResult, *, budget: int = 0) -> str:
+def render_structural(result: StructuralResult, *, _: int = 0) -> str:
     lines = [f"structural diff: {result.path} ({result.engine})"] + list(result.lines)
     if result.truncated:
         lines.append(

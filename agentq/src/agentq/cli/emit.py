@@ -50,9 +50,7 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple)):
-        return [
-            _json_safe(item) for item in cast("list[Any] | tuple[Any, ...]", value)
-        ]
+        return [_json_safe(item) for item in cast("list[Any] | tuple[Any, ...]", value)]
     if isinstance(value, dict):
         return {
             str(key): _json_safe(item)
@@ -97,8 +95,8 @@ def emit(
     result: Any | None = None,
 ) -> DispatchResult:
     internal: dict[str, Any] = as_dict(data.pop("_agentq_internal", None))
-    telemetry_data: dict[str, Any] = (
-        dict_field(internal, "telemetry_data") or dict(data)
+    telemetry_data: dict[str, Any] = dict_field(internal, "telemetry_data") or dict(
+        data
     )
     command = str(getattr(args, "command", "unknown"))
     repo_text = str(getattr(args, "repo", "."))
@@ -195,7 +193,7 @@ def emit_cached(
         options,
         budget=args.budget,
         output_format=args.format,
-        repeat=args.repeat,
+        repeat=bool(getattr(args, "repeat", False)),
     )
     if decision.suppressed_scope is not None:
         return emit(

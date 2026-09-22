@@ -1,5 +1,4 @@
-"""Failure analytics: retries and failure breakdown.
-"""
+"""Failure analytics: retries and failure breakdown."""
 
 from __future__ import annotations
 

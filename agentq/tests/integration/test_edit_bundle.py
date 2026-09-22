@@ -278,7 +278,12 @@ class ExplicitResolutionTests(unittest.TestCase):
             temp.cleanup()
 
     def test_unavailable_provider_does_not_fall_back_to_candidate_zero(self) -> None:
-        temp, root = make_repo({"pkg/ok.py": "def Wanted():\n    return 1\n"})
+        temp, root = make_repo(
+            {
+                "pkg/ok.py": "def Wanted():\n    return 1\n",
+                "pkg/edge.ts": "export function Wanted() { return 1 }\n",
+            }
+        )
         try:
             with mock.patch.object(
                 navigation_module.TypeScriptProvider,
@@ -547,28 +552,33 @@ class EditBundleCliTests(unittest.TestCase):
             env=self.env,
         )
 
-    def aq(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def aq(
+        self, *args: str, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.env.copy()
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run(
-            [str(AGENTQ), args[0], "--repo", str(self.repo), *args[1:]],
+            [str(AGENTQ), args[0], *args[1:]],
             text=True,
             capture_output=True,
-            env=self.env,
+            env=env,
             cwd=self.repo,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         return result
 
-    def data(self, *args: str) -> dict:
-        payload = self.aq(*args, "--format", "json", "--budget", "100000")
+    def data(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
+        payload = self.aq(
+            *args, "--format", "json", "--budget", "100000", extra_env=extra_env
+        )
         return json.loads(payload.stdout)
 
     def test_cli_candidate_flag_selects_the_intended_declaration(self) -> None:
         (self.repo / "pkg" / "other.py").write_text(
             "def helper():\n    return 2\n", encoding="utf-8"
         )
-        ambiguous = self.data(
-            "inspect", "helper", "--path", "pkg", "--intent", "edit", "--lang", "python"
-        )
+        ambiguous = self.data("inspect", "helper", "--path", "pkg", "--intent", "edit")
         bundle = ambiguous["edit"]
         self.assertEqual(bundle["resolution"], "ambiguous")
         chosen = bundle["candidates"][1]
@@ -579,16 +589,13 @@ class EditBundleCliTests(unittest.TestCase):
             "pkg",
             "--intent",
             "edit",
-            "--lang",
-            "python",
             "--candidate",
             chosen["candidate_id"],
-            "--repeat",
         )
         self.assertEqual(selected["edit"]["resolution"], "resolved")
         self.assertEqual(selected["edit"]["selected"]["path"], chosen["path"])
 
-    def test_small_budget_recovery_then_direct_read_and_repeat(self) -> None:
+    def test_small_budget_recovery_then_direct_inspect_and_fresh_context(self) -> None:
         small = self.aq(
             "inspect",
             "helper",
@@ -596,8 +603,6 @@ class EditBundleCliTests(unittest.TestCase):
             "pkg/def.py",
             "--intent",
             "edit",
-            "--lang",
-            "python",
             "--format",
             "text",
             "--budget",
@@ -606,9 +611,10 @@ class EditBundleCliTests(unittest.TestCase):
         self.assertNotIn("return 1", small.stdout)
         self.assertIn("next:", small.stdout)
 
-        direct = self.data("read", "pkg/def.py:1-2")
-        self.assertEqual(len(direct["items"][0]["lines"]), 2)
-        self.assertNotIn("read_overlap", direct)
+        direct = self.data("inspect", "pkg/def.py", "--lines", "1:2")
+        source = direct["source"]
+        self.assertEqual(len(source["items"][0]["lines"]), 2)
+        self.assertNotIn("read_overlap", source)
 
         delivered = self.aq(
             "inspect",
@@ -617,12 +623,11 @@ class EditBundleCliTests(unittest.TestCase):
             "pkg/def.py",
             "--intent",
             "edit",
-            "--lang",
-            "python",
             "--format",
             "text",
             "--budget",
             "100000",
+            extra_env={"AGENTQ_SESSION_ID": "edit-bundle-delivered"},
         )
         self.assertIn("return 1", delivered.stdout)
 
@@ -633,24 +638,20 @@ class EditBundleCliTests(unittest.TestCase):
             "pkg/def.py",
             "--intent",
             "edit",
-            "--lang",
-            "python",
         )
         self.assertTrue(nested["edit"]["declaration"]["items"][0]["suppressed"])
 
-        forced = self.data(
+        fresh = self.data(
             "inspect",
             "helper",
             "--path",
             "pkg/def.py",
             "--intent",
             "edit",
-            "--lang",
-            "python",
-            "--repeat",
+            extra_env={"AGENTQ_SESSION_ID": "edit-bundle-fresh"},
         )
-        self.assertTrue(forced["edit"]["declaration"]["repeat"])
-        self.assertTrue(forced["edit"]["declaration"]["items"][0]["lines"])
+        self.assertFalse(fresh["edit"]["declaration"]["items"][0].get("suppressed"))
+        self.assertTrue(fresh["edit"]["declaration"]["items"][0]["lines"])
 
 
 class PolyglotOwnershipTests(unittest.TestCase):

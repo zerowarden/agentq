@@ -15,20 +15,26 @@ from tests.support.cli_harness import (
 
 class BudgetCliTests(AgentQIntegrationHarness):
     def test_text_output_has_global_character_budget(self) -> None:
+        path = self.repo / "packages/a/src/budget_lines.ts"
+        path.write_text(
+            "".join(f"line {index}\n" for index in range(1, 41)), encoding="utf-8"
+        )
         argv = [
             str(AGENTQ),
-            "read",
-            "--repo",
-            str(self.repo),
+            "inspect",
             "--budget",
             "180",
-            "packages/a/src/index.ts",
+            "packages/a/src/budget_lines.ts",
+            "--lines",
+            "1:40",
         ]
-        result = subprocess.run(argv, text=True, capture_output=True, env=self.env)
+        result = subprocess.run(
+            argv, text=True, capture_output=True, env=self.env, cwd=self.repo
+        )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertLessEqual(len(result.stdout.rstrip("\n")), 180)
         self.assertIn("Render budget reached", result.stdout)
-        self.assertIn("continue: agentq read", result.stdout)
+        self.assertIn("continue: agentq", result.stdout)
         self.assertNotIn("omitted by render budget", result.stdout)
 
     def test_budgeted_json_keeps_useful_data(self) -> None:
@@ -40,8 +46,6 @@ class BudgetCliTests(AgentQIntegrationHarness):
         argv = [
             str(AGENTQ),
             "search",
-            "--repo",
-            str(self.repo),
             "--format",
             "json",
             "--budget",
@@ -49,12 +53,10 @@ class BudgetCliTests(AgentQIntegrationHarness):
             "BUDGET_HIT",
             "--path",
             "packages/a/src/many-budget.ts",
-            "--max-results",
-            "80",
-            "--samples-per-file",
-            "80",
         ]
-        result = subprocess.run(argv, text=True, capture_output=True, env=self.env)
+        result = subprocess.run(
+            argv, text=True, capture_output=True, env=self.env, cwd=self.repo
+        )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual(data["query"], "BUDGET_HIT")
@@ -75,8 +77,6 @@ class BudgetCliTests(AgentQIntegrationHarness):
             [
                 str(AGENTQ),
                 "inspect",
-                "--repo",
-                str(self.repo),
                 "--format",
                 "text",
                 "--budget",
@@ -84,9 +84,6 @@ class BudgetCliTests(AgentQIntegrationHarness):
                 "calculate_total",
                 "--path",
                 str(path),
-                "--limit",
-                "80",
-                "--repeat",
             ],
             cwd=self.repo,
             env=self.env,

@@ -24,6 +24,9 @@ class _SubParserChoices(Protocol):
     choices: dict[str, argparse.ArgumentParser]
 
 
+_SubParsersActionType = argparse._SubParsersAction  # pyright: ignore[reportPrivateUsage]
+
+
 class AgentQArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("allow_abbrev", False)
@@ -32,7 +35,7 @@ class AgentQArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         active: argparse.ArgumentParser = self
         for action in self._actions:
-            if isinstance(action, argparse._SubParsersAction):  # pyright: ignore[reportPrivateUsage]
+            if isinstance(action, _SubParsersActionType):
                 choices = cast("_SubParserChoices", action).choices
                 selected = next(
                     (value for value in sys.argv[1:] if value in choices), None
@@ -102,19 +105,9 @@ def nonnegative_int(value: str) -> int:
     return parsed
 
 
-def positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
-
-
 def add_common(
     parser: argparse.ArgumentParser, *, formats: tuple[str, ...] = ("text", "json")
 ) -> None:
-    parser.add_argument(
-        "--repo", default=".", help="repository path; defaults to the current directory"
-    )
     parser.add_argument(
         "--format",
         choices=formats,
@@ -137,29 +130,6 @@ def add_scope(parser: argparse.ArgumentParser) -> None:
         action="extend",
         default=[],
         help="scope to one or more files/directories; repeatable",
-    )
-
-
-def add_sensitive(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--include-sensitive",
-        action="store_true",
-        help="explicitly include normally excluded sensitive paths",
-    )
-
-
-def add_plan_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--base", help="optional base branch/commit to include committed changes"
-    )
-    parser.add_argument(
-        "--mode", choices=("focused", "standard", "thorough"), default="standard"
-    )
-    parser.add_argument(
-        "--dependents", choices=("auto", "none", "direct", "all"), default="auto"
-    )
-    parser.add_argument(
-        "--include-build", action="store_true", help="include package build scripts"
     )
 
 

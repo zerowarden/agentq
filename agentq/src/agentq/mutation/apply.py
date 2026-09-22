@@ -404,9 +404,7 @@ def commit_prepared(
             for item in targets:
                 _commit_one(item)
                 written.append(item)
-                state = replace(
-                    state, written=tuple(entry.path for entry in written)
-                )
+                state = replace(state, written=tuple(entry.path for entry in written))
                 write_journal(path, state)
         except BaseException as exc:
             restored, failed = _restore_writes(written)

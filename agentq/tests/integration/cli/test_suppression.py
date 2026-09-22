@@ -17,38 +17,38 @@ from tests.support.cli_harness import (
 
 class SuppressionCliTests(AgentQIntegrationHarness):
     def test_repeat_suppression_is_independent_of_telemetry(self) -> None:
-        env = {**self.env, "AGENTQ_TELEMETRY": "0"}
-        self.data("task", "begin", extra_env=env)
-        self.change_a("\nexport const decoupled = true\n")
-        first = self.data("git-diff", "--task", "--patch", extra_env=env)
+        env = {
+            **self.env,
+            "AGENTQ_TELEMETRY": "0",
+            "AGENTQ_SESSION_ID": "telemetry-decoupled",
+        }
+        first = self.data("search", "OldName", extra_env=env)
         self.assertNotIn("repeat_suppressed", first)
-        second = self.data("git-diff", "--task", "--patch", extra_env=env)
+        second = self.data("search", "OldName", extra_env=env)
         self.assertTrue(second["repeat_suppressed"])
-        self.assertEqual(second["repeat_scope"], "task")
+        self.assertEqual(second["repeat_scope"], "session")
 
     def test_repeat_suppression_requires_explicit_session_identity(self) -> None:
         no_identity = {"AGENTQ_SESSION_ID": "", "CODEX_THREAD_ID": ""}
-        plain = self.data("read", "packages/a/src/index.ts:1-3", extra_env=no_identity)
-        self.assertNotIn("read_overlap", plain)
-        plain_again = self.data(
-            "read", "packages/a/src/index.ts:1-3", extra_env=no_identity
-        )
-        self.assertFalse(plain_again["items"][0].get("suppressed", False))
+        plain = self.data("search", "OldName", extra_env=no_identity)
+        self.assertNotIn("repeat_suppressed", plain)
+        plain_again = self.data("search", "OldName", extra_env=no_identity)
+        self.assertFalse(plain_again.get("repeat_suppressed", False))
 
         secret_session = "SESSION_SECRET_9f2c"
         session_env = {**self.env, "AGENTQ_SESSION_ID": secret_session}
-        first = self.data("read", "packages/a/src/index.ts:1-3", extra_env=session_env)
-        self.assertNotIn("read_overlap", first)
-        second = self.data("read", "packages/a/src/index.ts:1-3", extra_env=session_env)
-        self.assertTrue(second["items"][0].get("suppressed", False))
-        self.assertEqual(second["read_overlap"]["scope"], "session")
+        first = self.data("search", "OldName", extra_env=session_env)
+        self.assertNotIn("repeat_suppressed", first)
+        second = self.data("search", "OldName", extra_env=session_env)
+        self.assertTrue(second["repeat_suppressed"])
+        self.assertEqual(second["repeat_scope"], "session")
 
         other = self.data(
-            "read",
-            "packages/a/src/index.ts:1-3",
+            "search",
+            "OldName",
             extra_env={**self.env, "AGENTQ_SESSION_ID": "other-session"},
         )
-        self.assertFalse(other["items"][0].get("suppressed", False))
+        self.assertFalse(other.get("repeat_suppressed", False))
 
         with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
             from agentq import persistence as persistence_module
@@ -199,71 +199,28 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             self.assertFalse(changed.repeat_suppressed)
             self.assertIn("editedDiff", changed.patch or "")
 
-    def test_repeated_unchanged_read_is_suppressed_inside_task(self) -> None:
-        self.data("task", "begin")
-        first = self.data("read", "packages/a/src/index.ts:1-3")
-        self.assertEqual(len(first["items"][0]["lines"]), 3)
-        second = self.data("read", "packages/a/src/index.ts:1-3")
-        self.assertTrue(second["items"][0]["suppressed"])
-        self.assertEqual(second["items"][0]["lines"], [])
-        forced = self.data("read", "packages/a/src/index.ts:1-3", "--repeat")
-        self.assertEqual(len(forced["items"][0]["lines"]), 3)
-
-        partially_covered = self.data("read", "packages/a/src/index.ts:2-4")
-        self.assertFalse(partially_covered["items"][0].get("suppressed", False))
-        self.assertEqual(
-            [line["line"] for line in partially_covered["items"][0]["lines"]], [4]
-        )
-
-    def test_partial_read_overlap_subtracts_unions_and_stays_task_local(self) -> None:
-        path = self.repo / "packages/a/src/overlap.py"
-        path.write_text(
-            "".join(f"line {index}\n" for index in range(1, 13)), encoding="utf-8"
-        )
-        self.data("task", "begin")
-
-        self.data("read", "packages/a/src/overlap.py:3-4")
-        self.data("read", "packages/a/src/overlap.py:7-8")
-        partial = self.data("read", "packages/a/src/overlap.py:1-10")
-        self.assertEqual(
-            [(item["start"], item["end"]) for item in partial["items"]],
-            [(1, 2), (5, 6), (9, 10)],
-        )
-        self.assertEqual(partial["read_overlap"]["overlap_lines"], 4)
-        self.assertEqual(
-            [line["line"] for item in partial["items"] for line in item["lines"]],
-            [1, 2, 5, 6, 9, 10],
-        )
-
-        covered_by_union = self.data("read", "packages/a/src/overlap.py:1-10")
-        self.assertTrue(covered_by_union["items"][0]["suppressed"])
-        forced = self.data("read", "packages/a/src/overlap.py:1-10", "--repeat")
-        self.assertEqual(len(forced["items"][0]["lines"]), 10)
-
-        self.data("task", "next")
-        new_task = self.data("read", "packages/a/src/overlap.py:1-10")
-        self.assertEqual(len(new_task["items"][0]["lines"]), 10)
-        self.assertNotIn("read_overlap", new_task)
-
-    def test_exact_operation_cache_suppresses_and_invalidates_search_outline_and_inspect(
+    def test_exact_operation_cache_suppresses_and_invalidates_search_and_inspect(
         self,
     ) -> None:
-        self.data("task", "begin")
+        session = {**self.env, "AGENTQ_SESSION_ID": "operation-cache"}
         operations = [
             ("search", ("OldName",)),
-            ("outline", ("packages/a/src/index.ts",)),
             ("inspect", ("packages/a/src/index.ts",)),
         ]
         for command, arguments in operations:
-            first = self.data(command, *arguments)
+            first = self.data(command, *arguments, extra_env=session)
             self.assertFalse(first.get("repeat_suppressed", False))
-            repeated = self.data(command, *arguments)
+            repeated = self.data(command, *arguments, extra_env=session)
             self.assertTrue(repeated["repeat_suppressed"])
-            forced = self.data(command, *arguments, "--repeat")
-            self.assertFalse(forced.get("repeat_suppressed", False))
+            fresh = self.data(
+                command,
+                *arguments,
+                extra_env={**self.env, "AGENTQ_SESSION_ID": f"fresh-{command}"},
+            )
+            self.assertFalse(fresh.get("repeat_suppressed", False))
 
         self.change_a("\nexport const cacheInvalidated = true\n")
-        refreshed = self.data("search", "OldName")
+        refreshed = self.data("search", "OldName", extra_env=session)
         self.assertFalse(refreshed.get("repeat_suppressed", False))
 
     def test_inspect_caches_only_source_lines_visible_inside_the_wrapper(self) -> None:
@@ -272,7 +229,7 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             "".join(f"line_{index:02d} = {'x' * 32!r}\n" for index in range(1, 21)),
             encoding="utf-8",
         )
-        self.data("task", "begin")
+        session = {**self.env, "AGENTQ_SESSION_ID": "inspect-cache"}
 
         first = self.data(
             "inspect",
@@ -281,6 +238,7 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             "1:20",
             "--budget",
             "1200",
+            extra_env=session,
         )
         first_lines = [
             line["line"] for item in first["source"]["items"] for line in item["lines"]
@@ -295,6 +253,7 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             "1:20",
             "--budget",
             "100000",
+            extra_env=session,
         )
         resumed_lines = [
             line["line"]
@@ -303,15 +262,4 @@ class SuppressionCliTests(AgentQIntegrationHarness):
         ]
         self.assertEqual(sorted(first_lines + resumed_lines), list(range(1, 21)))
 
-    def test_identical_git_diff_is_suppressed_inside_context_unless_repeated(
-        self,
-    ) -> None:
-        self.data("task", "begin")
-        self.change_a("\nexport const diffRepeat = true\n")
-        first = self.data("git-diff", "--task", "--patch")
-        self.assertNotIn("repeat_suppressed", first)
-        second = self.data("git-diff", "--task", "--patch")
-        self.assertTrue(second["repeat_suppressed"])
-        self.assertEqual(second["repeat_scope"], "task")
-        forced = self.data("git-diff", "--task", "--patch", "--repeat")
-        self.assertNotIn("repeat_suppressed", forced)
+

@@ -102,9 +102,7 @@ def parse_diff_header_paths(line: str) -> tuple[str, str] | None:
     return old[2:], new[2:]
 
 
-def _diff_file_paths(
-    line: str, item: DiffFile | None = None
-) -> tuple[str, str] | None:
+def _diff_file_paths(line: str, item: DiffFile | None = None) -> tuple[str, str] | None:
     if item is not None:
         return item.old_path or item.path, item.path
     return parse_diff_header_paths(line)
@@ -337,9 +335,7 @@ def _parse_name_status(raw: str) -> list[DiffFile]:
         elif index < len(parts):
             path = parts[index]
             index += 1
-            out.append(
-                DiffFile(path=path, status=status, role=classify_path(path))
-            )
+            out.append(DiffFile(path=path, status=status, role=classify_path(path)))
     return out
 
 
@@ -565,8 +561,7 @@ def _hunk_header(line: str, match: re.Match[str] | None, sensitive: bool) -> str
     old_count = f",{match.group('old_count')}" if match.group("old_count") else ""
     new_count = f",{match.group('new_count')}" if match.group("new_count") else ""
     return (
-        f"@@ -{match.group('old')}{old_count} "
-        f"+{match.group('new')}{new_count} @@"
+        f"@@ -{match.group('old')}{old_count} " f"+{match.group('new')}{new_count} @@"
     )
 
 

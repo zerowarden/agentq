@@ -74,13 +74,9 @@ class JournalRecord:
         }
 
     @classmethod
-    def from_wire(
-        cls, value: Any, *, what: str = "mutation journal"
-    ) -> JournalRecord:
+    def from_wire(cls, value: Any, *, what: str = "mutation journal") -> JournalRecord:
         payload = require_mapping(value, what)
-        schema = require_str(
-            payload.get("schema", JOURNAL_SCHEMA), f"{what}.schema"
-        )
+        schema = require_str(payload.get("schema", JOURNAL_SCHEMA), f"{what}.schema")
         if schema != JOURNAL_SCHEMA:
             raise ContractError(f"unsupported {what} schema: {schema!r}")
         status_text = require_str(payload.get("status"), f"{what}.status")

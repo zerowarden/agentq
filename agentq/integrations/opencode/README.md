@@ -1,6 +1,6 @@
 # Optional OpenCode Custom Tools
 
-The adapter exposes three read-only tools: `agentq_search`, `agentq_inspect`, and `agentq_git`.
+The adapter exposes two read-only tools: `agentq_search` and `agentq_inspect`.
 
 Do **not** install it by default. OpenCode already has built-in search, read, Bash, and LSP tools; custom tool schemas consume model context. Install this adapter only when empirical testing shows that a local model ignores skill instructions or repeatedly produces unbounded shell output.
 

@@ -28,9 +28,10 @@ from agentq.core import (
 class RequestCodec:
     """One resumable operation's complete request codec.
 
-    Registry presence means the operation is resumable; ``argv`` is the only
-    execution path for a stored continuation, and ``accepts_source_guard``
-    says whether replay must re-validate a mutable diff source.
+    Registry presence means the operation is resumable; ``argv`` reconstructs a
+    CLI invocation for the operations whose policy fits the public surface, and
+    ``accepts_source_guard`` says whether replay must re-validate a mutable diff
+    source. Search continuations dispatch their typed request directly instead.
     """
 
     decode_options: Callable[[Any], Any]
@@ -60,19 +61,7 @@ def search_options_from_args(args: Any) -> SearchOptions:
     return SearchOptions(
         query=args.query,
         mode=args.mode,
-        word=args.word,
-        case=args.case,
-        globs=tuple(args.glob),
-        types=tuple(args.types),
-        view=args.view,
-        limit=args.limit,
-        per_file=args.per_file,
-        context=args.context,
-        max_chars=args.max_chars,
-        max_files=args.max_files,
         scan_cap=args.scan_cap,
-        coverage_policy=args.coverage_policy,
-        include_sensitive=args.include_sensitive,
     )
 
 
@@ -197,47 +186,51 @@ def _reject_role_scoped_search(options: SearchOptions) -> None:
         )
 
 
+def _reject_unrepresentable_search_policy(options: SearchOptions) -> None:
+    """Refuse argv reconstruction for policy the narrowed CLI cannot express."""
+    defaults = SearchOptions()
+    unrepresentable = (
+        "word",
+        "case",
+        "globs",
+        "types",
+        "view",
+        "limit",
+        "per_file",
+        "context",
+        "max_chars",
+        "max_files",
+        "coverage_policy",
+        "include_sensitive",
+    )
+    if any(
+        getattr(options, name) != getattr(defaults, name) for name in unrepresentable
+    ):
+        raise ContractError(
+            "this search request uses acquisition policy that argv replay cannot "
+            "express; dispatch the typed request instead"
+        )
+
+
 def _search_argv(request: OperationRequest[Any]) -> list[str]:
     options = request.options
     if not isinstance(options, SearchOptions) or not options.query:
         raise ContractError("a search continuation requires a non-empty query")
     _reject_role_scoped_search(options)
+    _reject_unrepresentable_search_policy(options)
+    if request.repeat:
+        raise ContractError(
+            "this search request stored a forced repeat that argv replay cannot "
+            "express; dispatch the typed request instead"
+        )
     argv = ["agentq", "search", options.query]
     if options.mode == "regex":
         argv.append("--regex")
-    if options.word:
-        argv.append("--word")
-    if options.case != "smart":
-        argv.extend(("--case", options.case))
-    for pattern in options.globs:
-        argv.extend(("--glob", pattern))
-    for language in options.types:
-        argv.extend(("--type", language))
-    argv.extend(
-        (
-            "--view",
-            options.view,
-            "--limit",
-            str(options.limit),
-            "--per-file",
-            str(options.per_file),
-            "--context",
-            str(options.context),
-            "--max-chars",
-            str(options.max_chars),
-            "--max-files",
-            str(options.max_files),
-            "--coverage",
-            options.coverage_policy,
-        )
-    )
-    if options.include_sensitive:
-        argv.append("--include-sensitive")
+    if options.scan_cap != SearchOptions().scan_cap:
+        argv.extend(("--scan-cap", str(options.scan_cap)))
     for scope in request.scopes:
         argv.extend(("--path", scope))
     argv.extend(_presentation_args(request))
-    if request.repeat:
-        argv.append("--repeat")
     return argv
 
 

@@ -18,7 +18,7 @@ TARGET="$TARGET_DIR/agentq.ts"
 echo "Optional OpenCode adapter"
 echo "  source: $SOURCE"
 echo "  target: $TARGET"
-echo "  tools:  agentq_search, agentq_inspect, agentq_git (read-only)"
+echo "  tools:  agentq_search, agentq_inspect (read-only)"
 echo "  note:   custom tool schemas consume context; Agent Skills alone are preferred initially"
 
 if ((apply == 0)); then

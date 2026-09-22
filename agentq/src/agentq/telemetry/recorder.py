@@ -306,12 +306,18 @@ def _command_measurement(command: str, data: dict[str, Any]) -> dict[str, Any]:
             python: dict[str, Any] = dict_field(data, "python")
             references: dict[str, Any] = dict_field(python, "references")
             measured = _records_measurement(
-                [*(list_field(python, "candidates")), *(list_field(references, "results"))]
+                [
+                    *(list_field(python, "candidates")),
+                    *(list_field(references, "results")),
+                ]
             )
         elif kind == "semantic" and isinstance(data.get("semantic"), dict):
             semantic = data["semantic"]
             measured = _records_measurement(
-                [*(list_field(semantic, "candidates")), *(list_field(semantic, "results"))]
+                [
+                    *(list_field(semantic, "candidates")),
+                    *(list_field(semantic, "results")),
+                ]
             )
         else:
             measured = _records_measurement([])

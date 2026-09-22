@@ -1,5 +1,4 @@
-"""Task-efficiency analytics.
-"""
+"""Task-efficiency analytics."""
 
 from __future__ import annotations
 

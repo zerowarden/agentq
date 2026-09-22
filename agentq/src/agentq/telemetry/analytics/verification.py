@@ -1,5 +1,4 @@
-"""Verification metrics analytics.
-"""
+"""Verification metrics analytics."""
 
 from __future__ import annotations
 
