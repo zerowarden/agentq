@@ -31,6 +31,7 @@ dev = [
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+cache-dir = ".cache/ruff"
 include = [
     "src/**/*.py",
     "tests/**/*.py",
@@ -62,6 +63,7 @@ line-length = 88
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+cache_dir = ".cache/pytest"
 
 [tool.pyright]
 include = ["src/agentq"]
