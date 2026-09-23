@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentq.core import COMPLETE, SourceRef, typed_coverage
+from agentq.core import COMPLETE, PARSE_ERROR, PARTIAL, SourceRef, typed_coverage
 from agentq.inspection.acquisition import plan_collection
 from agentq.inspection.budgeting import AcquisitionLimits
 from agentq.inspection.capabilities import CapabilityRegistry
@@ -204,7 +204,10 @@ def test_resolution_evidence_is_not_collected_twice() -> None:
 
 
 def _acquisition(
-    capability: Capability, status: CollectionStatus = CollectionStatus.EMPTY
+    capability: Capability,
+    status: CollectionStatus = CollectionStatus.EMPTY,
+    *,
+    coverage=None,
 ) -> AcquisitionRecord:
     return AcquisitionRecord(
         acquisition_id=f"acq-{capability.value}",
@@ -213,7 +216,7 @@ def _acquisition(
         provider_version=None,
         method=capability.value,
         effective_scope=(),
-        coverage=typed_coverage(COMPLETE),
+        coverage=typed_coverage(COMPLETE) if coverage is None else coverage,
         status=status,
     )
 
@@ -333,6 +336,37 @@ def test_representative_reference_outcomes(omission, record, expected, detail) -
     assert assessment is not None
     assert assessment.status is expected
     assert detail in (assessment.detail or "")
+
+
+def test_partial_empty_reference_acquisition_does_not_establish_absence() -> None:
+    policy = compile_policy(_request("rename"), _resolution())
+    record = _acquisition(
+        Capability.SYNTACTIC_MENTIONS,
+        CollectionStatus.PARTIAL,
+        coverage=typed_coverage(PARTIAL, PARSE_ERROR),
+    )
+    assessment = _assess(policy, _empty_plan(), _empty_pool(record)).by_id(
+        "representative_reference"
+    )
+    assert assessment is not None
+    assert assessment.status is RequirementStatus.UNSATISFIED
+    assert "not established" in (assessment.detail or "")
+
+
+def test_partial_test_search_is_still_an_explicit_outcome() -> None:
+    """COLLECTION_OUTCOME requires a reported outcome, not established absence."""
+    policy = compile_policy(_request("edit"), _resolution())
+    record = _acquisition(
+        Capability.LEXICAL_MENTIONS,
+        CollectionStatus.PARTIAL,
+        coverage=typed_coverage(PARTIAL, PARSE_ERROR),
+    )
+    assessment = _assess(policy, _empty_plan(), _empty_pool(record)).by_id(
+        "test_search"
+    )
+    assert assessment is not None
+    assert assessment.status is RequirementStatus.SATISFIED
+    assert assessment.supporting == (record.acquisition_id,)
 
 
 def _source_evidence(

@@ -31,7 +31,12 @@ def _text_key(payload: dict[str, Any], key: str) -> str | None:
 
 @dataclass(frozen=True)
 class TypeScriptLocation:
-    """One TypeScript candidate or result location."""
+    """One TypeScript candidate or result location.
+
+    ``declaration_span`` is the enclosing declaration extent when the provider
+    reported one; the anchor (line/column) stays the exact identifier position
+    semantic queries require.
+    """
 
     path: str
     line: int
@@ -48,6 +53,7 @@ class TypeScriptLocation:
     display: str | None = None
     definition: bool | None = None
     write: bool | None = None
+    declaration_span: DeclarationSpan | None = None
 
     def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -67,10 +73,13 @@ class TypeScriptLocation:
             data["definition"] = self.definition
         if self.write is not None:
             data["write"] = self.write
+        if self.declaration_span is not None:
+            data["declaration_span"] = self.declaration_span.to_wire()
         return data
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> TypeScriptLocation:
+        span = payload.get("declaration_span")
         return cls(
             path=str(payload.get("path", "")),
             line=_int_or(payload.get("line"), 0),
@@ -89,6 +98,11 @@ class TypeScriptLocation:
                 bool(payload["definition"]) if "definition" in payload else None
             ),
             write=bool(payload["write"]) if "write" in payload else None,
+            declaration_span=(
+                DeclarationSpan.from_payload(cast("dict[str, Any]", span))
+                if isinstance(span, dict)
+                else None
+            ),
         )
 
 

@@ -340,7 +340,7 @@ class SearchFollowUp:
             record=QueryFollowUp.from_wire(
                 {
                     key: payload.get(key)
-                    for key in ("schema", "kind", "request", "guard", "reason")
+                    for key in ("schema", "kind", "request", "reason")
                 },
                 what="search continuation",
             ),
@@ -1594,20 +1594,5 @@ def compact_search_wire(
     payload["_agentq_internal"] = {
         "prebudget_chars": full_chars,
         "truncated": render_truncated,
-        "telemetry_data": {
-            "query": result.query,
-            "shown": result.shown,
-            "total": result.total_matching_lines,
-            "total_matching_lines": result.total_matching_lines,
-            "matching_files": result.matching_files,
-            "shown_files": len(selected),
-            "coverage": result.coverage.to_wire(),
-            "view": result.view,
-            "query_intent": result.query_intent,
-            "semantic_candidate": result.semantic_candidate,
-            "symbol_candidates": list(result.symbol_candidates),
-            "candidate_lines": result.candidate_lines,
-            "candidate_chars": result.candidate_chars,
-        },
     }
     return payload

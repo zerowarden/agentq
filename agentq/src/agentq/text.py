@@ -23,11 +23,3 @@ def compact_line(text: str, max_chars: int = 240) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 15)] + " …[truncated]"
-
-
-def truncate_line(text: str, max_chars: int = 240) -> str:
-    """Truncate a line that is already redacted (no re-redaction)."""
-    text = strip_ansi(text).replace("\r", "").rstrip("\n")
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 15)] + " …[truncated]"

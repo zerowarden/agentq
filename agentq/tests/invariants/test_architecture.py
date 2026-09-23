@@ -7,7 +7,6 @@ These tests make the target dependency shape executable:
 * persistence does not depend on the CLI
 * capability functions do not accept ``argparse.Namespace``
 * capability functions do not write to stdout/stderr
-* capability domains do not import telemetry presentation/reporting
 
 Inspection is static (AST); capability modules are never imported by the
 tests themselves.
@@ -26,19 +25,8 @@ PACKAGE_DIR = Path(agentq.__file__).resolve().parent
 ROOT = "agentq"
 CLI_ROOT = "agentq.cli"
 CORE_ROOT = "agentq.core"
-TELEMETRY_ROOT = "agentq.telemetry"
 PERSISTENCE_ROOTS = ("agentq.persistence",)
 ENTRY_MODULE = "agentq.__main__"
-TELEMETRY_REPORTING_ROOT = "agentq.telemetry.report"
-TELEMETRY_REPORTING_NAMES = frozenset(
-    {
-        "render_stats_text",
-        "render_stats_plain",
-        "render_stats_ansi",
-        "stats_presentation_model",
-        "watch_stats",
-    }
-)
 _NAMESPACE_RE = re.compile(r"\bNamespace\b")
 _WRITE_TARGETS = frozenset({"sys.stdout", "sys.stderr", "stdout", "stderr"})
 
@@ -147,18 +135,7 @@ def _write_calls(source: str) -> list[str]:
 
 def _purity_modules() -> list[tuple[str, Path, str]]:
     """Capability/foundational modules subject to signature and output rules."""
-    return [
-        item
-        for item in _iter_modules()
-        if not _is_adapter(item[0]) and not _under(item[0], TELEMETRY_ROOT)
-    ]
-
-
-def _is_telemetry_reporting(item: str) -> bool:
-    return _under(item, TELEMETRY_REPORTING_ROOT) or (
-        _under(item, TELEMETRY_ROOT)
-        and item.rsplit(".", 1)[-1] in TELEMETRY_REPORTING_NAMES
-    )
+    return [item for item in _iter_modules() if not _is_adapter(item[0])]
 
 
 class CliLeafTests(unittest.TestCase):
@@ -229,30 +206,10 @@ class CapabilityOutputTests(unittest.TestCase):
         self.assertFalse(offenders, f"modules writing output: {offenders}")
 
 
-class TelemetryObservationTests(unittest.TestCase):
-    def test_capability_modules_do_not_import_telemetry_reporting(self) -> None:
-        offenders: dict[str, list[str]] = {}
-        for module, path, package in _iter_modules():
-            if _is_adapter(module) or _under(module, TELEMETRY_ROOT):
-                continue
-            hits = sorted(
-                item
-                for item in _imports_from_source(path.read_text(), package)
-                if _is_telemetry_reporting(item)
-            )
-            if hits:
-                offenders[module] = hits
-        self.assertFalse(
-            offenders, f"modules importing telemetry reporting: {offenders}"
-        )
-
-
 DISCOVERY_ROOT = "agentq.discovery"
 NAVIGATION_ROOT = "agentq.navigation"
 SYNTAX_ROOT = "agentq.syntax"
 DELIVERY_ROOT = "agentq.delivery"
-VERIFICATION_ROOT = "agentq.verification"
-VERIFICATION_PROVIDERS_ROOT = "agentq.verification.providers"
 INSPECTION_ROOT = "agentq.inspection"
 INSPECTION_ADAPTERS_ROOT = "agentq.inspection.adapters"
 INSPECTION_FORBIDDEN_ROOTS = (
@@ -262,11 +219,7 @@ INSPECTION_FORBIDDEN_ROOTS = (
     "agentq.navigation",
     "agentq.delivery",
     "agentq.persistence",
-    "agentq.telemetry",
     "agentq.execution",
-    "agentq.verification",
-    "agentq.git",
-    "agentq.mutation",
 )
 INSPECTION_ADAPTER_FORBIDDEN_ROOTS = (
     CLI_ROOT,
@@ -275,7 +228,7 @@ INSPECTION_ADAPTER_FORBIDDEN_ROOTS = (
     "agentq.telemetry",
     "agentq.delivery",
 )
-TEXT_HELPERS = frozenset({"compact_line", "strip_ansi", "truncate_line"})
+TEXT_HELPERS = frozenset({"compact_line", "strip_ansi"})
 CONCRETE_PAYLOAD_NAMES = frozenset(
     {
         "TypeScriptNav",
@@ -289,14 +242,6 @@ CONCRETE_PAYLOAD_NAMES = frozenset(
         "PythonReferenceSection",
     }
 )
-_VERIFICATION_REGISTRY_NAMES = frozenset(
-    {
-        "PROVIDER_NAMES",
-        "VERIFICATION_PROVIDERS",
-    }
-)
-
-
 class DependencyDirectionTests(unittest.TestCase):
     def test_discovery_does_not_import_navigation(self) -> None:
         offenders: dict[str, list[str]] = {}
@@ -362,31 +307,10 @@ class NavigationProviderBoundaryTests(unittest.TestCase):
         )
 
 
-class VerificationRegistryTests(unittest.TestCase):
-    def test_planner_only_imports_the_provider_registry(self) -> None:
-        path = PACKAGE_DIR / "verification/planner.py"
-        imports = _imports_from_source(path.read_text(), VERIFICATION_ROOT)
-        concrete = sorted(
-            item
-            for item in imports
-            if _under(item, VERIFICATION_PROVIDERS_ROOT)
-            and item != VERIFICATION_PROVIDERS_ROOT
-            and item.rsplit(".", 1)[-1] not in _VERIFICATION_REGISTRY_NAMES
-        )
-        self.assertFalse(concrete, f"planner importing concrete providers: {concrete}")
-
-
 class CoreOperationRegistryTests(unittest.TestCase):
     def test_core_does_not_enumerate_operations(self) -> None:
         source = (PACKAGE_DIR / "core/request.py").read_text()
         self.assertNotIn("KNOWN_OPERATIONS", source)
-
-
-class WorkspacePolicyTests(unittest.TestCase):
-    def test_generic_graph_has_no_node_package_manager_policy(self) -> None:
-        source = (PACKAGE_DIR / "workspace/graph.py").read_text().lower()
-        for token in ("npm", "pnpm", "yarn", "bun", "package.json"):
-            self.assertNotIn(token, source)
 
 
 class InspectionBoundaryTests(unittest.TestCase):
@@ -487,13 +411,3 @@ class DetectorSanityTests(unittest.TestCase):
                 "print('x')\n" "sys.stdout.write('x')\n" "logger.write('x')\n"
             )
             self.assertEqual(writes, ["print", "sys.stdout.write"])
-
-        with self.subTest(detector="telemetry reporting"):
-            reporting = _imports_from_source(
-                "from .telemetry import render_stats_plain", ROOT
-            )
-            self.assertTrue(any(_is_telemetry_reporting(item) for item in reporting))
-            observation = _imports_from_source(
-                "from .telemetry import record_event", ROOT
-            )
-            self.assertFalse(any(_is_telemetry_reporting(item) for item in observation))

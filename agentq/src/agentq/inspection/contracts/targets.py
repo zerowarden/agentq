@@ -48,6 +48,13 @@ class TargetKind(str, Enum):
     CANDIDATE = "candidate"
 
 
+class PathKind(str, Enum):
+    """Whether a path target names a file or a directory."""
+
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
 # ---------------------------------------------------------------------------
 # Source coordinates
 # ---------------------------------------------------------------------------
@@ -128,10 +135,13 @@ class PathTarget:
     """A repository-relative file or directory; no implicit symbol selection."""
 
     path: str
+    path_kind: PathKind
     kind: ClassVar[TargetKind] = TargetKind.PATH
 
     def __post_init__(self) -> None:
         require_relative_posix(self.path, "path target", allow_root=True)
+        if not isinstance(self.path_kind, PathKind):
+            raise ContractError("path target requires a PathKind")
 
     @property
     def scope_paths(self) -> tuple[str, ...]:
@@ -139,7 +149,11 @@ class PathTarget:
         return (self.path,)
 
     def to_wire(self) -> dict[str, object]:
-        return {"kind": self.kind.value, "path": self.path}
+        return {
+            "kind": self.kind.value,
+            "path": self.path,
+            "path_kind": self.path_kind.value,
+        }
 
 
 @dataclass(frozen=True)

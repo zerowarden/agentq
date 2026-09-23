@@ -2,29 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import IntEnum
 from pathlib import Path
-from typing import Any
 
 from agentq.core import (
-    COMPLETE,
-    LEXICAL,
-    RESULT_LIMIT,
-    SAMPLED,
     AgentQError,
-    Coverage,
-    classify_path,
-    is_sensitive_path,
     resolve_repo_path,
-    scope_match,
-    typed_coverage,
 )
-from agentq.core.languages import language_for
 from agentq.execution import run_cmd
 from agentq.tooling import find_executable
-
-from .models import FileEntry
 
 DEFAULT_SKIP_PARTS = {
     ".git",
@@ -184,134 +169,3 @@ def validated_scopes(root: Path, scopes: list[str]) -> list[str]:
         )
         raise AgentQError(f"search path does not exist: {joined}{suffix}")
     return normalized or ["."]
-
-
-def _is_subsequence(needle: str, haystack: str) -> bool:
-    it = iter(haystack)
-    return all(any(ch == candidate for candidate in it) for ch in needle)
-
-
-class MatchClass(IntEnum):
-    """Ordered file-lookup match strength; lower is stronger."""
-
-    EXACT = 0
-    PREFIX = 1
-    NAME_SUBSTRING = 2
-    PATH_SUBSTRING = 3
-    SUBSEQUENCE = 4
-    NONE = 5
-
-
-@dataclass(frozen=True, order=True)
-class FileRank:
-    """Lexicographic file ranking: match class dominates every length fact."""
-
-    match_class: MatchClass
-    depth: int
-    path_length: int
-    path: str
-
-
-def _file_rank(path: str, query: str) -> FileRank:
-    p = Path(path)
-    q = query.lower()
-    full = path.lower()
-    name = p.name.lower()
-    stem = p.stem.lower()
-    if q == name or q == stem:
-        match_class = MatchClass.EXACT
-    elif name.startswith(q) or stem.startswith(q):
-        match_class = MatchClass.PREFIX
-    elif q in name:
-        match_class = MatchClass.NAME_SUBSTRING
-    elif q in full:
-        match_class = MatchClass.PATH_SUBSTRING
-    elif q and _is_subsequence(q, name):
-        match_class = MatchClass.SUBSEQUENCE
-    else:
-        match_class = MatchClass.NONE
-    return FileRank(match_class, len(p.parts), len(path), path)
-
-
-@dataclass(frozen=True)
-class FilesRequest:
-    """One ranked file lookup request."""
-
-    root: Path
-    query: str = ""
-    scopes: tuple[str, ...] = ()
-    limit: int = 60
-    include_sensitive: bool = False
-
-
-@dataclass(frozen=True)
-class FilesResult:
-    """Ranked files plus the exact collection coverage."""
-
-    repo_root: str
-    query: str
-    total: int
-    files: tuple[FileEntry, ...]
-    provenance: str
-    coverage: Coverage
-
-    @property
-    def shown(self) -> int:
-        return len(self.files)
-
-    @property
-    def truncated(self) -> bool:
-        return self.total > len(self.files)
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "repo_root": self.repo_root,
-            "query": self.query,
-            "total": self.total,
-            "shown": self.shown,
-            "truncated": self.truncated,
-            "provenance": self.provenance,
-            "coverage": self.coverage.to_wire(),
-            "files": [entry.to_wire() for entry in self.files],
-        }
-
-
-def files(request: FilesRequest) -> FilesResult:
-    scopes = validated_scopes(request.root, list(request.scopes))
-    candidates: list[str] = []
-    for path in list_repo_files(request.root):
-        if not scope_match(path, scopes):
-            continue
-        if not request.include_sensitive and is_sensitive_path(path):
-            continue
-        if (
-            request.query
-            and request.query.lower() not in path.lower()
-            and not _is_subsequence(request.query.lower(), Path(path).name.lower())
-        ):
-            continue
-        candidates.append(path)
-    candidates.sort(
-        key=lambda path: (
-            _file_rank(path, request.query)
-            if request.query
-            else FileRank(MatchClass.NONE, len(Path(path).parts), len(path), path)
-        )
-    )
-    total = len(candidates)
-    shown = candidates[: request.limit]
-    truncated = total > len(shown)
-    coverage = (
-        typed_coverage(SAMPLED, RESULT_LIMIT) if truncated else typed_coverage(COMPLETE)
-    )
-    return FilesResult(
-        repo_root=str(request.root),
-        query=request.query,
-        total=total,
-        files=tuple(
-            FileEntry(path=p, role=classify_path(p), language=language_for(p))
-            for p in shown
-        ),
-        provenance=LEXICAL,
-        coverage=coverage,
-    )

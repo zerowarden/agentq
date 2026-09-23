@@ -8,7 +8,7 @@ claims: its evidence is source text, structure, lexical mentions, and manifests.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -47,6 +47,7 @@ from ..contracts import (
     CapabilityAvailability,
     CapabilityResult,
     CollectionStatus,
+    DeclarationCandidate,
     EvidenceRequest,
     EvidenceVariant,
     Fidelity,
@@ -106,8 +107,21 @@ class RepositoryInspectionAdapter:
             }
         )
 
+    def batch_capabilities(self) -> frozenset[Capability]:
+        return frozenset()
+
+    def acquire_batch(
+        self,
+        requests: Sequence[EvidenceRequest],
+        context: InspectionContext,
+    ) -> tuple[CapabilityResult, ...]:
+        return tuple(self.acquire(request, context) for request in requests)
+
     def applicable(
-        self, _target: InspectionTarget, _context: InspectionContext
+        self,
+        _target: InspectionTarget,
+        _context: InspectionContext,
+        _subject: DeclarationCandidate | None = None,
     ) -> bool:
         return True
 
@@ -116,6 +130,7 @@ class RepositoryInspectionAdapter:
         capability: Capability,
         _target: InspectionTarget,
         _context: InspectionContext,
+        _subject: DeclarationCandidate | None = None,
     ) -> CapabilityAvailability:
         if capability is Capability.LEXICAL_MENTIONS and self._which("rg") is None:
             return CapabilityAvailability(
@@ -161,10 +176,6 @@ class RepositoryInspectionAdapter:
                 max_lines=max(1, request.limit),
                 max_chars=260,
                 include_sensitive=False,
-                # Inspection-level source suppression is bypassed for M1: policy
-                # evidence must never disappear because it was seen before.
-                repeat=True,
-                cache_command="inspect",
                 budget=0,
                 output_format="text",
             )
@@ -278,17 +289,8 @@ class RepositoryInspectionAdapter:
             for item in result.parse_errors
         )
         coverage = result.coverage
-        status = (
-            CollectionStatus.COMPLETED
-            if symbols or result.lines
-            else (
-                CollectionStatus.EMPTY
-                if coverage.is_complete()
-                else CollectionStatus.PARTIAL
-            )
-        )
         return CapabilityResult(
-            status=status,
+            status=CollectionStatus.COMPLETED,
             observations=(observation,),
             variants=(variant,),
             coverage=coverage,

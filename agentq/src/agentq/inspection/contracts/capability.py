@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -395,14 +396,25 @@ class CapabilityHandler(Protocol):
 
     Adapters normalize their results into inspection contracts; they never
     expose provider payloads or language-specific decisions to orchestration.
+    ``subject`` is the resolved declaration when one exists: applicability and
+    availability are then decided for that declaration's language, not merely
+    for the original request target.
     """
 
     name: str
 
     def capabilities(self) -> frozenset[Capability]: ...
 
+    def batch_capabilities(self) -> frozenset[Capability]:
+        """Capabilities this adapter can serve in one batched invocation."""
+        ...
+
     def applicable(
-        self, target: InspectionTarget, context: InspectionContext, /
+        self,
+        target: InspectionTarget,
+        context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
+        /,
     ) -> bool: ...
 
     def availability(
@@ -410,6 +422,7 @@ class CapabilityHandler(Protocol):
         capability: Capability,
         target: InspectionTarget,
         context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
         /,
     ) -> CapabilityAvailability: ...
 
@@ -417,12 +430,24 @@ class CapabilityHandler(Protocol):
         self, request: EvidenceRequest, context: InspectionContext, /
     ) -> CapabilityResult: ...
 
+    def acquire_batch(
+        self,
+        requests: Sequence[EvidenceRequest],
+        context: InspectionContext,
+        /,
+    ) -> tuple[CapabilityResult, ...]:
+        """One result per request; a batching adapter invokes its provider once."""
+        ...
+
 
 class CapabilityRegistry(Protocol):
     """Capability resolution and bounded execution for one inspection."""
 
     def describe(
-        self, request: InspectionRequest, context: InspectionContext
+        self,
+        request: InspectionRequest,
+        context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
     ) -> CapabilityReport: ...
 
     def handlers_for(
@@ -430,8 +455,17 @@ class CapabilityRegistry(Protocol):
         capability: Capability,
         target: InspectionTarget,
         context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
     ) -> tuple[CapabilityHandler, ...]: ...
 
     def acquire(
         self, request: EvidenceRequest, context: InspectionContext
     ) -> tuple[AcquiredEvidence, ...]: ...
+
+    def acquire_many(
+        self,
+        requests: Sequence[EvidenceRequest],
+        context: InspectionContext,
+    ) -> tuple[tuple[AcquiredEvidence, ...], ...]:
+        """Execute several requests in order, batching compatible ones."""
+        ...

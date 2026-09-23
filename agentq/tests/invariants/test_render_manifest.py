@@ -206,28 +206,6 @@ class JsonManifestTests(ManifestHarness):
             flat = {number for _, number in visible_lines}
             self.assertLess(len(flat), 20)
             self.assertIn("_agentq", parsed)
-            advice = cache_module.read_repeat_advice(
-                self.repo,
-                {
-                    "items": [
-                        {
-                            "path": "doc.txt",
-                            "version": data["items"][0]["version"],
-                            "start": 1,
-                            "end": 10,
-                        },
-                        {
-                            "path": "doc.txt",
-                            "version": data["items"][1]["version"],
-                            "start": 21,
-                            "end": 30,
-                        },
-                    ],
-                    "max_chars": 260,
-                },
-                command="read",
-            )
-            self.assertIsNone(advice, "nothing was recorded without emission")
 
 
 class BudgetRecoveryTests(ManifestHarness):

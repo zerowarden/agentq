@@ -24,7 +24,6 @@ from .receipts import (
     receipt_fragment_payloads,
     store_receipt,
 )
-from .tasks import delete_task, load_task, store_task
 
 __all__ = [
     "CONTINUATION_TTL_SECONDS",
@@ -37,12 +36,9 @@ __all__ = [
     "StoredContinuation",
     "connection",
     "database_path",
-    "delete_task",
     "load_continuation",
-    "load_task",
     "receipt_fragment_hits",
     "receipt_fragment_payloads",
     "store_continuation",
     "store_receipt",
-    "store_task",
 ]

@@ -20,7 +20,6 @@ from agentq.core import (
     as_dict,
     canonical_digest,
     canonical_json,
-    dict_field,
     list_field,
     repo_id,
     request_identity,
@@ -39,7 +38,6 @@ from agentq.delivery import (
     mark_operation_delivery,
     project_output,
     record_delivery,
-    require_usable_budget,
     suppression_identity,
 )
 from agentq.inspection.contracts import InspectionBundle, RenderedBundle
@@ -117,9 +115,6 @@ def emit(
     budget: int = 0,
 ) -> DispatchResult:
     internal: dict[str, Any] = as_dict(data.pop("_agentq_internal", None))
-    telemetry_data: dict[str, Any] = dict_field(internal, "telemetry_data") or dict(
-        data
-    )
     command = str(getattr(args, "command", "unknown"))
     repo_text = str(getattr(args, "repo", "."))
     output_format = str(getattr(args, "format", "text"))
@@ -156,9 +151,6 @@ def emit(
         if root is not None
         else ((), [])
     )
-    require_usable_budget(
-        command, data, rendered, budget, evidence, render_budget_truncated
-    )
     payload = (rendered.visible + "\n").encode(encoding, errors="replace")
     write_stdout(rendered.visible)
     dispatch = finalize_output(
@@ -182,7 +174,6 @@ def emit(
         ),
         fragments=tuple(evidence),
         source_cap_truncated=bool(truncation_data.get("source_cap_truncated", False)),
-        telemetry_data=telemetry_data,
     )
     if root is not None:
         dispatch = record_delivery(command, dispatch, internal, fragment_rows)
@@ -289,14 +280,6 @@ def emit_rendered(
             output_digest=hashlib.sha256(payload).hexdigest(),
         ),
         fragments=tuple(fragments),
-        telemetry_data={
-            "command": command,
-            "selection": (
-                len(bundle.selection.selected)
-                if bundle is not None and bundle.selection is not None
-                else 0
-            ),
-        },
     )
     return record_delivery(command, dispatch, {}, rows)
 

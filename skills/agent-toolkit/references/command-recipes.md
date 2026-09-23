@@ -1,99 +1,62 @@
 # Compact Command Recipes
 
-Use these only after loading the workflow-specific skill. All paths are repository-relative unless `--allow-outside` is explicit.
+Use these only after loading the workflow-specific skill. All paths are repository-relative.
 
 ```bash
 AQ=agentq
 ```
 
-## Discovery
+## Known symbol
 
 ```bash
-"$AQ" repo-map
-"$AQ" files offer --path packages --limit 40
-
-# Known TypeScript/JavaScript or Python identifier: use one overview first.
 "$AQ" inspect AssignmentOffer --path packages/contexts/dispatch
-"$AQ" inspect calculate_total --path packages/services
-
-# Unknown symbol, string, configuration key, or semantic fallback.
-"$AQ" search 'assignment offer' --path packages/contexts/dispatch --limit 60 --format compact-json
-"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --type ts --limit 30 --format compact-json
-"$AQ" outline packages/contexts/dispatch/src --public --limit 120
-"$AQ" read packages/contexts/dispatch/src/offers.ts:50-180
+"$AQ" inspect calculate_total --path packages/services --intent understand
+"$AQ" inspect listOrders --path src --intent edit
 ```
 
-## Git
+## Unknown symbol, string, or configuration key
 
 ```bash
-"$AQ" git-status
-"$AQ" git-diff
-"$AQ" git-diff --staged --patch --path apps/api/src --max-lines 500
-"$AQ" git-diff --base origin/main --path packages/contexts/dispatch
-"$AQ" git-history --path packages/contexts/dispatch --limit 15
+"$AQ" search 'assignment offer' --path packages/contexts/dispatch --format compact-json
+"$AQ" search 'export\s+(type|interface)\s+Assignment' --regex --path packages --format compact-json
+"$AQ" search 'AGENTQ_TELEMETRY' --path src --format compact-json
 ```
 
-## Dependencies and impact
+## Known file or source range
 
 ```bash
-"$AQ" dependencies --target '@app/dispatch' --depth 2
-"$AQ" impact AssignmentOffer --path packages --limit 120
+"$AQ" inspect packages/contexts/dispatch/src/offers.ts --lines 50:180
+"$AQ" inspect src/service.ts --line 57 --column 12
+"$AQ" inspect packages/contexts/dispatch/src --intent understand
 ```
 
-## Refactoring
-
-A plan materializes exact byte edits, preimage/postimage hashes, and engine
-provenance at planning time. Applying a saved plan never rescans the worktree
-or re-runs ast-grep; both fresh and loaded routes use the same validation,
-policy, lock, journal, and commit path. Legacy plan schemas are refused with a
-regeneration message.
+## Ambiguity and candidates
 
 ```bash
-"$AQ" codemod-scan 'OldName' --path packages
-"$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37
-"$AQ" codemod-apply 'OldName' 'NewName' --path packages --expect-count 37 --apply
-"$AQ" codemod-scan 'OldName' --path packages --plan-out /tmp/rename.json
-"$AQ" codemod-apply --plan /tmp/rename.json --apply
+# Several declarations share the name: the bundle lists candidate ids.
+"$AQ" inspect duplicate --path packages
+
+# Re-select one candidate against the current repository state.
+"$AQ" inspect duplicate --path packages --candidate cand-7f3a9c2d4e5b6a708192a3b4
 ```
 
-## Task boundaries
+## Intent-driven inspection
 
 ```bash
-# Status is the default action.
-"$AQ" task
-
-# One independently acceptable outcome. A thread may contain several.
-"$AQ" task begin
-# ...investigate, edit, debug, and verify the same outcome...
-"$AQ" task next       # accept current outcome and begin the next
-"$AQ" task accept     # finish without starting another
-"$AQ" task abandon    # only when intentionally discarded
+"$AQ" inspect listOrders --path src --intent rename     # references and mentions
+"$AQ" inspect listOrders --path src --intent refactor   # implementations and source
+"$AQ" inspect listOrders --path src --intent impact     # dependents and ownership
 ```
 
-## Verification and review
-
-`agentq run` exits with the wrapped command's shell outcome: the child exit
-code, `124` on deadline, `126`/`127` on spawn failure, `130`/`143` on
-cancellation, and `70` on a wrapper failure. Shell chains such as
-`agentq run -- failing-command && next-command` therefore stop on failure.
-JSON output keeps wrapper and child facts separately under `execution`.
-Incomplete output capture is a wrapper failure (`70`): a command whose
-descendant outlives the leader and retains the pipes is terminated and reported
-as `FAIL`, never as an implicit success.
+## Continuations
 
 ```bash
-"$AQ" run -- pnpm --filter @app/dispatch test
-"$AQ" run --cwd crates/engine -- cargo check
-"$AQ" audit --base origin/main
-"$AQ" git-diff --task --hunks
-"$AQ" verify
-"$AQ" benchmark --warmup 3 --runs 15 --command 'command-a' --command 'command-b'
+# A truncated search prints: continue: agentq continue q7H2a
+"$AQ" continue q7H2a
 ```
 
-## Statistics
+## Debugging a bundle
 
 ```bash
-"$AQ" stats
-"$AQ" stats --detailed
-"$AQ" stats --watch 2
+"$AQ" inspect listOrders --path src --debug --format json
 ```

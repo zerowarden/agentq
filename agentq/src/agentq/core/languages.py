@@ -125,11 +125,6 @@ def suffixes_for(*language_ids: str) -> frozenset[str]:
     )
 
 
-def ecosystem_for_manifest(name: str) -> EcosystemProfile | None:
-    """The ecosystem declaring the manifest basename ``name``, if any."""
-    return _MANIFEST_PROFILES.get(name.lower())
-
-
 def ecosystem_for_language(language_id: str | None) -> str | None:
     """The ecosystem id owning ``language_id`` files, if any.
 

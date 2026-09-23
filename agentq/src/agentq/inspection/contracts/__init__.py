@@ -35,6 +35,7 @@ from .capability import (
 from .collection import CollectionPlan, CollectionRequest, RequirementOmission
 from .evaluation import (
     EvidenceFeatures,
+    EvidenceProvenance,
     OmittedEvidence,
     PolicyAssessment,
     RequirementAssessment,
@@ -47,6 +48,7 @@ from .evaluation import (
     selected_evidence_to_wire,
 )
 from .evidence import (
+    Admission,
     Binding,
     DeclarationPayload,
     EvidencePool,
@@ -74,6 +76,7 @@ from .policy import (
     RequirementStrength,
 )
 from .requests import (
+    ExecutionLedger,
     InspectionContext,
     InspectionRequest,
     PresentationOptions,
@@ -101,6 +104,7 @@ from .targets import (
     InspectionTarget,
     Intent,
     LocationTarget,
+    PathKind,
     PathTarget,
     RangeTarget,
     SourceSpan,
@@ -112,6 +116,7 @@ from .targets import (
 __all__ = [
     "AcquiredEvidence",
     "AcquisitionRecord",
+    "Admission",
     "AmbiguousTarget",
     "AvailabilityStatus",
     "Binding",
@@ -132,10 +137,12 @@ __all__ = [
     "EvidenceFeatures",
     "EvidencePolicy",
     "EvidencePool",
+    "EvidenceProvenance",
     "EvidenceRequest",
     "EvidenceRequirement",
     "EvidenceRole",
     "EvidenceVariant",
+    "ExecutionLedger",
     "Fidelity",
     "INSPECTION_SCHEMA",
     "InspectionBundle",
@@ -151,6 +158,7 @@ __all__ = [
     "OutlinePayload",
     "OutlineSymbolRef",
     "PackagePayload",
+    "PathKind",
     "PathTarget",
     "PolicyAssessment",
     "PresentationOptions",

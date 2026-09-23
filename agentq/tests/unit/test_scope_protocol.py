@@ -133,54 +133,6 @@ class ScopeWireNormalizationTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
-    def test_files_and_outline_share_normalized_scopes(self) -> None:
-        temp, root = make_repo()
-        try:
-            from agentq.discovery import (
-                FilesRequest,
-                OutlineRequest,
-                files,
-                outline,
-            )
-
-            root_abs = root.expanduser().resolve()
-            relative = files(
-                FilesRequest(root=root, query="a.py", scopes=("src",), limit=20)
-            )
-            absolute = files(
-                FilesRequest(
-                    root=root,
-                    query="a.py",
-                    scopes=(str(root_abs / "src"),),
-                    limit=20,
-                )
-            )
-            self.assertEqual(
-                [item.path for item in absolute.files],
-                [item.path for item in relative.files],
-            )
-            self.assertNotEqual(absolute.files, ())
-            self.assertEqual(
-                outline(
-                    OutlineRequest(root=root, paths=(str(root_abs / "src"),), limit=20)
-                ).symbols,
-                outline(OutlineRequest(root=root, paths=("src",), limit=20)).symbols,
-            )
-            # A missing scope is an explicit error, never a silent empty result.
-            with self.assertRaises(AgentQError):
-                files(
-                    FilesRequest(
-                        root=root,
-                        query="a.py",
-                        scopes=("does-not-exist",),
-                        limit=20,
-                    )
-                )
-            with self.assertRaises(AgentQError):
-                outline(OutlineRequest(root=root, paths=("does-not-exist",), limit=20))
-        finally:
-            temp.cleanup()
-
     def test_ts_bridge_sends_relative_wire_not_absolute(self) -> None:
         temp, root = make_repo()
         try:

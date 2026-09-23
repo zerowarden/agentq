@@ -156,7 +156,7 @@ def _evidence_target(
 ) -> tuple[InspectionTarget, tuple[str, ...]]:
     if capability in FILE_ANCHORED and declaration is not None:
         return (
-            RangeTarget(path=declaration.path, ranges=(declaration.span,)),
+            RangeTarget(path=declaration.path, ranges=(declaration.source_span(),)),
             (declaration.path,),
         )
     match capability:
@@ -194,20 +194,9 @@ def acquire(
     for acquired in prior:
         _absorb(acquired, records, observations, variants)
     requests = plan.requests
-    limit = context.limits.max_provider_calls
-    if len(requests) > limit:
-        limitations.append(
-            Diagnostic(
-                message=(
-                    f"collection limited to {limit} provider calls; "
-                    f"{len(requests) - limit} planned requests were omitted"
-                ),
-                code="provider_call_limit",
-            )
-        )
-        requests = requests[:limit]
-    for request in requests:
-        _execute(request, plan, context, records, observations, variants, limitations)
+    results = _acquire_requests(plan, context)
+    for request, acquired in zip(requests, results, strict=True):
+        _execute(request, acquired, records, observations, variants, limitations)
     for omission in plan.omissions:
         limitations.append(
             Diagnostic(
@@ -241,40 +230,50 @@ def acquire(
 
 def _execute(
     request: CollectionRequest,
-    plan: CollectionPlan,
-    context: InspectionContext,
+    acquired: tuple[AcquiredEvidence, ...],
     records: list[AcquisitionRecord],
     observations: list[Observation],
     variants: list[EvidenceVariant],
     limitations: list[Diagnostic],
 ) -> None:
-    if context.registry is None:
-        limitations.append(_unavailable(request, "no capability registry is available"))
-        return
-    results = context.registry.acquire(
-        EvidenceRequest(
-            request_id=request.request_id,
-            capability=request.capability,
-            target=request.target if request.target is not None else plan.target,
-            subject=request.subject,
-            scope=request.scope,
-            limit=request.limit,
-            domain=request.domain,
-            requirement_id=request.requirement_id,
-            detail=request.detail,
-        ),
-        context,
-    )
-    if not results:
+    if not acquired:
         limitations.append(
             _unavailable(
                 request, f"no adapter provided {request.capability.value} evidence"
             )
         )
         return
-    for acquired in results:
-        _absorb(acquired, records, observations, variants)
-        limitations.extend(_outcome_limitations(request, acquired))
+    for item in acquired:
+        _absorb(item, records, observations, variants)
+        limitations.extend(_outcome_limitations(request, item))
+
+
+def _acquire_requests(
+    plan: CollectionPlan, context: InspectionContext
+) -> tuple[tuple[AcquiredEvidence, ...], ...]:
+    """Execute planned requests through the registry, batching where possible."""
+    requests = plan.requests
+    if not requests:
+        return ()
+    if context.registry is None:
+        return tuple(() for _ in requests)
+    return context.registry.acquire_many(
+        tuple(
+            EvidenceRequest(
+                request_id=request.request_id,
+                capability=request.capability,
+                target=request.target if request.target is not None else plan.target,
+                subject=request.subject,
+                scope=request.scope,
+                limit=request.limit,
+                domain=request.domain,
+                requirement_id=request.requirement_id,
+                detail=request.detail,
+            )
+            for request in requests
+        ),
+        context,
+    )
 
 
 def _outcome_limitations(

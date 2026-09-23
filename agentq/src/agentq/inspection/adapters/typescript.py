@@ -29,6 +29,7 @@ from agentq.core import (
     classify_path,
     typed_coverage,
 )
+from agentq.core.languages import language_id_for
 from agentq.discovery import list_repo_files
 from agentq.navigation import (
     TypeScriptBatch,
@@ -50,6 +51,7 @@ from ..contracts import (
     Capability,
     CapabilityAvailability,
     CapabilityResult,
+    DeclarationCandidate,
     DeclarationPayload,
     EvidenceRequest,
     EvidenceVariant,
@@ -128,7 +130,19 @@ class TypeScriptInspectionAdapter:
             }
         )
 
-    def applicable(self, target: InspectionTarget, context: InspectionContext) -> bool:
+    def batch_capabilities(self) -> frozenset[Capability]:
+        return frozenset(OPERATION_FOR_CAPABILITY)
+
+    def applicable(
+        self,
+        target: InspectionTarget,
+        context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
+    ) -> bool:
+        if subject is not None:
+            language = language_id_for(subject.path)
+            if language is not None:
+                return language in TS_JS_LANGUAGES
         languages = self._target_languages(target, context)
         return languages is None or bool(languages & TS_JS_LANGUAGES)
 
@@ -137,8 +151,10 @@ class TypeScriptInspectionAdapter:
         _capability: Capability,
         target: InspectionTarget,
         context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
     ) -> CapabilityAvailability:
-        probe = self._probe_for(context.root, target_scopes(target))
+        scopes = (subject.path,) if subject is not None else target_scopes(target)
+        probe = self._probe_for(context.root, scopes)
         version = probe.meta.runtime.typescript if probe.meta is not None else None
         if not probe.available:
             return CapabilityAvailability(
@@ -429,6 +445,14 @@ def _batch_request(
     )
 
 
+def _declaration_span(location: TypeScriptLocation) -> SourceSpan | None:
+    """The provider's full declaration extent, when it reported one."""
+    span = location.declaration_span
+    if span is None or span.start_line < 1 or span.end_line < span.start_line:
+        return None
+    return SourceSpan(start_line=span.start_line, end_line=span.end_line)
+
+
 def _span_for(location: TypeScriptLocation, cache: SourceCache) -> SourceSpan:
     lines = cache.lines(location.path)
     if lines is None:
@@ -545,6 +569,7 @@ def _shaped_observation(
                     signature=item.preview or item.name or item.display or "",
                     span=span,
                     scope=item.container or None,
+                    declaration_span=_declaration_span(item),
                 ),
                 source=source,
                 source_versions=versions,

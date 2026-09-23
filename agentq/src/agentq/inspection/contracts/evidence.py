@@ -1,8 +1,8 @@
 """Observations, their representations, and the acquired evidence pool.
 
 An :class:`Observation` here is an acquired repository fact at a versioned
-source location. It is unrelated to telemetry's invocation observation: this
-one carries source provenance and is never persisted by this package.
+source location. It carries source provenance and is never persisted by this
+package.
 """
 
 from __future__ import annotations
@@ -90,11 +90,19 @@ class SourceVersion:
 
 @dataclass(frozen=True)
 class DeclarationPayload:
+    """One declaration: its anchor span plus its full declaration extent.
+
+    ``span`` is the primary span; for providers whose locate operation reports
+    only an identifier anchor, ``declaration_span`` carries the canonical
+    extent the declaration actually occupies in the source.
+    """
+
     name: str
     kind: str
     signature: str
     span: SourceSpan
     scope: str | None = None
+    declaration_span: SourceSpan | None = None
 
     def __post_init__(self) -> None:
         require_str(self.name, "declaration payload name", allow_empty=True)
@@ -103,6 +111,12 @@ class DeclarationPayload:
         if not isinstance(self.span, SourceSpan):
             raise ContractError("declaration payload span must be a SourceSpan")
         optional_str(self.scope, "declaration payload scope")
+        if self.declaration_span is not None and not isinstance(
+            self.declaration_span, SourceSpan
+        ):
+            raise ContractError(
+                "declaration payload declaration_span must be a SourceSpan"
+            )
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -111,6 +125,11 @@ class DeclarationPayload:
             "signature": self.signature,
             "span": self.span.to_wire(),
             "scope": self.scope,
+            "declaration_span": (
+                self.declaration_span.to_wire()
+                if self.declaration_span is not None
+                else None
+            ),
         }
 
 
@@ -390,6 +409,24 @@ class EvidencePool:
         return tuple(
             item for item in self.acquisitions if item.capability is capability
         )
+
+
+@dataclass(frozen=True)
+class Admission:
+    """Observations an execution ledger admitted, and why the rest were not."""
+
+    observations: tuple[Observation, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not is_instance_of(self.observations, tuple) or not all(
+            is_instance_of(item, Observation) for item in self.observations
+        ):
+            raise ContractError("admission observations must be Observation records")
+        if not is_instance_of(self.reasons, tuple) or not all(
+            is_instance_of(item, str) for item in self.reasons
+        ):
+            raise ContractError("admission reasons must be a tuple of strings")
 
 
 def make_observation(

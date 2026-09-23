@@ -27,7 +27,6 @@ from agentq.delivery import suppression as cache_module  # noqa: E402
 from tests.support.cli_harness import (  # noqa: E402
     make_fragment,
     make_receipt,
-    record_receipt,
 )
 
 
@@ -112,12 +111,20 @@ class DeliveryHarness(unittest.TestCase):
 
     def ledger_counts(self) -> tuple[int, int]:
         with mock.patch.dict(os.environ, self.env, clear=False):
-            reader = sqlite3.connect(persistence_module.database_path())
+            path = persistence_module.database_path()
+            if not path.is_file():
+                return 0, 0
+            reader = sqlite3.connect(path)
             try:
-                receipts = reader.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
-                fragments = reader.execute(
-                    "SELECT COUNT(*) FROM receipt_fragments"
-                ).fetchone()[0]
+                try:
+                    receipts = reader.execute(
+                        "SELECT COUNT(*) FROM receipts"
+                    ).fetchone()[0]
+                    fragments = reader.execute(
+                        "SELECT COUNT(*) FROM receipt_fragments"
+                    ).fetchone()[0]
+                except sqlite3.DatabaseError:
+                    return 0, 0
             finally:
                 reader.close()
         return receipts, fragments
@@ -125,10 +132,7 @@ class DeliveryHarness(unittest.TestCase):
 
 class CollectorWritesNothingTests(DeliveryHarness):
     def test_collector_only_and_nested_calls_write_no_receipts(self) -> None:
-        from agentq.core import DiffSelection
         from agentq.discovery import ReadRequest, read
-        from agentq.git import DiffRequest
-        from agentq.git import diff as git_diff
         from agentq.inspection.adapters import (
             default_registry,
             filesystem_version_reader,
@@ -144,7 +148,6 @@ class CollectorWritesNothingTests(DeliveryHarness):
 
         with mock.patch.dict(os.environ, self.env, clear=False):
             read(ReadRequest(root=self.repo, specs=("pkg/mod.py:1-3",)))
-            git_diff(DiffRequest(root=self.repo, selection=DiffSelection()))
             inspect_service(
                 InspectionRequest(
                     target=SymbolTarget(name="target", scopes=("pkg",)),
@@ -220,11 +223,12 @@ class EmissionRecordingTests(DeliveryHarness):
                     identity=RepositoryIdentity(root=self.repo),
                     registry=default_registry(),
                     source_versions=filesystem_version_reader(self.repo),
-                    delivery=DeliveryBudget(max_chars=140, envelope_chars=20),
+                    delivery=DeliveryBudget(max_chars=700, envelope_chars=20),
                 ),
             )
             assert tight.render is not None and tight.selection is not None
             self.assertNotIn("return 7", tight.render.text)
+            self.assertLessEqual(tight.render.chars + 1, 700)
             self.assertTrue(
                 any(
                     item.reason == "delivery_budget"
@@ -276,92 +280,6 @@ class EmissionRecordingTests(DeliveryHarness):
             )
             self.assertEqual(spans, [(1, 5)])
             self.assertTrue(evidence)
-            # Lines 6-10 were never emitted, so a later read still returns them.
-            identity = cache_module.suppression_identity(self.repo)
-            record_receipt(
-                persistence_module,
-                cache_module.repo_id(self.repo),
-                receipt_id="partial-fixture",
-                context_id=identity[0],
-                consumer_id=identity[1] or None,
-                output_digest="f" * 64,
-                written_bytes=len(visible),
-                rows=rows,
-                command="read",
-            )
-            advice = cache_module.read_repeat_advice(
-                self.repo,
-                {
-                    "items": [
-                        {
-                            "path": "pkg/mod.py",
-                            "version": data_wire["items"][0]["version"],
-                            "start": 1,
-                            "end": 10,
-                        }
-                    ],
-                    "max_chars": 260,
-                },
-                command="read",
-            )
-            self.assertIsNotNone(advice)
-            self.assertEqual(
-                sorted(tuple(pair) for pair in advice["_unseen_ranges"][0]),
-                [(6, 10)],
-            )
-
-    def test_variant_and_version_changes_are_not_suppressed(self) -> None:
-        from agentq.discovery import ReadRequest, read, render_read
-
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            narrow = read(
-                ReadRequest(
-                    root=self.repo,
-                    specs=("pkg/mod.py:1-3",),
-                    max_chars=40,
-                    budget=100000,
-                    output_format="text",
-                )
-            )
-            narrow_wire = narrow.to_wire()
-            visible = str(render_read(narrow))
-            _, rows = cache_module.extract_delivered_fragments(
-                self.repo, "read", narrow_wire, visible, "text"
-            )
-            self.assertTrue(rows)
-            identity = cache_module.suppression_identity(self.repo)
-            record_receipt(
-                persistence_module,
-                cache_module.repo_id(self.repo),
-                receipt_id="variant-fixture",
-                context_id=identity[0],
-                consumer_id=identity[1] or None,
-                output_digest="e" * 64,
-                written_bytes=len(visible),
-                rows=rows,
-                command="read",
-            )
-            version = narrow_wire["items"][0]["version"]
-            # A wider line width is different evidence: no suppression.
-            wide_probe = {
-                "items": [
-                    {"path": "pkg/mod.py", "version": version, "start": 1, "end": 3}
-                ],
-                "max_chars": 260,
-            }
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, wide_probe, command="read")
-            )
-            # Changed source bytes are different evidence: no suppression.
-            stale_probe = {
-                "items": [
-                    {"path": "pkg/mod.py", "version": "deadbeef", "start": 1, "end": 3}
-                ],
-                "max_chars": 40,
-            }
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, stale_probe, command="read")
-            )
 
     def test_inspection_evidence_is_never_suppressed_but_receipted(self) -> None:
         rendered = self._inspect_text()
@@ -472,20 +390,6 @@ class EmissionRecordingTests(DeliveryHarness):
                 self.assertEqual(
                     len(dispatch.receipt.fragments), 1 if dispatch.receipt else 0
                 )
-            probe = {
-                "items": [
-                    {
-                        "path": "pkg/mod.py",
-                        "version": dispatch.data["items"][0]["version"],
-                        "start": 1,
-                        "end": 2,
-                    }
-                ],
-                "max_chars": 260,
-            }
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, probe, command="read")
-            )
 
     def test_text_manifest_claims_only_exactly_rendered_lines(self) -> None:
         data = {
@@ -560,89 +464,6 @@ class EmissionRecordingTests(DeliveryHarness):
         )
         self.assertEqual([item.rendered_chars for item in evidence], [6, 6])
 
-    def test_redaction_variant_is_not_suppressed_by_plain_delivery(self) -> None:
-        data = {
-            "max_chars": 260,
-            "items": [
-                {
-                    "path": "pkg/sym.py",
-                    "total_lines": 2,
-                    "start": 1,
-                    "end": 2,
-                    "version": "v1",
-                    "redaction": {"private_key_blocks": 1},
-                    "lines": [
-                        {"line": 1, "text": "def target():"},
-                        {"line": 2, "text": "    return 1"},
-                    ],
-                }
-            ],
-        }
-        visible = "\n".join(
-            [
-                "--- pkg/sym.py:1-2 (2 lines total) ---",
-                "[redacted 1 private-key block(s), 0 line(s)]",
-                "  1 │ def target():",
-                "  2 │     return 1",
-            ]
-        )
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            _, rows = cache_module.extract_delivered_fragments(
-                self.repo, "read", data, visible, "text"
-            )
-            identity = cache_module.suppression_identity(self.repo)
-            record_receipt(
-                persistence_module,
-                cache_module.repo_id(self.repo),
-                receipt_id="redacted-fixture",
-                context_id=identity[0],
-                consumer_id=identity[1] or None,
-                output_digest="a" * 64,
-                written_bytes=len(visible),
-                rows=rows,
-                command="read",
-            )
-            plain_probe = {
-                "items": [
-                    {"path": "pkg/sym.py", "version": "v1", "start": 1, "end": 2}
-                ],
-                "max_chars": 260,
-            }
-            redacted_probe = {
-                "items": [
-                    {
-                        "path": "pkg/sym.py",
-                        "version": "v1",
-                        "start": 1,
-                        "end": 2,
-                        "redaction": {"private_key_blocks": 1},
-                    }
-                ],
-                "max_chars": 260,
-            }
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, plain_probe, command="read")
-            )
-            self.assertIsNotNone(
-                cache_module.read_repeat_advice(
-                    self.repo, redacted_probe, command="read"
-                )
-            )
-
-    def test_receipt_error_is_recorded_in_telemetry(self) -> None:
-        from agentq import telemetry as telemetry_module
-
-        env = {**self.env, "AGENTQ_TELEMETRY": "1"}
-        with mock.patch.dict(os.environ, env, clear=False):
-            telemetry_module.record_event(
-                self.repo,
-                command="read",
-                duration_ms=1,
-                receipt_error="receipt not stored: ledger unavailable",
-            )
-            events = telemetry_module.hot_file().read_text(encoding="utf-8")
-        self.assertIn("receipt not stored", events)
-
     def test_unpersisted_emission_reports_no_receipt(self) -> None:
         from agentq.cli import emit
         from agentq.discovery import ReadRequest, read, render_read
@@ -682,103 +503,6 @@ class EmissionRecordingTests(DeliveryHarness):
                     result=empty_result,
                 )
         self.assertIsNone(empty.receipt)
-
-    def test_consumer_session_and_epoch_isolation(self) -> None:
-        from agentq.discovery import ReadRequest, read, render_read
-
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            data = read(
-                ReadRequest(
-                    root=self.repo,
-                    specs=("pkg/mod.py:1-3",),
-                    budget=100000,
-                    output_format="text",
-                )
-            )
-            data_wire = data.to_wire()
-            visible = str(render_read(data))
-            _, rows = cache_module.extract_delivered_fragments(
-                self.repo, "read", data_wire, visible, "text"
-            )
-            identity = cache_module.suppression_identity(self.repo)
-            record_receipt(
-                persistence_module,
-                cache_module.repo_id(self.repo),
-                receipt_id="isolation-fixture",
-                context_id=identity[0],
-                consumer_id=identity[1],
-                output_digest="d" * 64,
-                written_bytes=len(visible),
-                rows=rows,
-                command="read",
-            )
-            probe = {
-                "items": [
-                    {
-                        "path": "pkg/mod.py",
-                        "version": data_wire["items"][0]["version"],
-                        "start": 1,
-                        "end": 3,
-                    }
-                ],
-                "max_chars": 260,
-            }
-            self.assertIsNotNone(
-                cache_module.read_repeat_advice(self.repo, probe, command="read")
-            )
-        other = _harness_env(self.base, session="someone-else")
-        with mock.patch.dict(os.environ, other, clear=False):
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, probe, command="read")
-            )
-        rotated = dict(self.env, AGENTQ_CONTEXT_EPOCH="epoch-2")
-        with mock.patch.dict(os.environ, rotated, clear=False):
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, probe, command="read")
-            )
-
-    def test_legacy_entries_never_suppress(self) -> None:
-        with mock.patch.dict(os.environ, self.env, clear=False):
-            path = persistence_module.database_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Touch the store so migrations exist, then forge a legacy row in
-            # the retired table directly.
-            persistence_module.receipt_fragment_hits(
-                "r", "c", "", "read", "read-range", ["k"], now=time.time()
-            )
-            reader = sqlite3.connect(path)
-            try:
-                reader.execute(
-                    "INSERT OR REPLACE INTO context_entries "
-                    "(repo_id, context_id, command, evidence_key, payload, "
-                    "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        cache_module.repo_id(self.repo),
-                        "session:delivery-test",
-                        "read",
-                        "forged-key",
-                        None,
-                        0.0,
-                        9999999999.0,
-                    ),
-                )
-                reader.commit()
-            finally:
-                reader.close()
-            probe = {
-                "items": [
-                    {
-                        "path": "pkg/mod.py",
-                        "version": "v",
-                        "start": 1,
-                        "end": 9,
-                    }
-                ],
-                "max_chars": 260,
-            }
-            self.assertIsNone(
-                cache_module.read_repeat_advice(self.repo, probe, command="read")
-            )
 
     def test_duplicate_receipt_insert_is_idempotent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=False):

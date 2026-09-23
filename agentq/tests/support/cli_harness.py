@@ -128,45 +128,11 @@ class AgentQIntegrationHarness(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="agentq-test-")
         self.repo = Path(self.temp.name) / "repo"
         self.repo.mkdir()
-        self.telemetry = Path(self.temp.name) / "telemetry"
-        self.archive = Path(self.temp.name) / "state" / "events.jsonl"
-        self.bin = Path(self.temp.name) / "bin"
-        self.bin.mkdir()
-
-        fake_pnpm = self.bin / "pnpm"
-        fake_pnpm.write_text(
-            textwrap.dedent("""\
-            #!/usr/bin/env bash
-            set -euo pipefail
-            printf 'fake pnpm cwd=%s args=%s\\n' "$PWD" "$*"
-            case "${AGENTQ_TEST_FAIL:-}" in
-              a-typecheck)
-                if [[ "$PWD" == */packages/a && "$*" == "run typecheck" ]]; then
-                  echo 'ERROR simulated a typecheck failure' >&2
-                  exit 7
-                fi
-                ;;
-              b-typecheck)
-                if [[ "$PWD" == */packages/b && "$*" == "run typecheck" ]]; then
-                  echo 'ERROR simulated b typecheck failure' >&2
-                  exit 8
-                fi
-                ;;
-            esac
-            exit 0
-        """),
-            encoding="utf-8",
-        )
-        fake_pnpm.chmod(0o755)
-
         self.env = os.environ.copy()
         self.env.update(
             {
-                "AGENTQ_TELEMETRY_HOT": str(self.telemetry),
-                "AGENTQ_TELEMETRY_STATE": str(self.archive),
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
-                "PATH": str(self.bin) + os.pathsep + self.env.get("PATH", ""),
                 "TERM": "dumb",
                 "NO_COLOR": "1",
             }

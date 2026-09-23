@@ -6,9 +6,8 @@ provider payloads, absolute paths, or unfiltered exception text; callers pass
 short repository-relative identifiers and named reasons only. Writing trace
 records to a stream is the CLI adapter's responsibility, not this module's.
 
-This trace is deliberately separate from telemetry: telemetry persists
-privacy-minimized invocation outcomes, while an inspection trace is in-memory,
-per-request, and discarded when the call returns.
+An inspection trace is in-memory, per-request, and discarded when the call
+returns; it is never persisted.
 """
 
 from __future__ import annotations

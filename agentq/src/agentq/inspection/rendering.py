@@ -16,6 +16,7 @@ from agentq.core import ContractError, SourceRef, canonical_json
 from .budgeting import DELIVERY_FORMATS
 from .contracts import (
     AmbiguousTarget,
+    EvidenceProvenance,
     InspectionBundle,
     RenderedBundle,
     ResolvedTarget,
@@ -54,7 +55,8 @@ def _render_text(bundle: InspectionBundle) -> str:
     if declaration is not None:
         lines.append(
             "selected declaration: "
-            f"{declaration.provider} {_span_label(declaration.path, declaration.span)} "
+            f"{declaration.provider} "
+            f"{_span_label(declaration.path, declaration.source_span())} "
             f"[{declaration.kind}] {declaration.signature}"
         )
     if isinstance(bundle.resolution, AmbiguousTarget):
@@ -140,10 +142,34 @@ def evidence_block(item: SelectedEvidence) -> tuple[str, ...]:
     )
     if contributions:
         header += f" ({contributions})"
-    return (
-        header,
-        *(f"    {line}" for line in variant.text.rstrip("\n").splitlines()),
-    )
+    lines = [header]
+    if item.provenance is not None:
+        lines.append(f"    provenance: {_provenance_label(item.provenance)}")
+    lines.extend(f"    {line}" for line in variant.text.rstrip("\n").splitlines())
+    return tuple(lines)
+
+
+def _provenance_label(provenance: EvidenceProvenance) -> str:
+    """One compact text line naming how a selected artifact was acquired."""
+    provider = provenance.provider
+    if provenance.provider_version:
+        provider += f"@{provenance.provider_version}"
+    parts = [provider, provenance.method]
+    if provenance.effective_scope:
+        parts.append(f"scope={','.join(provenance.effective_scope)}")
+    if provenance.source_versions:
+        parts.append(
+            "source="
+            + ",".join(
+                f"{stamp.path}@{stamp.version}" for stamp in provenance.source_versions
+            )
+        )
+    coverage = provenance.coverage
+    label = coverage.status
+    if coverage.reasons:
+        label += f"({','.join(coverage.reasons)})"
+    parts.append(label)
+    return " · ".join(parts)
 
 
 def selected_cost(item: SelectedEvidence, output_format: str) -> int:

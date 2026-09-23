@@ -54,7 +54,13 @@ class UnresolvedReason(str, Enum):
 
 @dataclass(frozen=True)
 class DeclarationCandidate:
-    """One reacquirable declaration candidate with a request-bound selector."""
+    """One reacquirable declaration candidate with a request-bound selector.
+
+    ``span`` is the anchor the provider reported; ``declaration_span`` is the
+    full declaration extent when the provider knows it. Source evidence is
+    requested over the declaration extent, while semantic queries still use
+    the anchor.
+    """
 
     candidate_id: str
     provider: str
@@ -65,6 +71,7 @@ class DeclarationCandidate:
     source_version: str
     scope: str | None = None
     external: bool = False
+    declaration_span: SourceSpan | None = None
 
     def __post_init__(self) -> None:
         require_str(self.candidate_id, "declaration candidate id")
@@ -76,6 +83,16 @@ class DeclarationCandidate:
         require_str(self.signature, "declaration candidate signature", allow_empty=True)
         require_str(self.source_version, "declaration candidate source_version")
         optional_str(self.scope, "declaration candidate scope")
+        if self.declaration_span is not None and not isinstance(
+            self.declaration_span, SourceSpan
+        ):
+            raise ContractError(
+                "declaration candidate declaration_span must be a SourceSpan"
+            )
+
+    def source_span(self) -> SourceSpan:
+        """The span source evidence is requested over."""
+        return self.declaration_span or self.span
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -88,6 +105,11 @@ class DeclarationCandidate:
             "source_version": self.source_version,
             "scope": self.scope,
             "external": self.external,
+            "declaration_span": (
+                self.declaration_span.to_wire()
+                if self.declaration_span is not None
+                else None
+            ),
         }
 
 
@@ -273,6 +295,7 @@ def make_declaration_candidate(
     signature: str,
     scope: str | None = None,
     external: bool = False,
+    declaration_span: SourceSpan | None = None,
 ) -> DeclarationCandidate:
     return DeclarationCandidate(
         candidate_id=declare_candidate_id(
@@ -292,4 +315,5 @@ def make_declaration_candidate(
         source_version=source_version,
         scope=scope,
         external=external,
+        declaration_span=declaration_span,
     )

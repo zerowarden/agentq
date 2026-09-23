@@ -67,8 +67,6 @@ testpaths = ["tests"]
 include = ["src/agentq"]
 strict = [
     "src/agentq/core",
-    "src/agentq/audit.py",
-    "src/agentq/impact.py",
     "src/agentq/requests.py",
     "src/agentq/persistence",
 ]

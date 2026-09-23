@@ -16,25 +16,9 @@ from agentq.core import (
 )
 from agentq.delivery import read_item_header, read_line_text
 
-from .files import FilesResult
 from .outline import OutlineResult
-from .read import ReadItem, ReadOverlap, ReadResult
-from .repo_map import RepoMapResult
+from .read import ReadItem, ReadResult
 from .search import SearchFile, SearchResult
-
-
-def render_files(
-    result: FilesResult, *, budget: int = 0
-) -> str:  # pyright: ignore[reportUnusedParameter]
-    lines = [
-        f"files: {result.shown}/{result.total}"
-        + (" (truncated)" if result.truncated else "")
-    ]
-    for index, item in enumerate(result.files, 1):
-        lines.append(f"{index:>3}. {item.path} [{item.role}; {item.language}]")
-    if result.truncated:
-        lines.append("Narrow the query or scope before requesting more files.")
-    return "\n".join(lines)
 
 
 def _search_file_block(item: SearchFile, *, view: str, samples: int) -> str:
@@ -133,10 +117,6 @@ def render_search(result: SearchResult, *, budget: int = 0) -> str | RenderedTex
     return rendered
 
 
-def _pct_hint(value: float) -> str:
-    return f"{float(value):.1f}% overlap" if value else "overlap detected"
-
-
 def _redaction_note(redaction: dict[str, Any] | None) -> str | None:
     if not redaction or not redaction.get("private_key_blocks"):
         return None
@@ -147,13 +127,6 @@ def _redaction_note(redaction: dict[str, Any] | None) -> str | None:
     return f"[redacted {blocks} private-key block(s), {lines} line(s){suffix}]"
 
 
-def _overlap_note(overlap: ReadOverlap) -> str:
-    return (
-        f"read overlap: {overlap.overlap_lines} lines, "
-        f"{_pct_hint(overlap.overlap_percent)}, {overlap.scope}"
-    )
-
-
 def _read_block(item: ReadItem, *, render_budget_truncated: bool) -> str:
     if item.refused:
         return f"{item.path}: [not read: {item.reason}]"
@@ -162,8 +135,6 @@ def _read_block(item: ReadItem, *, render_budget_truncated: bool) -> str:
     redaction_note = _redaction_note(dict(item.redaction) if item.redaction else None)
     if redaction_note:
         lines.append(redaction_note)
-    if item.suppressed:
-        lines.append("[already returned; use --repeat to show]")
     for entry in item.lines:
         marker = ">" if entry.anchor else " "
         lines.append(read_line_text(marker, entry.line, width, entry.text))
@@ -193,8 +164,6 @@ def render_read(result: ReadResult, *, budget: int = 0) -> RenderedText:
     ]
     if result.truncated:
         blocks.append(_read_truncation_block(result))
-    if result.read_overlap is not None:
-        blocks.append(_overlap_note(result.read_overlap))
     rendered, _ = budget_text_records(
         "",
         blocks,
@@ -203,33 +172,6 @@ def render_read(result: ReadResult, *, budget: int = 0) -> RenderedText:
         omission="… {count} source windows omitted by render budget",
     )
     return rendered
-
-
-def render_repo_map(
-    result: RepoMapResult, *, budget: int = 0
-) -> str:  # pyright: ignore[reportUnusedParameter]
-    lines = [
-        f"repository: {result.repo_root}",
-        f"branch: {result.branch}",
-        f"tracked/untracked files: {result.files}",
-        f"approximate file bytes: {result.bytes}",
-        "\nlanguages:",
-    ]
-    lines += [f"  {item.language}: {item.files} files" for item in result.languages]
-    lines.append("\nmajor directories:")
-    lines += [f"  {item.path}: {item.files} files" for item in result.directories]
-    if result.manifests:
-        lines.append("\nmanifests/workspaces:")
-        for manifest in result.manifests:
-            suffix = f" name={manifest.name}" if manifest.name else ""
-            scripts = (
-                f" scripts={','.join(manifest.scripts)}" if manifest.scripts else ""
-            )
-            lines.append(f"  {manifest.path} [{manifest.kind}]{suffix}{scripts}")
-    if result.instructions:
-        lines.append("\ninstruction/reference files:")
-        lines += [f"  {path}" for path in result.instructions]
-    return "\n".join(lines)
 
 
 def render_outline(

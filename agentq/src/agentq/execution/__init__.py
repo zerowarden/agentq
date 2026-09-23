@@ -1,4 +1,4 @@
-"""Execution capability: contracts, supervision, invocation, and bounded runs."""
+"""Execution capability: contracts, supervision, and invocation."""
 
 from __future__ import annotations
 
@@ -12,14 +12,6 @@ from .models import (
     StopReason,
     StreamMode,
     WrapperStatus,
-)
-from .run import (
-    RunProfile,
-    RunRequest,
-    RunResult,
-    cleanup_logs,
-    render_run,
-    run,
 )
 from .signals import run_with_cancellation
 from .supervisor import (
@@ -46,9 +38,6 @@ __all__ = [
     "Consumer",
     "ExecutionOutcome",
     "ExecutionSpec",
-    "RunProfile",
-    "RunRequest",
-    "RunResult",
     "STREAM_RECORD_LIMIT_BYTES",
     "StdinPolicy",
     "StopReason",
@@ -56,13 +45,10 @@ __all__ = [
     "StreamMode",
     "WrapperStatus",
     "active_cancellation",
-    "cleanup_logs",
     "cli_exit_code",
     "is_spawn_failure",
     "raise_if_cancelled",
-    "render_run",
     "route_stdout",
-    "run",
     "run_cmd",
     "run_with_cancellation",
     "set_active_cancellation",

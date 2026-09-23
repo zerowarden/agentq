@@ -1,4 +1,4 @@
-"""Deterministic schema migrations and the one-time legacy task import.
+"""Deterministic schema migrations.
 
 Migration statements are append-only: an already-applied version is never
 rewritten, and a database without the migration table starts from version 1.
@@ -6,16 +6,8 @@ rewritten, and a database without the migration table starts from version 1.
 
 from __future__ import annotations
 
-import json
-import re
 import sqlite3
 import time
-from pathlib import Path
-from typing import Any, cast
-
-from agentq.core import telemetry_hot_dir
-
-_REPO_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
@@ -130,54 +122,3 @@ def migrate(conn: sqlite3.Connection) -> None:
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, time.time()),
             )
-
-
-def import_legacy_tasks(conn: sqlite3.Connection) -> None:
-    """Import legacy task-state JSON for one new connection.
-
-    The import is idempotent and removes each imported file, so re-running it
-    is safe. Legacy context entries record that an operation ran, not what
-    final output contained, so they must not suppress new results: their files
-    are left in place untouched. Malformed legacy files are never merged
-    either.
-    """
-    for path in _legacy_files(telemetry_hot_dir() / "tasks"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        record = cast("dict[str, Any]", payload)
-        if not isinstance(record.get("task_id"), str):
-            continue
-        try:
-            with conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO task_state (repo_id, task_id, payload, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        path.stem,
-                        record["task_id"],
-                        json.dumps(record, ensure_ascii=False, separators=(",", ":")),
-                        time.time(),
-                    ),
-                )
-        except sqlite3.Error:
-            continue
-        _unlink(path)
-
-
-def _legacy_files(directory: Path) -> list[Path]:
-    try:
-        candidates = list(directory.glob("*.json"))
-    except OSError:
-        return []
-    return [path for path in candidates if _REPO_ID_RE.fullmatch(path.stem)]
-
-
-def _unlink(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass

@@ -5,7 +5,7 @@ functions. Validation happens where external JSON, argv, or persisted records
 enter the process; dataclass annotations alone never validate.
 
 This module is deliberately dependency-free so contract modules never import
-command implementations, search, codemod, or telemetry.
+command implementations or capabilities.
 """
 
 from __future__ import annotations

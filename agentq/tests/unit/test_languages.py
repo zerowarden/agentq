@@ -8,15 +8,10 @@ from pathlib import Path
 
 from agentq.core.languages import (
     LANGUAGES,
-    LOCK_NAMES,
-    MANIFEST_NAMES,
-    ecosystem_for_manifest,
     language_for,
     language_id_for,
     suffixes_for,
 )
-from agentq.core.path_policy import classify_path
-from agentq.discovery.repo_map import _manifest_for
 from agentq.workspace import nearest_manifest
 
 
@@ -33,15 +28,6 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(language_id_for("a.tsx"), "tsx")
         self.assertIn(".tsx", suffixes_for("tsx"))
 
-    def test_go_is_a_first_class_ecosystem(self) -> None:
-        self.assertIn("go.mod", MANIFEST_NAMES)
-        self.assertIn("go.sum", LOCK_NAMES)
-        profile = ecosystem_for_manifest("go.mod")
-        self.assertIsNotNone(profile)
-        assert profile is not None
-        self.assertEqual(profile.id, "go")
-        self.assertEqual(classify_path("go.mod"), "config")
-
     def test_nearest_manifest_finds_go_mod(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -55,19 +41,6 @@ class CatalogTests(unittest.TestCase):
             assert manifest is not None
             self.assertEqual(manifest.kind, "go")
             self.assertEqual(manifest.path, "go.mod")
-
-    def test_repo_map_parses_go_module_name(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "go.mod"
-            path.write_text("module example.com/app\n\ngo 1.22\n", encoding="utf-8")
-
-            manifest = _manifest_for(path, "go.mod")
-
-            self.assertIsNotNone(manifest)
-            assert manifest is not None
-            self.assertEqual(manifest.kind, "go")
-            self.assertEqual(manifest.name, "example.com/app")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,9 @@ from agentq.inspection.contracts import (
     InspectionRequest,
     Intent,
     PathTarget,
+    SourceSpan,
     SymbolTarget,
+    make_declaration_candidate,
 )
 from tests.support.inspection_fakes import (
     FakeHandler,
@@ -228,6 +230,147 @@ class BrokenAdapterTests(unittest.TestCase):
         entry = report.entries_for(Capability.FIND_DECLARATIONS)[0]
         self.assertIs(entry.status, AvailabilityStatus.UNAVAILABLE)
         self.assertIn("availability check failed", entry.reason or "")
+
+
+class SubjectApplicabilityTests(unittest.TestCase):
+    def _candidate(self, path: str):
+        return make_declaration_candidate(
+            provider="fake",
+            path=path,
+            source_version="v1",
+            kind="function",
+            span=SourceSpan(start_line=1, end_line=2),
+            signature="function target()",
+        )
+
+    def test_handlers_for_respects_the_resolved_subject_language(self) -> None:
+        typescript = FakeHandler(
+            name="fake-ts",
+            supported=frozenset({Capability.SEMANTIC_REFERENCES}),
+            subject_applicable_to=lambda subject: subject.path.endswith(".ts"),
+        )
+        python = FakeHandler(
+            name="fake-py",
+            supported=frozenset({Capability.SEMANTIC_REFERENCES}),
+            subject_applicable_to=lambda subject: subject.path.endswith(".py"),
+        )
+        registry = CapabilityRegistry((typescript, python))
+        context = fake_context((typescript, python))
+        handlers = registry.handlers_for(
+            Capability.SEMANTIC_REFERENCES,
+            SymbolTarget(name="target"),
+            context,
+            self._candidate("src/service.py"),
+        )
+        self.assertEqual([handler.name for handler in handlers], ["fake-py"])
+
+    def test_describe_reports_not_applicable_for_the_other_language(self) -> None:
+        typescript = FakeHandler(
+            name="fake-ts",
+            supported=frozenset({Capability.SEMANTIC_REFERENCES}),
+            subject_applicable_to=lambda subject: subject.path.endswith(".ts"),
+        )
+        report = CapabilityRegistry((typescript,)).describe(
+            _symbol_request(),
+            fake_context(typescript),
+            subject=self._candidate("src/service.py"),
+        )
+        entry = report.entries_for(Capability.SEMANTIC_REFERENCES)[0]
+        self.assertIs(entry.status, AvailabilityStatus.NOT_APPLICABLE)
+        self.assertFalse(report.available(Capability.SEMANTIC_REFERENCES))
+
+
+class BatchingTests(unittest.TestCase):
+    def _request(self, capability: Capability, subject):
+        return EvidenceRequest(
+            request_id=f"req-{capability.value}",
+            capability=capability,
+            target=SymbolTarget(name="target"),
+            subject=subject,
+            limit=10,
+        )
+
+    def _candidate(self, path: str):
+        return make_declaration_candidate(
+            provider="fake",
+            path=path,
+            source_version="v1",
+            kind="function",
+            span=SourceSpan(start_line=1, end_line=2),
+            signature="function target()",
+        )
+
+    def test_acquire_many_batches_one_subject_into_one_invocation(self) -> None:
+        handler = FakeHandler(
+            name="fake",
+            supported=frozenset(
+                {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+            ),
+            batchable=frozenset(
+                {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+            ),
+        )
+        registry = CapabilityRegistry((handler,))
+        subject = self._candidate("src/service.ts")
+        results = registry.acquire_many(
+            (
+                self._request(Capability.SEMANTIC_REFERENCES, subject),
+                self._request(Capability.IMPLEMENTATIONS, subject),
+            ),
+            fake_context(handler),
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            handler.batch_calls, [("semantic_references", "implementations")]
+        )
+
+    def test_acquire_many_does_not_batch_different_subjects(self) -> None:
+        handler = FakeHandler(
+            name="fake",
+            supported=frozenset(
+                {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+            ),
+            batchable=frozenset(
+                {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+            ),
+        )
+        registry = CapabilityRegistry((handler,))
+        results = registry.acquire_many(
+            (
+                self._request(
+                    Capability.SEMANTIC_REFERENCES, self._candidate("src/a.ts")
+                ),
+                self._request(
+                    Capability.IMPLEMENTATIONS, self._candidate("src/b.ts")
+                ),
+            ),
+            fake_context(handler),
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(handler.batch_calls, [])
+
+    def test_acquire_many_uses_singles_for_a_non_batching_handler(self) -> None:
+        handler = FakeHandler(
+            name="fake",
+            supported=frozenset(
+                {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+            ),
+        )
+        registry = CapabilityRegistry((handler,))
+        subject = self._candidate("src/service.ts")
+        results = registry.acquire_many(
+            (
+                self._request(Capability.SEMANTIC_REFERENCES, subject),
+                self._request(Capability.IMPLEMENTATIONS, subject),
+            ),
+            fake_context(handler),
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(handler.batch_calls, [])
+        self.assertEqual(
+            [call[0] for call in handler.calls],
+            ["semantic_references", "implementations"],
+        )
 
 
 class ThirdLanguageIndependenceTests(unittest.TestCase):

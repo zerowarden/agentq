@@ -119,19 +119,3 @@ def add_scope(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="scope to one or more files/directories; repeatable",
     )
-
-
-def expansion_controls(args: argparse.Namespace) -> dict[str, int]:
-    return {
-        target: int(value)
-        for target, value in (
-            ("limit", getattr(args, "limit", None)),
-            ("max_lines", getattr(args, "max_lines", None)),
-            ("max_files", getattr(args, "max_files", None)),
-            ("max_hunks", getattr(args, "max_hunks", None)),
-            ("max_chars", getattr(args, "max_chars", None)),
-            ("scan_cap", getattr(args, "scan_cap", None)),
-            ("samples_per_file", getattr(args, "per_file", None)),
-        )
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    }

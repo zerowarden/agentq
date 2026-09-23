@@ -8,13 +8,13 @@ disturb collection.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from agentq.core import COMPLETE, Coverage, SourceRef, typed_coverage
-from agentq.inspection.budgeting import DeliveryBudget
+from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.capabilities import CapabilityRegistry
 from agentq.inspection.contracts import (
     Binding,
@@ -23,6 +23,7 @@ from agentq.inspection.contracts import (
     CapabilityAvailability,
     CapabilityResult,
     CollectionStatus,
+    DeclarationCandidate,
     DeclarationPayload,
     EvidenceRequest,
     Fidelity,
@@ -162,6 +163,7 @@ def source_result(
         observations=(observation,),
         variants=(variant,),
         coverage=complete(),
+        provider_version="fake-1.0",
     )
 
 
@@ -198,6 +200,7 @@ def reference_result(
         observations=(observation,),
         variants=(variant,),
         coverage=complete(),
+        provider_version="fake-1.0",
     )
 
 
@@ -223,6 +226,7 @@ def package_result(
         observations=(observation,),
         variants=(variant,),
         coverage=complete(),
+        provider_version="fake-1.0",
     )
 
 
@@ -283,11 +287,16 @@ def outline_result(
         observations=(observation,),
         variants=(variant,),
         coverage=complete(),
+        provider_version="fake-1.0",
     )
 
 
 def empty_result() -> CapabilityResult:
-    return CapabilityResult(status=CollectionStatus.EMPTY, coverage=complete())
+    return CapabilityResult(
+        status=CollectionStatus.EMPTY,
+        coverage=complete(),
+        provider_version="fake-1.0",
+    )
 
 
 @dataclass
@@ -300,17 +309,38 @@ class FakeHandler:
         default_factory=dict[Capability, CapabilityResult]
     )
     applicable_to: Any = None
+    subject_applicable_to: Any = None
     availability_by_capability: Mapping[Capability, CapabilityAvailability] = field(
         default_factory=dict[Capability, CapabilityAvailability]
     )
     unavailable_reason: str | None = None
     acquire_error: Exception | None = None
+    batchable: frozenset[Capability] = frozenset()
     calls: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    batch_calls: list[tuple[str, ...]] = field(default_factory=list[tuple[str, ...]])
 
     def capabilities(self) -> frozenset[Capability]:
         return self.supported
 
-    def applicable(self, target: InspectionTarget, _context: InspectionContext) -> bool:
+    def batch_capabilities(self) -> frozenset[Capability]:
+        return self.batchable
+
+    def acquire_batch(
+        self, requests: Sequence[EvidenceRequest], context: InspectionContext
+    ) -> tuple[CapabilityResult, ...]:
+        self.batch_calls.append(
+            tuple(request.capability.value for request in requests)
+        )
+        return tuple(self.acquire(request, context) for request in requests)
+
+    def applicable(
+        self,
+        target: InspectionTarget,
+        _context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
+    ) -> bool:
+        if subject is not None and self.subject_applicable_to is not None:
+            return self.subject_applicable_to(subject)
         if self.applicable_to is None:
             return True
         return self.applicable_to(target)
@@ -320,6 +350,7 @@ class FakeHandler:
         capability: Capability,
         _target: InspectionTarget,
         _context: InspectionContext,
+        _subject: DeclarationCandidate | None = None,
     ) -> CapabilityAvailability:
         if self.unavailable_reason is not None:
             return CapabilityAvailability(
@@ -377,6 +408,7 @@ def fake_context(
     versions: Mapping[str, str] | None = None,
     trace: Any = None,
     delivery: DeliveryBudget | None = None,
+    limits: AcquisitionLimits | None = None,
     output_format: str = "text",
     debug: bool = False,
 ) -> InspectionContext:
@@ -390,6 +422,7 @@ def fake_context(
         identity=RepositoryIdentity(root=Path("/repo")),
         presentation=PresentationOptions(output_format=output_format, debug=debug),
         delivery=delivery or DeliveryBudget(),
+        limits=limits or AcquisitionLimits(),
         registry=CapabilityRegistry(handlers),
         source_versions=DictVersionReader(
             versions

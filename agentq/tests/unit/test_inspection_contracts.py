@@ -26,6 +26,7 @@ from agentq.inspection.contracts import (
     LocationTarget,
     Observation,
     ObservationKind,
+    PathKind,
     PathTarget,
     RangeTarget,
     RepresentationKind,
@@ -84,7 +85,15 @@ class TargetValidationTests(unittest.TestCase):
         for path in ("/etc/passwd", "../outside.ts", "src/../outside.ts"):
             with self.subTest(path=path):
                 with self.assertRaises(ContractError):
-                    PathTarget(path=path)
+                    PathTarget(path=path, path_kind=PathKind.FILE)
+
+    def test_path_target_requires_an_explicit_path_kind(self) -> None:
+        with self.assertRaises(ContractError):
+            PathTarget(path="src", path_kind="directory")  # type: ignore[arg-type]
+        self.assertEqual(
+            PathTarget(path="src", path_kind=PathKind.DIRECTORY).to_wire(),
+            {"kind": "path", "path": "src", "path_kind": "directory"},
+        )
 
     def test_location_requires_one_based_coordinates(self) -> None:
         with self.assertRaises(ContractError):

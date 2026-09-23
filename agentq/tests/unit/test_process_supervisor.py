@@ -9,9 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from agentq.core import AgentQCancelled
 from agentq.execution import (
     CancellationToken,
     CaptureStatus,
@@ -22,7 +20,6 @@ from agentq.execution import (
     StreamMode,
     WrapperStatus,
     cli_exit_code,
-    set_active_cancellation,
     supervise,
 )
 from tests.support import process_fixture
@@ -292,77 +289,6 @@ class CancellationTests(SupervisorTestCase):
                 self.assertEqual(outcome.wrapper_status, WrapperStatus.CANCELLED)
                 self.assertEqual(outcome.cancel_signal, signum)
                 self.assertEqual(cli_exit_code(outcome), expected)
-
-
-class AdapterCancellationTests(SupervisorTestCase):
-    def _git_shim(self) -> Path:
-        shim_dir = self.root / "shim"
-        shim_dir.mkdir()
-        shim = shim_dir / "git"
-        shim.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
-        shim.chmod(0o755)
-        return shim_dir
-
-    def test_run_cmd_cancellation_raises_with_shell_code(self) -> None:
-        from agentq.execution import run_cmd
-
-        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
-            with self.subTest(signum=signum):
-                token = CancellationToken()
-                token.cancel(signum)
-                set_active_cancellation(token)
-                try:
-                    with self.assertRaises(AgentQCancelled) as caught:
-                        run_cmd(
-                            [sys.executable, str(FIXTURE), "hang"],
-                            cwd=str(self.root),
-                            timeout=30,
-                        )
-                finally:
-                    set_active_cancellation(None)
-                self.assertEqual(caught.exception.exit_code, expected)
-                self.assertEqual(caught.exception.signum, signum)
-
-    def test_streaming_cancellation_raises_with_shell_code(self) -> None:
-        from agentq.git.diff import _stream_diff
-
-        shim_dir = self._git_shim()
-        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
-            with self.subTest(signum=signum):
-                token = CancellationToken()
-                token.cancel(signum)
-                set_active_cancellation(token)
-                try:
-                    with mock.patch.dict(
-                        os.environ, {"PATH": f"{shim_dir}:{os.environ['PATH']}"}
-                    ):
-                        with self.assertRaises(AgentQCancelled) as caught:
-                            _stream_diff(
-                                self.root, ["diff", "--patch"], lambda line: True
-                            )
-                finally:
-                    set_active_cancellation(None)
-                self.assertEqual(caught.exception.exit_code, expected)
-
-
-class RunCompactFailureTests(SupervisorTestCase):
-    def test_capture_failure_is_a_wrapper_error_with_detail(self) -> None:
-        from agentq.execution import RunRequest, run
-
-        detail = "stdout record exceeded 8388608 bytes"
-        outcome = ExecutionOutcome(
-            wrapper_status=WrapperStatus.ERROR,
-            stop_reason=StopReason.CAPTURE_ERROR,
-            cli_exit_code=70,
-            capture_status=CaptureStatus.FAILED,
-            error_detail=detail,
-        )
-        with mock.patch("agentq.execution.run.supervise", return_value=outcome):
-            result = run(RunRequest(root=self.root, command=("echo", "hi")))
-        self.assertEqual(result.exit_code, 70)
-        self.assertEqual(result.diagnostics, (detail,))
-        self.assertIsNone(result.log)
-        self.assertEqual(result.execution.error_detail, detail)
 
 
 class ExitPolicyTests(unittest.TestCase):

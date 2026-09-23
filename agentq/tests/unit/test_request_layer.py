@@ -102,14 +102,9 @@ class RequestIdentityTests(unittest.TestCase):
 
 class ContinuationCodecTests(unittest.TestCase):
     def test_registry_is_the_resumability_authority(self) -> None:
-        search = request_codec("search")
-        diff = request_codec("git-diff")
-        self.assertIsNotNone(search)
-        self.assertIsNotNone(diff)
-        assert search is not None and diff is not None
-        self.assertFalse(search.accepts_source_guard)
-        self.assertTrue(diff.accepts_source_guard)
+        self.assertIsNotNone(request_codec("search"))
         self.assertIsNone(request_codec("verify"))
+        self.assertIsNone(request_codec("git-diff"))
 
     def test_non_resumable_operation_cannot_be_stored(self) -> None:
         request = OperationRequest(

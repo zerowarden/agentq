@@ -19,6 +19,12 @@ if TYPE_CHECKING:
 DEFAULT_DELIVERY_CHARS = 12_000
 DEFAULT_ENVELOPE_CHARS = 256
 DELIVERY_FORMATS = frozenset({"text", "json", "compact-json"})
+# The transport terminates the rendered text with one newline; the delivery
+# ceiling covers those bytes, so rendering is bounded by max_chars - this.
+DELIVERY_TERMINATOR_CHARS = 1
+# One code for every explicit delivery-budget reduction: omitted evidence and
+# reduced ambiguity both report why the delivered answer is smaller.
+DELIVERY_BUDGET_CODE = "delivery_budget"
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,10 @@ class DeliveryBudget:
     def available_chars(self) -> int:
         """Capacity left for evidence after the response envelope allowance."""
         return max(0, self.max_chars - self.envelope_chars)
+
+    def payload_capacity(self) -> int:
+        """The rendered-text ceiling: ``max_chars`` minus the terminator."""
+        return max(0, self.max_chars - DELIVERY_TERMINATOR_CHARS)
 
     def to_wire(self) -> dict[str, object]:
         return {

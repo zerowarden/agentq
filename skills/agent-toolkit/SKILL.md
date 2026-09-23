@@ -7,134 +7,85 @@ description: Toolkit maintenance only: validate agentq, diagnose local dependenc
 
 This skill maintains the shared `agentq` runtime used by the other skills. Ordinary commands operate locally and do not initiate network access.
 
-## First checks
+## Command surface
 
-```bash
-agentq doctor
-```
-
-Use `search --format compact-json` for structured search results. Use legacy `--format json` only when a consumer requires its compatibility fields.
-
-## Design constraints
-
-- Default to fixed-string search. Regex and AST patterns are explicit modes.
-- Cap files, matches, lines, hunks, diagnostics, and line width.
-- Exclude sensitive paths and redact common secret-like values by default.
-- Keep full command output only in mode-`0600` redacted logs under the sandbox-safe runtime directory.
-- Store only allowlisted operational telemetry; query/command identity uses keyed local HMAC fingerprints, never raw queries, source text, command arguments, task names, or absolute repository paths.
-- When `AGENTQ_TELEMETRY=0`, normal commands must not read, write, or create telemetry storage; telemetry never influences query or suppression behavior.
-- Repeat suppression is controlled solely by `AGENTQ_CONTEXT_CACHE` and requires explicit session or task identity (`AGENTQ_SESSION_ID`, a host thread ID, or an active agentq task); without one, no suppression state is shared. Continuation cursors use the same session scoping.
-- Use only the bounded, hashed context cache for exact-repeat suppression; normal exploration commands must never scan telemetry history.
-- Never silently substitute lexical evidence for semantic proof.
-- Never mutate files unless a command has an explicit mutation flag.
-- Never download packages or execute `npx` during ordinary skill use.
-
-## Shared command surface
+The public surface is deliberately three commands:
 
 ```text
-files, search, read, repo-map, outline, inspect, ts-nav
+agentq search    bounded repository search; fixed-string by default
+agentq inspect   single-entry inspection for symbols, paths, and source ranges
+agentq continue  resume a truncated result from a continuation cursor
+```
 
-git-status, git-diff, git-history, git-structural
+`agentq inspect` accepts symbols, existing repository paths, and source ranges; it rejects literal content and directs callers to `agentq search`.
 
-dependencies, impact
-
-codemod-scan, codemod-apply
-
-run, test-plan, verify, verify-changed, verify-task, audit, benchmark
-
-task, stats, doctor
+```bash
+agentq --version
+agentq COMMAND --help
 ```
 
 Inspect flags with:
 
 ```bash
-agentq <command> --help
+agentq search --help
+agentq inspect --help
+agentq continue --help
 ```
 
-## Evidence quality
-
-Every evidence-producing command reports `provenance` (semantic, syntactic, lexical, or heuristic) and `coverage` (`{"status": complete|sampled|partial|unknown, "reason": [...]}`). Treat sampled/partial evidence as incomplete; never claim a fact is proven when coverage is not complete.
-
-For symbol work, prefer one `inspect --intent` call over repeated exploration:
-
-- `--intent locate` — candidates only, minimal output.
-- `--intent understand` (default) — declaration, references, provider metadata.
-- `--intent edit` — adds the declaration body, related tests, owning package, and a verification scope. If the bundle has an unambiguous declaration, sufficient context, representative references, and verification scope, stop exploring and edit.
-
-If `inspect` reports candidates across languages (`kind: "ambiguous"`), narrow with `--lang typescript|python` or `--path`; no language silently wins because it was queried first. `impact` reports observations plus an explicitly uncalibrated heuristic summary — reconstruct breadth from the observations, not from a scalar.
-
-Search totals follow `--coverage fast|auto|exact`: `auto` (default) scans once and reports exact totals unless the scan cap is reached; `fast` never runs a counting pass; `exact` preserves exhaustive counting. When `count_quality` is `lower-bound`, treat totals as `>=` values instead of exact counts.
-
-Truncated `search` and `git-diff` results return a short continuation cursor (`continue: agentq continue q7H2a`). Run `agentq continue CURSOR` to resume the exact stored operation; cursors are scoped to the repository and session and expire after one hour. Other truncated operations return a display-only recovery command to rerun directly.
-
-## Verification configuration
-
-`test-plan` and `verify` detect the Node, Python, Cargo, and Go ecosystems and plan one deduplicated verification ladder across every detected ecosystem. An optional `.agentq.toml` at the repository root augments provider inference:
-
-```toml
-[verify]
-providers = ["node", "python"]   # restrict planning to named providers
-commands = ["make check"]        # extra planned checks, run first
-ignore = ["generated/**"]        # exclude changed files from planning
-contract_patterns = ["api/**"]   # extra public-contract paths
-
-[ownership]
-"libs/core" = "core-pkg"         # attribute a path prefix to a package name
-```
-
-Configuration augments provider inference; detection never requires it. Unknown provider names or malformed tables are rejected with a deterministic error.
-
-## Task boundaries
-
-A task is one independently acceptable implementation, fix, refactor, or review outcome. It is deliberately independent from a Codex thread: one thread may contain several sequential tasks, while one task may span several prompts and failed verification loops.
-
-Canonical lifecycle:
+## Search
 
 ```bash
-agentq task begin
-# investigate, edit, debug, and verify one outcome
-agentq task accept
+agentq search 'assignment offer' --path packages --format compact-json
+agentq search 'export\s+(type|interface)\s+Assignment' --regex --path packages
 ```
 
-Ergonomic forms:
+- Fixed-string is the default; `--regex` is an explicit mode.
+- `--path` narrows to one or more repository-relative scopes; repeatable.
+- `--format text|json|compact-json`; `compact-json` is the structured form for agents.
+- Sensitive paths are excluded by default. Totals report `coverage` and `count_quality`; treat `lower_bound` totals as `>=` values.
+
+## Inspect
 
 ```bash
-agentq task             # status
-agentq task start       # alias for begin
-agentq task done        # alias for accept
-agentq task drop        # alias for abandon
-agentq task next        # accept current and immediately begin another
+agentq inspect AssignmentOffer --path packages --intent understand
+agentq inspect AssignmentOffer --path packages --intent edit
+agentq inspect packages/contexts/dispatch/src/offers.ts --lines 40:120
+agentq inspect src/service.ts --line 57 --column 12
+agentq inspect listOrders --candidate cand-7f3a9c2d4e5b6a708192a3b4
 ```
 
-Do not create a new task for every user message, minor correction, tool call, or retry. Use `next` only after the current result could be reviewed and accepted independently. Use `abandon`/`drop` only when the outcome is intentionally discarded.
+- `TARGET` is a symbol name, an existing repository-relative path, or a `symbol:`/`path:` prefixed selector when the string is ambiguous.
+- `--intent understand|edit|rename|refactor|impact` selects the evidence emphasis.
+- `--line N` (repeatable anchor), `--lines START:END` (repeatable range), and `--column N` (with a single `--line`) apply to file targets.
+- `--candidate ID` re-selects a declaration candidate issued for the current repository state.
+- `--path` narrows evidence scopes; `--format text|json`; `--debug` writes a stage trace to stderr.
 
-Task state is repository/worktree-scoped. Concurrent independent tasks should use separate worktrees. No task names or prompt text are stored.
+For symbol work, prefer one `inspect --intent` call over repeated exploration. The bundle reports requirements as `satisfied`/`unsatisfied`, selected evidence with compact provenance (`provider`, `method`, `provider_version`, source versions, `effective_scope`, `coverage`), and explicit `gaps`. Treat sampled or partial coverage as incomplete. A `source_unstable` gap means a source changed during inspection: that evidence is omitted and never satisfies a requirement, so re-run the inspection before relying on it.
 
-## Efficiency telemetry
+Intent emphasis:
 
-```bash
-agentq stats --since 7d
-agentq stats --detail              # failures, command chains, navigation, accepted-task outcomes, verification
-agentq stats --recent 8            # detailed mode plus 8 recent operations
-agentq stats --watch 2
-agentq stats --plain
-```
+- `understand` (default) — declaration and representative context.
+- `edit` — adds exact declaration source, tests, and owning package.
+- `rename` — references and mentions for a rename decision.
+- `refactor` — implementations, source, tests, and ownership.
+- `impact` — references, implementations, and owning package.
 
-The operations table reports only agentq/CLI health. Wrapped project-command outcomes are summarized separately. Accepted tasks track calls by command, visible characters, estimated tokens, same-context overlap, exact suppression, expanded retries, verification result, and correction calls. Character counts are authoritative; token counts are labeled estimates, and lower output with more retries or missed verification is a regression. `--detail` does not add a generic recent-command list; use `--recent N` when that transcript view is useful. Interactive terminals use the built-in ANSI renderer; plain and JSON modes remain dependency-free. Telemetry is local, privacy-minimized, and disabled with `AGENTQ_TELEMETRY=0`.
+Ambiguous symbols return candidate ids without guessing. Re-run with `--candidate`, a narrower `--path`, or an explicit file/range.
 
-Hot telemetry remains sandbox-safe under `/tmp`. From a normal shell:
+## Continuations
 
-```bash
-agentq stats --install-persistence
-agentq stats --storage
-agentq stats --reset
-```
+Truncated `search` results include a short cursor (`continue: agentq continue q7H2a`). Run `agentq continue CURSOR` to resume the exact stored operation; cursors are scoped to the repository and session and expire. Other truncated operations return a recovery command to rerun directly.
 
-Use `--hot-only` to leave archived history untouched and `--all-repos` only to intentionally reset every repository.
+## Privacy and local state
+
+- Default local-only: no network requests during normal use.
+- Common sensitive paths are excluded from searches and reads; secret-like values are redacted from retained command logs.
+- Repeat-suppression state is local and bounded; query/command identity uses keyed local digests, never raw queries, source text, command arguments, or absolute repository paths.
+- Exact-repeat suppression is controlled solely by `AGENTQ_CONTEXT_CACHE` and requires explicit session identity (`AGENTQ_SESSION_ID` or a recognized host thread id); without one, no suppression state is shared.
 
 ## Optional dependencies
 
-Read `references/tooling.md` before installing anything. The bundle works with Git, ripgrep, and Python alone. The installer is dry-run by default:
+Read `references/tooling.md` before installing anything. The bundle works with Git, ripgrep, and Python alone; optional tools add richer outline evidence. The installer is dry-run by default:
 
 ```bash
 ~/.agents/agentq/scripts/install-tools.sh

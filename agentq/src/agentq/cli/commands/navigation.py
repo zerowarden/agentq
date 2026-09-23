@@ -6,10 +6,8 @@ import argparse
 import re
 from pathlib import Path
 
-from agentq.continuations import QueryFollowUp
 from agentq.core import AgentQError
 
-from ..parser import build_parser
 from ..registry import Outcome
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -17,47 +15,20 @@ _TARGET_PREFIXES = ("symbol", "path")
 
 
 def run_continue(args: argparse.Namespace, root: Path) -> Outcome:
-    from agentq.continuations import dispatch_argv, load_cursor
-    from agentq.core import ContractError
-
-    from ..registry import execute
+    from agentq.continuations import load_cursor
 
     resolved = load_cursor(root, args.cursor)
     if resolved is None:
         raise AgentQError(f"unknown or expired continuation cursor: {args.cursor}")
     record = resolved.record
-    if isinstance(record, QueryFollowUp):
-        if record.guard is not None:
-            _validate_follow_up_source(root, record)
-        if record.request.operation == "search":
-            from .discovery import run_search_request
+    if record.request.operation == "search":
+        from .discovery import run_search_request
 
-            return run_search_request(root, record.request)
-        raise AgentQError(
-            f"stored {record.request.operation} continuation is no longer "
-            "replayable; rerun the operation"
-        )
-    try:
-        argv = dispatch_argv(record)[1:]
-    except ContractError as exc:
-        raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc
-    try:
-        nested = build_parser().parse_args(argv)
-    except (ValueError, AgentQError) as exc:
-        raise AgentQError(f"stored continuation is no longer valid: {exc}") from exc
-    nested.repo = str(root)
-    return execute(nested, root)
-
-
-def _validate_follow_up_source(root: Path, record: QueryFollowUp) -> None:
-    """Reject a follow-up whose guarded mutable source has changed."""
-    from agentq.git import validate_diff_guard
-
-    guard = record.guard
-    assert guard is not None
-    if record.request.operation != "git-diff":
-        raise AgentQError(f"unsupported continuation guard: {guard.kind!r}")
-    validate_diff_guard(root, record.request, guard)
+        return run_search_request(root, record.request)
+    raise AgentQError(
+        f"stored {record.request.operation} continuation is no longer "
+        "replayable; rerun the operation"
+    )
 
 
 def _existing_relative_path(root: Path, value: str) -> str | None:
@@ -71,7 +42,14 @@ def _existing_relative_path(root: Path, value: str) -> str | None:
     return resolved.relative if resolved.absolute.exists() else None
 
 
-def _file_target(args: argparse.Namespace, relative: str):
+def _path_kind(root: Path, relative: str):
+    """Whether an existing repository-relative path names a directory."""
+    from agentq.inspection.contracts import PathKind
+
+    return PathKind.DIRECTORY if (root / relative).is_dir() else PathKind.FILE
+
+
+def _file_target(args: argparse.Namespace, root: Path, relative: str):
     """A path, range, or exact-location target for an existing file or directory."""
     from agentq.inspection.contracts import (
         LocationTarget,
@@ -94,7 +72,7 @@ def _file_target(args: argparse.Namespace, relative: str):
     )
     if ranges:
         return RangeTarget(path=relative, ranges=ranges)
-    return PathTarget(path=relative)
+    return PathTarget(path=relative, path_kind=_path_kind(root, relative))
 
 
 def _inspection_target(args: argparse.Namespace, root: Path):
@@ -125,13 +103,13 @@ def _inspection_target(args: argparse.Namespace, root: Path):
     if kind == "path":
         if relative is None:
             raise AgentQError(f"inspect path does not exist: {value}")
-        return _file_target(args, relative)
+        return _file_target(args, root, relative)
     if kind == "symbol" or (relative is None and _IDENTIFIER_RE.fullmatch(value)):
         if scans:
             raise AgentQError("--line, --lines, and --column require a file TARGET")
         return SymbolTarget(name=value, scopes=tuple(args.paths))
     if relative is not None:
-        return _file_target(args, relative)
+        return _file_target(args, root, relative)
     raise AgentQError(
         "inspect TARGET must be a symbol name or an existing repository path; "
         "use `agentq search` for literal content"

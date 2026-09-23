@@ -10,10 +10,11 @@ heuristic makes no optimality claim.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fractions import Fraction
 
-from agentq.core import require_bool, require_int, require_str
+from agentq.core import SOURCE_UNSTABLE, require_bool, require_int, require_str
 
-from .budgeting import DeliveryBudget
+from .budgeting import DELIVERY_BUDGET_CODE, DeliveryBudget
 from .contracts import (
     AcquisitionRecord,
     CollectionPlan,
@@ -21,6 +22,7 @@ from .contracts import (
     EvidenceFeatures,
     EvidencePolicy,
     EvidencePool,
+    EvidenceProvenance,
     EvidenceRequirement,
     EvidenceRole,
     EvidenceVariant,
@@ -48,10 +50,17 @@ REASON_REQUIRED = "required"
 REASON_ROLE = "role_representative"
 REASON_RELEVANCE = "relevance"
 OMISSION_REDUNDANT = "redundant"
-OMISSION_BUDGET = "delivery_budget"
+OMISSION_BUDGET = DELIVERY_BUDGET_CODE
 OMISSION_NO_REPRESENTATION = "no_representation"
 OMISSION_OVERLAP = "overlap"
 OMISSION_SAME_FILE = "same_file"
+OMISSION_UNSTABLE = SOURCE_UNSTABLE
+
+# One explanation for every requirement unsatisfied only by unstable evidence.
+_UNSTABLE_DETAIL = (
+    "the acquired evidence is unstable because its source changed during the "
+    "inspection and cannot satisfy this requirement"
+)
 
 SUCCESSFUL_COLLECTION = frozenset(
     {
@@ -114,6 +123,27 @@ class SelectionProfile:
 DEFAULT_SELECTION = SelectionProfile()
 
 
+def _provenance_index(pool: EvidencePool) -> dict[str, EvidenceProvenance]:
+    """One compact acquisition summary per observation, keyed by observation id."""
+    records = {record.acquisition_id: record for record in pool.acquisitions}
+    index: dict[str, EvidenceProvenance] = {}
+    for observation in pool.observations:
+        record = records.get(observation.acquisition_id)
+        if record is None:
+            continue
+        index[observation.observation_id] = EvidenceProvenance(
+            acquisition_id=record.acquisition_id,
+            provider=record.provider,
+            provider_version=record.provider_version,
+            method=record.method,
+            status=record.status,
+            source_versions=observation.source_versions,
+            effective_scope=record.effective_scope,
+            coverage=record.coverage,
+        )
+    return index
+
+
 def select_evidence(
     pool: EvidencePool,
     scores: tuple[ScoredEvidence, ...],
@@ -125,7 +155,10 @@ def select_evidence(
 ) -> SelectionPlan:
     """Reserve required evidence, prefer role coverage, then fill by score."""
     state = _SelectionState(
-        available=budget.available_chars(), output_format=output_format
+        available=budget.available_chars(),
+        output_format=output_format,
+        provenance=_provenance_index(pool),
+        unstable=frozenset(pool.unstable_observation_ids),
     )
     scored = {item.observation_id: item for item in scores}
     if profile.reserve_required:
@@ -149,6 +182,10 @@ def select_evidence(
 class _SelectionState:
     available: int
     output_format: str
+    provenance: dict[str, EvidenceProvenance] = field(
+        default_factory=dict[str, EvidenceProvenance]
+    )
+    unstable: frozenset[str] = frozenset()
     selected: list[SelectedEvidence] = field(default_factory=list[SelectedEvidence])
     omitted: list[OmittedEvidence] = field(default_factory=list[OmittedEvidence])
     chosen: dict[str, EvidenceVariant] = field(
@@ -177,7 +214,11 @@ class _SelectionState:
             score=0 if breakdown is None else breakdown.score.total,
             requirement_id=requirement_id,
             contributions=() if breakdown is None else breakdown.score.contributions,
+            provenance=self.provenance.get(observation_id),
         )
+
+    def is_unstable(self, observation_id: str) -> bool:
+        return observation_id in self.unstable
 
     def fits(self, item: SelectedEvidence) -> bool:
         return self.cost + selected_cost(item, self.output_format) <= self.available
@@ -301,6 +342,8 @@ def _next_role_candidate(
     for observation in _ordered_observations(pool, scored):
         if observation.observation_id in state.chosen:
             continue
+        if state.is_unstable(observation.observation_id):
+            continue
         breakdown = scored.get(observation.observation_id)
         if breakdown is None:
             continue
@@ -317,40 +360,109 @@ def _next_role_candidate(
     return None
 
 
+def _fill_priority(
+    state: _SelectionState,
+    pool: EvidencePool,
+    scored: dict[str, ScoredEvidence],
+) -> tuple[tuple[Observation, EvidenceVariant | None], ...]:
+    """Rank observations by relevance per serialized cost.
+
+    The fill phase spends the remaining budget on the most relevant evidence
+    per character, not merely the highest raw score. Ties break by score, then
+    observation id, so the order stays deterministic.
+    """
+    ranked: list[tuple[Fraction, int, str, Observation, EvidenceVariant | None]] = []
+    for observation in pool.observations:
+        observation_id = observation.observation_id
+        breakdown = scored.get(observation_id)
+        score = 0 if breakdown is None else breakdown.score.total
+        variants = pool.variants_for(observation_id)
+        variant = _best_variant(variants) if variants else None
+        if variant is None:
+            priority = Fraction(0)
+        else:
+            item = state.build(observation_id, variant, REASON_RELEVANCE, scored)
+            cost = max(1, selected_cost(item, state.output_format))
+            priority = Fraction(score, cost)
+        ranked.append((priority, score, observation_id, observation, variant))
+    ranked.sort(key=lambda entry: (-entry[0], -entry[1], entry[2]))
+    return tuple((entry[3], entry[4]) for entry in ranked)
+
+
 def _fill_by_score(
     state: _SelectionState,
     pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
     profile: SelectionProfile,
 ) -> None:
-    for observation in _ordered_observations(pool, scored):
-        if observation.observation_id in state.chosen:
+    for observation, variant in _fill_priority(state, pool, scored):
+        observation_id = observation.observation_id
+        if observation_id in state.chosen:
             continue
-        variants = pool.variants_for(observation.observation_id)
-        if not variants:
-            state.omit(observation.observation_id, None, OMISSION_NO_REPRESENTATION)
+        if state.is_unstable(observation_id):
+            state.omit(observation_id, None, OMISSION_UNSTABLE)
             continue
-        variant = _best_variant(variants)
-        breakdown = scored.get(observation.observation_id)
+        if variant is None:
+            state.omit(observation_id, None, OMISSION_NO_REPRESENTATION)
+            continue
+        breakdown = scored.get(observation_id)
         observation_features = None if breakdown is None else breakdown.features
-        item = state.build(
-            observation.observation_id, variant, REASON_RELEVANCE, scored
-        )
+        item = state.build(observation_id, variant, REASON_RELEVANCE, scored)
         if state.overlaps(variant, observation_features):
-            state.omit(observation.observation_id, variant.variant_id, OMISSION_OVERLAP)
+            state.omit(observation_id, variant.variant_id, OMISSION_OVERLAP)
             continue
         if observation_features is not None and state.file_capped(
             observation_features, variant, profile.per_file_limit
         ):
-            state.omit(
-                observation.observation_id, variant.variant_id, OMISSION_SAME_FILE
-            )
+            state.omit(observation_id, variant.variant_id, OMISSION_SAME_FILE)
             continue
         if not state.fits(item):
-            state.omit(observation.observation_id, variant.variant_id, OMISSION_BUDGET)
+            state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
             continue
         state.take(item, observation_features)
         state.count_file(variant)
+
+
+def reduce_selection(
+    selection: SelectionPlan,
+    *,
+    overflow_chars: int,
+    output_format: str = "text",
+) -> SelectionPlan | None:
+    """Drop the lowest-priority representations until the overflow is covered.
+
+    The selector fills the delivery budget using its declared envelope, but
+    the complete serialized bundle also carries metadata. The service calls
+    this when the full projection exceeds the delivery ceiling. ``None`` means
+    there is nothing left to drop.
+    """
+    if overflow_chars <= 0 or not selection.selected:
+        return None
+    kept = list(selection.selected)
+    dropped: list[SelectedEvidence] = []
+    freed = 0
+    while kept and freed < overflow_chars:
+        item = kept.pop()
+        dropped.append(item)
+        freed += selected_cost(item, output_format)
+    return SelectionPlan(
+        profile=selection.profile,
+        selected=tuple(kept),
+        omitted=(
+            *selection.omitted,
+            *(
+                OmittedEvidence(item.observation_id, item.variant_id, OMISSION_BUDGET)
+                for item in dropped
+            ),
+        ),
+        reserved=tuple(
+            requirement_id
+            for requirement_id in selection.reserved
+            if any(item.requirement_id == requirement_id for item in kept)
+        ),
+        measured_cost=sum(selected_cost(item, output_format) for item in kept),
+        budget_chars=selection.budget_chars,
+    )
 
 
 def _record_redundant(state: _SelectionState, pool: EvidencePool) -> None:
@@ -399,6 +511,8 @@ def _reservation_candidates(
     """Acceptable representations in preference order; best fit wins."""
     candidates: list[tuple[str, EvidenceVariant]] = []
     for observation in _ordered_observations(pool, scored):
+        if observation.observation_id in pool.unstable_observation_ids:
+            continue
         if not _observation_matches(requirement, observation):
             continue
         existing = chosen.get(observation.observation_id)
@@ -420,21 +534,31 @@ def _reservation_candidates(
     return tuple(candidates)
 
 
-def _variant_satisfies(
-    pool: EvidencePool, variant: EvidenceVariant, requirement: EvidenceRequirement
+def _variant_shape_satisfies(
+    variant: EvidenceVariant, requirement: EvidenceRequirement
 ) -> bool:
+    """Representation and fidelity only; stability and matching are separate."""
     if (
         requirement.representations
         and variant.representation not in requirement.representations
     ):
         return False
-    if (
+    return not (
         requirement.rule is RequirementRule.EXACT_SOURCE
         and variant.fidelity is not Fidelity.EXACT
-    ):
+    )
+
+
+def _variant_satisfies(
+    pool: EvidencePool, variant: EvidenceVariant, requirement: EvidenceRequirement
+) -> bool:
+    if not _variant_shape_satisfies(variant, requirement):
         return False
     observation = pool.observation(variant.observation_id)
-    if observation is None:
+    if (
+        observation is None
+        or observation.observation_id in pool.unstable_observation_ids
+    ):
         return False
     return _observation_matches(requirement, observation)
 
@@ -472,6 +596,14 @@ def _records_for(
         record
         for capability in requirement.capabilities
         for record in pool.acquisitions_for(capability)
+    )
+
+
+def _absence_is_established(record: AcquisitionRecord) -> bool:
+    """A successful acquisition with full coverage establishes absence in scope."""
+    return (
+        record.status in {CollectionStatus.COMPLETED, CollectionStatus.EMPTY}
+        and record.coverage.is_complete()
     )
 
 
@@ -516,28 +648,41 @@ def _assess(
 ) -> RequirementAssessment:
     if requirement.rule is RequirementRule.COLLECTION_OUTCOME:
         return _assess_collection_outcome(requirement, plan, pool)
-    admissible = tuple(
+    matched = tuple(
         observation
         for observation in pool.observations
         if _observation_matches(requirement, observation)
     )
+    unstable = tuple(
+        observation
+        for observation in matched
+        if observation.observation_id in pool.unstable_observation_ids
+    )
+    admissible = tuple(
+        observation
+        for observation in matched
+        if observation.observation_id not in pool.unstable_observation_ids
+    )
     match requirement.rule:
         case RequirementRule.EXACT_SOURCE:
             return _assess_exact_source(
-                requirement, plan, pool, admissible, selected_variant_ids
+                requirement, plan, pool, admissible, unstable, selected_variant_ids
             )
         case RequirementRule.REPRESENTATIVE_EVIDENCE:
             return _assess_representative(
-                requirement, plan, pool, admissible, selected_observations
+                requirement, plan, pool, admissible, unstable, selected_observations
             )
         case _:
-            return _assess_minimum(requirement, plan, admissible, selected_observations)
+            return _assess_minimum(
+                requirement, plan, admissible, unstable, selected_observations
+            )
 
 
 def _assess_minimum(
     requirement: EvidenceRequirement,
     plan: CollectionPlan,
     admissible: tuple[Observation, ...],
+    unstable: tuple[Observation, ...],
     selected_observations: frozenset[str],
 ) -> RequirementAssessment:
     supporting = tuple(
@@ -552,11 +697,14 @@ def _assess_minimum(
             strength=requirement.strength,
             supporting=supporting,
         )
-    detail = _gap_detail(plan, requirement.requirement_id) or (
-        "admissible evidence was acquired but not selected"
-        if admissible
-        else "no admissible evidence was acquired"
-    )
+    if unstable and not admissible:
+        detail = _UNSTABLE_DETAIL
+    else:
+        detail = _gap_detail(plan, requirement.requirement_id) or (
+            "admissible evidence was acquired but not selected"
+            if admissible
+            else "no admissible evidence was acquired"
+        )
     return RequirementAssessment(
         requirement_id=requirement.requirement_id,
         status=RequirementStatus.UNSATISFIED,
@@ -570,6 +718,7 @@ def _assess_exact_source(
     plan: CollectionPlan,
     pool: EvidencePool,
     admissible: tuple[Observation, ...],
+    unstable: tuple[Observation, ...],
     selected_variant_ids: frozenset[str],
 ) -> RequirementAssessment:
     supporting: list[str] = []
@@ -588,11 +737,19 @@ def _assess_exact_source(
             strength=requirement.strength,
             supporting=tuple(dict.fromkeys(supporting)),
         )
-    detail = _gap_detail(plan, requirement.requirement_id) or (
-        "an exact source representation was acquired but not selected"
-        if acquired_exact
-        else "no exact source representation was acquired"
+    unstable_exact = any(
+        _variant_shape_satisfies(variant, requirement)
+        for observation in unstable
+        for variant in pool.variants_for(observation.observation_id)
     )
+    if unstable_exact and not acquired_exact:
+        detail = _UNSTABLE_DETAIL
+    else:
+        detail = _gap_detail(plan, requirement.requirement_id) or (
+            "an exact source representation was acquired but not selected"
+            if acquired_exact
+            else "no exact source representation was acquired"
+        )
     return RequirementAssessment(
         requirement_id=requirement.requirement_id,
         status=RequirementStatus.UNSATISFIED,
@@ -601,36 +758,64 @@ def _assess_exact_source(
     )
 
 
+def _assess_representative_absence(
+    requirement: EvidenceRequirement,
+    plan: CollectionPlan,
+    pool: EvidencePool,
+    unstable: tuple[Observation, ...],
+) -> RequirementAssessment:
+    """Assess a representative requirement when no admissible evidence was acquired."""
+    gap = _gap_detail(plan, requirement.requirement_id)
+    if gap is not None:
+        return RequirementAssessment(
+            requirement_id=requirement.requirement_id,
+            status=RequirementStatus.UNSATISFIED,
+            strength=requirement.strength,
+            detail=gap,
+        )
+    if unstable:
+        return RequirementAssessment(
+            requirement_id=requirement.requirement_id,
+            status=RequirementStatus.UNSATISFIED,
+            strength=requirement.strength,
+            detail=_UNSTABLE_DETAIL,
+        )
+    records = _records_for(pool, requirement)
+    if records and all(record.status in FAILED_COLLECTION for record in records):
+        return RequirementAssessment(
+            requirement_id=requirement.requirement_id,
+            status=RequirementStatus.UNSATISFIED,
+            strength=requirement.strength,
+            detail="the requested acquisition was reported unavailable or failed",
+        )
+    if records and not all(_absence_is_established(record) for record in records):
+        return RequirementAssessment(
+            requirement_id=requirement.requirement_id,
+            status=RequirementStatus.UNSATISFIED,
+            strength=requirement.strength,
+            detail=(
+                "the acquisition did not complete over its full scope, so "
+                "absence of evidence is not established"
+            ),
+        )
+    return RequirementAssessment(
+        requirement_id=requirement.requirement_id,
+        status=RequirementStatus.SATISFIED,
+        strength=requirement.strength,
+        detail="no admissible evidence was acquired",
+    )
+
+
 def _assess_representative(
     requirement: EvidenceRequirement,
     plan: CollectionPlan,
     pool: EvidencePool,
     admissible: tuple[Observation, ...],
+    unstable: tuple[Observation, ...],
     selected_observations: frozenset[str],
 ) -> RequirementAssessment:
     if not admissible:
-        gap = _gap_detail(plan, requirement.requirement_id)
-        if gap is not None:
-            return RequirementAssessment(
-                requirement_id=requirement.requirement_id,
-                status=RequirementStatus.UNSATISFIED,
-                strength=requirement.strength,
-                detail=gap,
-            )
-        records = _records_for(pool, requirement)
-        if records and all(record.status in FAILED_COLLECTION for record in records):
-            return RequirementAssessment(
-                requirement_id=requirement.requirement_id,
-                status=RequirementStatus.UNSATISFIED,
-                strength=requirement.strength,
-                detail="the requested acquisition was reported unavailable or failed",
-            )
-        return RequirementAssessment(
-            requirement_id=requirement.requirement_id,
-            status=RequirementStatus.SATISFIED,
-            strength=requirement.strength,
-            detail="no admissible evidence was acquired",
-        )
+        return _assess_representative_absence(requirement, plan, pool, unstable)
     supporting = tuple(
         observation.observation_id
         for observation in admissible

@@ -17,6 +17,7 @@ from agentq.inspection.contracts import (
     InspectionContext,
     LocationTarget,
     ObservationKind,
+    PathKind,
     PathTarget,
     RepositoryIdentity,
     SourceSpan,
@@ -24,6 +25,7 @@ from agentq.inspection.contracts import (
     make_declaration_candidate,
 )
 from agentq.navigation import (
+    DeclarationSpan,
     TypeScriptBatch,
     TypeScriptCandidateSearch,
     TypeScriptDiscovery,
@@ -62,6 +64,7 @@ def _location(
     external: bool = False,
     end_line: int | None = None,
     end_column: int | None = None,
+    declaration_span: DeclarationSpan | None = None,
 ) -> TypeScriptLocation:
     return TypeScriptLocation(
         path=path,
@@ -73,6 +76,7 @@ def _location(
         external=external,
         name=name,
         kind=kind,
+        declaration_span=declaration_span,
     )
 
 
@@ -186,14 +190,18 @@ class CapabilitySurfaceTests(unittest.TestCase):
         self.assertFalse(
             python_only.applicable(SymbolTarget(name="x", scopes=("src",)), context)
         )
-        self.assertFalse(python_only.applicable(PathTarget("src/a.py"), context))
+        self.assertFalse(
+            python_only.applicable(PathTarget("src/a.py", PathKind.FILE), context)
+        )
         self.assertTrue(python_only.applicable(SymbolTarget(name="x"), context))
 
         mixed = _adapter(FakeBridge(), ("src/a.ts", "src/b.py"))
         self.assertTrue(
             mixed.applicable(SymbolTarget(name="x", scopes=("src",)), context)
         )
-        self.assertTrue(mixed.applicable(PathTarget("src/a.ts"), context))
+        self.assertTrue(
+            mixed.applicable(PathTarget("src/a.ts", PathKind.FILE), context)
+        )
 
     def test_availability_caches_the_probe_per_scope(self) -> None:
         bridge = FakeBridge(
@@ -268,6 +276,40 @@ class DeclarationNormalizationTests(unittest.TestCase):
             self.assertEqual(len(result.variants), 1)
             self.assertEqual(result.variants[0].text, "function Target()")
             self.assertEqual(result.provider_version, "5.6.3")
+
+    def test_declaration_extent_is_preserved_alongside_the_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root, "src/app.ts", ASTRA_LINE)
+            bridge = FakeBridge(
+                locate=TypeScriptCandidateSearch(
+                    action="locate",
+                    symbol="Target",
+                    candidates=(
+                        _location(
+                            "src/app.ts",
+                            1,
+                            1,
+                            declaration_span=DeclarationSpan(start_line=1, end_line=1),
+                        ),
+                    ),
+                    candidate_count=1,
+                    total=1,
+                    shown=1,
+                    coverage=typed_coverage(COMPLETE),
+                    meta=_meta(),
+                )
+            )
+            result = _adapter(bridge).acquire(
+                _declaration_request(scopes=("src",)), _context(root)
+            )
+        payload = result.observations[0].payload
+        self.assertIsNotNone(payload.declaration_span)  # type: ignore[union-attr]
+        self.assertEqual(  # type: ignore[union-attr]
+            payload.declaration_span.to_wire(),  # type: ignore[union-attr]
+            SourceSpan(start_line=1, end_line=1).to_wire(),
+        )
+        self.assertEqual(payload.span.start_line, 1)  # type: ignore[union-attr]
 
     def test_excluded_external_location_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

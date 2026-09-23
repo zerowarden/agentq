@@ -59,13 +59,6 @@ class ResolvedCursor:
 
 
 def _consumer_context(root: Path) -> str:
-    # Imported here: tasking reaches workspace/discovery, which reaches this
-    # package during discovery import.
-    from agentq.tasking import current_task_id
-
-    task = current_task_id(root)
-    if task:
-        return f"task:{task}"
     session = session_id()
     return f"session:{session}" if session else ""
 

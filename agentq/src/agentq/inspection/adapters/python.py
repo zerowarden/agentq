@@ -9,7 +9,7 @@ mistake them for binding-resolved use sites.
 from __future__ import annotations
 
 import platform
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from agentq.core import (
@@ -27,6 +27,7 @@ from agentq.core import (
     classify_path,
     typed_coverage,
 )
+from agentq.core.languages import language_id_for
 from agentq.discovery import list_repo_files
 from agentq.navigation import (
     PythonOverview,
@@ -40,6 +41,7 @@ from ..contracts import (
     Capability,
     CapabilityAvailability,
     CapabilityResult,
+    DeclarationCandidate,
     DeclarationPayload,
     EvidenceRequest,
     EvidenceVariant,
@@ -91,7 +93,26 @@ class PythonInspectionAdapter:
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.FIND_DECLARATIONS, Capability.SYNTACTIC_MENTIONS})
 
-    def applicable(self, target: InspectionTarget, context: InspectionContext) -> bool:
+    def batch_capabilities(self) -> frozenset[Capability]:
+        return frozenset()
+
+    def acquire_batch(
+        self,
+        requests: Sequence[EvidenceRequest],
+        context: InspectionContext,
+    ) -> tuple[CapabilityResult, ...]:
+        return tuple(self.acquire(request, context) for request in requests)
+
+    def applicable(
+        self,
+        target: InspectionTarget,
+        context: InspectionContext,
+        subject: DeclarationCandidate | None = None,
+    ) -> bool:
+        if subject is not None:
+            language = language_id_for(subject.path)
+            if language is not None:
+                return language in PYTHON_LANGUAGES
         languages = self._target_languages(target, context)
         return languages is None or bool(languages & PYTHON_LANGUAGES)
 
@@ -100,6 +121,7 @@ class PythonInspectionAdapter:
         _capability: Capability,
         _target: InspectionTarget,
         _context: InspectionContext,
+        _subject: DeclarationCandidate | None = None,
     ) -> CapabilityAvailability:
         return CapabilityAvailability(
             available=True, provider_version=platform.python_version()

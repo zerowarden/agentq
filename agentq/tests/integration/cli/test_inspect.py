@@ -86,6 +86,18 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertIn("def list_orders():", text)
         self.assertNotIn("def cancel_order", text)
 
+    def test_extensionless_file_target_is_treated_as_a_file(self) -> None:
+        (self.repo / "Dockerfile").write_text("FROM python:3.12\n", encoding="utf-8")
+        payload = self.data("inspect", "Dockerfile", "--intent", "edit")
+        self.assertEqual(payload["resolution"]["outcome"], "resolved")
+        requirements = {
+            item["requirement_id"] for item in payload["policy"]["requirements"]
+        }
+        self.assertIn("target_source", requirements)
+        self.assertFalse(
+            any("directory target" in item for item in payload["policy"]["limitations"])
+        )
+
     def test_location_target_reports_unsupported_python_limitation(self) -> None:
         self._write_orders()
         rendered = self._run_text(

@@ -34,7 +34,6 @@ class DispatchResult:
     render: RenderResult
     receipt: DeliveryReceipt | None = None
     exit_code: int = 0
-    telemetry_data: Mapping[str, Any] | None = None
     output_view: str = "default"
     output_attribution: Mapping[str, Any] | None = None
     render_budget_truncated: bool = False
@@ -130,7 +129,6 @@ def finalize_output(
     sink: EmittedBytes | None = None,
     fragments: tuple[EvidenceFragment, ...] = (),
     source_cap_truncated: bool = False,
-    telemetry_data: Mapping[str, Any] | None = None,
     emitted_at: str | None = None,
 ) -> DispatchResult:
     """Build the render result and, after successful output, its receipt.
@@ -166,7 +164,6 @@ def finalize_output(
         data=data,
         render=render,
         receipt=receipt,
-        telemetry_data=telemetry_data,
         output_view=context.output_view,
         output_attribution=context.output_attribution,
         render_budget_truncated=rendered.truncated,
@@ -203,7 +200,6 @@ def record_delivery(
 
     Ledger failure never reruns the command or undoes its outcome: evidence
     simply stays unsuppressed so a later call redelivers it, and the failure
-    is carried on the dispatch for telemetry.
     """
     from agentq.persistence import FragmentRecord, ReceiptRecord, store_receipt
 
@@ -237,7 +233,7 @@ def record_delivery(
                     )
     if not rows:
         # Nothing was recorded, so no receipt exists to report: a receipt
-        # object that was never persisted must not appear in telemetry.
+        # object that was never persisted must not appear in a receipt.
         return replace(dispatch, receipt=None)
     try:
         stored = store_receipt(

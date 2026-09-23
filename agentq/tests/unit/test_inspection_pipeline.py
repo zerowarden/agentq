@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 
 from agentq.core import COMPLETE, Coverage, typed_coverage
 from agentq.inspection.acquisition import acquire, plan_collection
-from agentq.inspection.budgeting import DeliveryBudget
+from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.contracts import (
     AmbiguousTarget,
     Capability,
@@ -18,6 +20,7 @@ from agentq.inspection.contracts import (
     EvidenceRole,
     InspectionRequest,
     Intent,
+    PathKind,
     PathTarget,
     RangeTarget,
     RepresentationKind,
@@ -28,6 +31,7 @@ from agentq.inspection.contracts import (
     UnresolvedTarget,
 )
 from agentq.inspection.debug import TraceRecorder
+from agentq.inspection.execution import ExecutionLedger
 from agentq.inspection.features import extract_features
 from agentq.inspection.policy import POLICY_PROFILE, compile_policy
 from agentq.inspection.resolution import resolve
@@ -45,11 +49,14 @@ from tests.support.inspection_fakes import (
     REFERENCE_PATH,
     TEST_PATH,
     VERSION,
+    FakeHandler,
     candidate_request,
     declaration_result,
     default_symbol_handler,
+    empty_result,
     fake_context,
     location_request,
+    reference_result,
     source_result,
     symbol_request,
 )
@@ -65,6 +72,38 @@ EXPECTED_STAGES = [
     "assessment",
     "render",
 ]
+
+
+def _reference_flood(count: int) -> CapabilityResult:
+    """One completed acquisition with ``count`` distinct reference observations."""
+    observations = []
+    variants = []
+    for index in range(count):
+        result = reference_result(path=f"src/use{index:03d}.ts", line=index + 1)
+        observations.extend(result.observations)
+        variants.extend(result.variants)
+    return CapabilityResult(
+        status=CollectionStatus.COMPLETED,
+        observations=tuple(observations),
+        variants=tuple(variants),
+        coverage=typed_coverage(COMPLETE),
+    )
+
+
+def _declaration_flood(count: int) -> CapabilityResult:
+    """One completed acquisition with ``count`` distinct declaration candidates."""
+    observations = []
+    variants = []
+    for index in range(count):
+        result = declaration_result(path=f"src/mod{index:03d}.ts", line=1, end_line=3)
+        observations.extend(result.observations)
+        variants.extend(result.variants)
+    return CapabilityResult(
+        status=CollectionStatus.COMPLETED,
+        observations=tuple(observations),
+        variants=tuple(variants),
+        coverage=typed_coverage(COMPLETE),
+    )
 
 
 class PipelineTraversalTests(unittest.TestCase):
@@ -222,7 +261,9 @@ class ResolutionOutcomeTests(unittest.TestCase):
         self.assertEqual(bundle.resolution.declaration.path, DEFAULT_PATH)  # type: ignore[union-attr]
 
     def test_path_target_is_direct_and_structural(self) -> None:
-        request = InspectionRequest(target=PathTarget(path="src"))
+        request = InspectionRequest(
+            target=PathTarget(path="src", path_kind=PathKind.DIRECTORY)
+        )
         bundle = inspect(request, fake_context(default_symbol_handler()))
         assert isinstance(bundle.resolution, ResolvedTarget)
         self.assertEqual(bundle.resolution.method.value, "direct_target")
@@ -243,6 +284,93 @@ class ResolutionOutcomeTests(unittest.TestCase):
         self.assertIs(
             bundle.assessment.by_id("requested_source").status,  # type: ignore[union-attr]
             RequirementStatus.SATISFIED,
+        )
+
+
+class SubjectAffinityTests(unittest.TestCase):
+    """Post-resolution capabilities follow the resolved declaration's language."""
+
+    def test_python_subject_falls_back_to_python_syntactic_mentions(self) -> None:
+        typescript = FakeHandler(
+            name="fake-ts",
+            supported=frozenset({Capability.SEMANTIC_REFERENCES}),
+            subject_applicable_to=lambda subject: subject.path.endswith(".ts"),
+            results={Capability.SEMANTIC_REFERENCES: reference_result()},
+        )
+        python = FakeHandler(
+            name="fake-py",
+            supported=frozenset(
+                {Capability.FIND_DECLARATIONS, Capability.SYNTACTIC_MENTIONS}
+            ),
+            subject_applicable_to=lambda subject: subject.path.endswith(".py"),
+            results={
+                Capability.FIND_DECLARATIONS: declaration_result(path="src/service.py"),
+                Capability.SYNTACTIC_MENTIONS: reference_result(path="src/use.py"),
+            },
+        )
+        bundle = inspect(
+            symbol_request(),
+            fake_context(
+                (typescript, python),
+                versions={"src/service.py": VERSION, "src/use.py": VERSION},
+            ),
+        )
+        assert isinstance(bundle.resolution, ResolvedTarget)
+        self.assertEqual(bundle.resolution.declaration.path, "src/service.py")  # type: ignore[union-attr]
+        assert bundle.collection is not None
+        planned = {item.capability for item in bundle.collection.requests}
+        self.assertIn(Capability.SYNTACTIC_MENTIONS, planned)
+        self.assertNotIn(Capability.SEMANTIC_REFERENCES, planned)
+        self.assertNotIn(
+            ("semantic_references", "collect-representative_reference"),
+            typescript.calls,
+        )
+        assert bundle.assessment is not None
+        self.assertIs(
+            bundle.assessment.by_id("representative_reference").status,  # type: ignore[union-attr]
+            RequirementStatus.SATISFIED,
+        )
+
+    def test_typescript_subject_is_not_answered_by_python_syntactic_mentions(
+        self,
+    ) -> None:
+        typescript = FakeHandler(
+            name="fake-ts",
+            supported=frozenset(
+                {Capability.FIND_DECLARATIONS, Capability.SEMANTIC_REFERENCES}
+            ),
+            subject_applicable_to=lambda subject: subject.path.endswith(".ts"),
+            results={
+                Capability.FIND_DECLARATIONS: declaration_result(path="src/service.ts"),
+                Capability.SEMANTIC_REFERENCES: reference_result(),
+            },
+        )
+        python = FakeHandler(
+            name="fake-py",
+            supported=frozenset(
+                {Capability.FIND_DECLARATIONS, Capability.SYNTACTIC_MENTIONS}
+            ),
+            subject_applicable_to=lambda subject: subject.path.endswith(".py"),
+            results={
+                Capability.FIND_DECLARATIONS: empty_result(),
+                Capability.SYNTACTIC_MENTIONS: reference_result(path="src/use.py"),
+            },
+        )
+        bundle = inspect(
+            symbol_request(),
+            fake_context(
+                (typescript, python),
+                versions={"src/service.ts": VERSION, "src/use.py": VERSION},
+            ),
+        )
+        assert isinstance(bundle.resolution, ResolvedTarget)
+        self.assertEqual(bundle.resolution.declaration.path, "src/service.ts")  # type: ignore[union-attr]
+        assert bundle.collection is not None
+        planned = {item.capability for item in bundle.collection.requests}
+        self.assertIn(Capability.SEMANTIC_REFERENCES, planned)
+        self.assertNotIn(Capability.SYNTACTIC_MENTIONS, planned)
+        self.assertEqual(
+            [call for call in python.calls if call[0] == "syntactic_mentions"], []
         )
 
 
@@ -385,14 +513,15 @@ class StageIsolationTests(unittest.TestCase):
         self.assertTrue(required_missing)
 
     def test_tight_budget_reports_missing_required_source(self) -> None:
-        # The fake fixture's declaration signature fits in 96 serialized
-        # characters; its exact source body does not fit the 100 available here.
-        budget = DeliveryBudget(max_chars=110, envelope_chars=10)
+        # The envelope must cover the response framing; the remaining evidence
+        # capacity fits the declaration signature and its provenance line but
+        # not exact source.
+        budget = DeliveryBudget(max_chars=920, envelope_chars=700)
         bundle = inspect(
             symbol_request(),
             fake_context(default_symbol_handler(), delivery=budget),
         )
-        assert bundle.assessment is not None
+        assert bundle.assessment is not None and bundle.render is not None
         self.assertIs(
             bundle.assessment.by_id("target_source").status,  # type: ignore[union-attr]
             RequirementStatus.UNSATISFIED,
@@ -405,6 +534,96 @@ class StageIsolationTests(unittest.TestCase):
         self.assertTrue(
             any(item.reason == "delivery_budget" for item in bundle.selection.omitted)
         )
+        self.assertLessEqual(bundle.render.chars + 1, budget.max_chars)
+
+    def test_hundreds_of_omissions_stay_within_the_delivery_budget(self) -> None:
+        for output_format in ("text", "json"):
+            with self.subTest(output_format=output_format):
+                handler = default_symbol_handler()
+                handler.results[Capability.SEMANTIC_REFERENCES] = _reference_flood(400)
+                context = fake_context(
+                    handler,
+                    output_format=output_format,
+                    limits=AcquisitionLimits(
+                        max_observations=500, max_source_files=500
+                    ),
+                )
+                bundle = inspect(symbol_request(), context)
+                assert bundle.selection is not None and bundle.render is not None
+                self.assertGreaterEqual(len(bundle.selection.omitted), 300)
+                self.assertLessEqual(
+                    bundle.render.chars + 1, context.delivery.max_chars
+                )
+                if output_format == "json":
+                    payload = json.loads(bundle.render.text)
+                    self.assertIsNone(payload["render"])
+                    self.assertEqual(len(bundle.render.text), bundle.render.chars)
+
+    def test_selected_evidence_exposes_compact_acquisition_provenance(self) -> None:
+        for output_format in ("text", "json"):
+            with self.subTest(output_format=output_format):
+                handler = default_symbol_handler()
+                context = fake_context(handler, output_format=output_format)
+                bundle = inspect(symbol_request(), context)
+                assert bundle.selection is not None and bundle.render is not None
+                self.assertTrue(bundle.selection.selected)
+                for item in bundle.selection.selected:
+                    provenance = item.provenance
+                    self.assertIsNotNone(provenance)
+                    assert provenance is not None
+                    self.assertEqual(provenance.provider, "fake-language")
+                    self.assertEqual(provenance.provider_version, "fake-1.0")
+                    self.assertEqual(provenance.status, CollectionStatus.COMPLETED)
+                    self.assertTrue(provenance.acquisition_id)
+                    self.assertTrue(provenance.source_versions)
+                    self.assertTrue(provenance.coverage.is_complete())
+                    self.assertIn(
+                        item.variant.source.path,
+                        {stamp.path for stamp in provenance.source_versions},
+                    )
+                if output_format == "text":
+                    self.assertIn(
+                        "provenance: fake-language@fake-1.0", bundle.render.text
+                    )
+                else:
+                    payload = json.loads(bundle.render.text)
+                    selected = payload["selection"]["selected"]
+                    self.assertEqual(
+                        selected[0]["provenance"]["provider"], "fake-language"
+                    )
+                    self.assertTrue(selected[0]["provenance"]["source_versions"])
+                    self.assertNotIn("acquisitions", payload)
+                    self.assertNotIn("observations", payload)
+
+    def test_ambiguous_candidate_list_stays_within_the_delivery_budget(self) -> None:
+        for output_format in ("text", "json"):
+            with self.subTest(output_format=output_format):
+                handler = default_symbol_handler()
+                handler.results[Capability.FIND_DECLARATIONS] = _declaration_flood(80)
+                context = fake_context(
+                    handler,
+                    output_format=output_format,
+                    limits=AcquisitionLimits(
+                        max_observations=200, max_source_files=200
+                    ),
+                )
+                bundle = inspect(symbol_request(), context)
+                self.assertIsInstance(bundle.resolution, AmbiguousTarget)
+                assert isinstance(bundle.resolution, AmbiguousTarget)
+                assert bundle.render is not None
+                self.assertLessEqual(
+                    bundle.render.chars + 1, context.delivery.max_chars
+                )
+                self.assertEqual(bundle.resolution.candidate_total, 80)
+                reduced = len(bundle.resolution.candidates) < 80
+                self.assertEqual(reduced, output_format == "json")
+                if reduced:
+                    self.assertTrue(
+                        any(gap.code == "delivery_budget" for gap in bundle.gaps)
+                    )
+                    payload = json.loads(bundle.render.text)
+                    self.assertEqual(payload["render"], None)
+                    self.assertEqual(len(bundle.render.text), bundle.render.chars)
 
     def test_trace_is_bounded_and_drops_events(self) -> None:
         recorder = TraceRecorder(max_events=3)
@@ -429,6 +648,173 @@ class StageIsolationTests(unittest.TestCase):
         bundle = inspect(symbol_request(), context)
         self.assertTrue(bundle.gaps)
         self.assertTrue(any(gap.code == "source_unstable" for gap in bundle.gaps))
+
+    def test_unstable_source_cannot_satisfy_a_required_source(self) -> None:
+        handler = default_symbol_handler()
+        declaration = declaration_result()
+        handler.results[Capability.FIND_DECLARATIONS] = CapabilityResult(
+            status=declaration.status,
+            observations=declaration.observations,
+            variants=tuple(
+                item
+                for item in declaration.variants
+                if item.representation is RepresentationKind.SIGNATURE
+            ),
+            coverage=declaration.coverage,
+            provider_version=declaration.provider_version,
+        )
+        changed_path = "src/orders/changed.ts"
+        handler.results[Capability.READ_SOURCE] = source_result(
+            path=changed_path, version=VERSION
+        )
+        context = fake_context(
+            handler,
+            versions={
+                DEFAULT_PATH: VERSION,
+                changed_path: CHANGED_VERSION,
+                REFERENCE_PATH: VERSION,
+                PACKAGE_PATH: VERSION,
+                TEST_PATH: VERSION,
+            },
+        )
+        bundle = inspect(symbol_request(), context)
+        assert bundle.assessment is not None
+        assert bundle.selection is not None
+        assert bundle.render is not None
+        target_source = bundle.assessment.by_id("target_source")
+        self.assertIsNotNone(target_source)
+        assert target_source is not None
+        self.assertIs(target_source.status, RequirementStatus.UNSATISFIED)
+        self.assertIn("unstable", target_source.detail or "")
+        declaration_identity = bundle.assessment.by_id("declaration_identity")
+        self.assertIsNotNone(declaration_identity)
+        assert declaration_identity is not None
+        self.assertIs(declaration_identity.status, RequirementStatus.SATISFIED)
+        self.assertTrue(
+            any(item.reason == "source_unstable" for item in bundle.selection.omitted)
+        )
+        self.assertNotIn("repository.all()", bundle.render.text)
+
+    def test_stable_sibling_still_satisfies_when_one_reference_is_unstable(
+        self,
+    ) -> None:
+        handler = default_symbol_handler()
+        stable_path = "src/use_stable.ts"
+        changed_path = "src/use_changed.ts"
+        stable = reference_result(path=stable_path, version=VERSION)
+        changed = reference_result(path=changed_path, version=VERSION)
+        handler.results[Capability.SEMANTIC_REFERENCES] = CapabilityResult(
+            status=CollectionStatus.COMPLETED,
+            observations=(*stable.observations, *changed.observations),
+            variants=(*stable.variants, *changed.variants),
+            coverage=stable.coverage,
+            provider_version="fake-1.0",
+        )
+        context = fake_context(
+            handler,
+            versions={
+                DEFAULT_PATH: VERSION,
+                stable_path: VERSION,
+                changed_path: CHANGED_VERSION,
+                PACKAGE_PATH: VERSION,
+                TEST_PATH: VERSION,
+            },
+        )
+        bundle = inspect(symbol_request(), context)
+        assert bundle.assessment is not None
+        assert bundle.selection is not None
+        reference = bundle.assessment.by_id("representative_reference")
+        self.assertIsNotNone(reference)
+        assert reference is not None
+        self.assertIs(reference.status, RequirementStatus.SATISFIED)
+        selected_paths = {
+            item.variant.source.path for item in bundle.selection.selected
+        }
+        self.assertIn(stable_path, selected_paths)
+        self.assertNotIn(changed_path, selected_paths)
+        self.assertTrue(
+            any(item.reason == "source_unstable" for item in bundle.selection.omitted)
+        )
+
+
+class ExecutionLimitTests(unittest.TestCase):
+    def test_provider_call_limit_counts_resolution_and_collection(self) -> None:
+        handler = default_symbol_handler()
+        context = fake_context(handler, limits=AcquisitionLimits(max_provider_calls=3))
+        bundle = inspect(symbol_request(), context)
+        self.assertEqual(
+            [call[0] for call in handler.calls],
+            ["find_declarations", "read_source", "semantic_references"],
+        )
+        self.assertTrue(any(gap.code == "provider_call_limit" for gap in bundle.gaps))
+        assert bundle.assessment is not None
+        self.assertIs(
+            bundle.assessment.by_id("test_search").status,  # type: ignore[union-attr]
+            RequirementStatus.UNSATISFIED,
+        )
+
+    def test_each_inspection_starts_with_fresh_execution_accounting(self) -> None:
+        handler = default_symbol_handler()
+        context = fake_context(handler, limits=AcquisitionLimits(max_provider_calls=3))
+        first = inspect(symbol_request(), context)
+        second = inspect(symbol_request(), context)
+        self.assertIsInstance(first.resolution, ResolvedTarget)
+        self.assertIsInstance(second.resolution, ResolvedTarget)
+        self.assertEqual(len(handler.calls), 6)
+
+    def test_expired_deadline_stops_every_adapter_invocation(self) -> None:
+        ticks = itertools.count()
+        handler = default_symbol_handler()
+        context = fake_context(handler)
+        context = replace(
+            context,
+            execution=ExecutionLedger(
+                context.limits, clock=lambda: float(next(ticks) * 100)
+            ),
+        )
+        bundle = inspect(symbol_request(), context)
+        self.assertEqual(handler.calls, [])
+        self.assertTrue(any(gap.code == "deadline_exceeded" for gap in bundle.gaps))
+
+    def test_observation_limit_truncates_collected_evidence(self) -> None:
+        handler = default_symbol_handler()
+        handler.results[Capability.SEMANTIC_REFERENCES] = _reference_flood(10)
+        context = fake_context(handler, limits=AcquisitionLimits(max_observations=5))
+        bundle = inspect(symbol_request(), context)
+        self.assertTrue(any(gap.code == "observation_limit" for gap in bundle.gaps))
+
+    def test_source_file_limit_bounds_aggregate_evidence_files(self) -> None:
+        handler = default_symbol_handler()
+        handler.results[Capability.SEMANTIC_REFERENCES] = _reference_flood(10)
+        context = fake_context(
+            handler,
+            limits=AcquisitionLimits(max_observations=100, max_source_files=2),
+        )
+        bundle = inspect(symbol_request(), context)
+        self.assertTrue(any(gap.code == "source_file_limit" for gap in bundle.gaps))
+
+    def test_inspection_batches_symbol_operations_for_one_subject(self) -> None:
+        handler = default_symbol_handler()
+        handler.batchable = frozenset(
+            {Capability.SEMANTIC_REFERENCES, Capability.IMPLEMENTATIONS}
+        )
+        bundle = inspect(symbol_request(intent="refactor"), fake_context(handler))
+        self.assertEqual(len(handler.batch_calls), 1)
+        self.assertEqual(
+            set(handler.batch_calls[0]),
+            {"semantic_references", "implementations"},
+        )
+        assert bundle.collection is not None
+        self.assertEqual(
+            {item.capability for item in bundle.collection.requests},
+            {
+                Capability.READ_SOURCE,
+                Capability.SEMANTIC_REFERENCES,
+                Capability.IMPLEMENTATIONS,
+                Capability.LEXICAL_MENTIONS,
+                Capability.OWNING_PACKAGE,
+            },
+        )
 
 
 class RenderFormatTests(unittest.TestCase):

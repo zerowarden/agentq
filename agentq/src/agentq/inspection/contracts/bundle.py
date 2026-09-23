@@ -14,7 +14,12 @@ from agentq.core import (
 
 from ..budgeting import DELIVERY_FORMATS
 from .collection import CollectionPlan
-from .evaluation import PolicyAssessment, SelectionPlan, selected_evidence_to_wire
+from .evaluation import (
+    OmittedEvidence,
+    PolicyAssessment,
+    SelectionPlan,
+    selected_evidence_to_wire,
+)
 from .policy import EvidencePolicy
 from .requests import InspectionRequest
 from .resolution import ResolutionResult, ResolvedTarget, resolution_to_wire
@@ -125,14 +130,7 @@ class InspectionBundle:
                         selected_evidence_to_wire(item)
                         for item in self.selection.selected
                     ],
-                    "omitted": [
-                        {
-                            "observation_id": item.observation_id,
-                            "variant_id": item.variant_id,
-                            "reason": item.reason,
-                        }
-                        for item in self.selection.omitted
-                    ],
+                    "omitted": _omission_summary(self.selection.omitted),
                     "reserved": list(self.selection.reserved),
                     "measured_cost": self.selection.measured_cost,
                     "budget_chars": self.selection.budget_chars,
@@ -161,3 +159,11 @@ class InspectionBundle:
                 else None
             ),
         }
+
+
+def _omission_summary(items: tuple[OmittedEvidence, ...]) -> dict[str, object]:
+    """Omitted representations as counts, never as an unbounded record dump."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.reason] = counts.get(item.reason, 0) + 1
+    return {"total": len(items), "by_reason": counts}

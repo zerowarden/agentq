@@ -14,7 +14,6 @@ from agentq import persistence
 def _env(base: Path) -> dict[str, str]:
     return {
         "AGENTQ_STATE_DB": str(base / "state.db"),
-        "AGENTQ_TELEMETRY": "0",
     }
 
 
@@ -38,7 +37,6 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(versions, [1, 2, 3, 4])
             self.assertTrue(
                 {
-                    "task_state",
                     "continuations",
                     "receipts",
                     "receipt_fragments",

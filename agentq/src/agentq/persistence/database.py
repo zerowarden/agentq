@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agentq.core import context_cache_dir, secure_dir
 
-from .migrations import import_legacy_tasks, migrate
+from .migrations import migrate
 
 _BUSY_TIMEOUT_MS = 5000
 _connections: dict[str, sqlite3.Connection] = {}
@@ -42,7 +42,6 @@ def _connect(path: Path) -> sqlite3.Connection:
         except OSError:
             pass
         migrate(conn)
-        import_legacy_tasks(conn)
     except sqlite3.Error:
         conn.close()
         raise

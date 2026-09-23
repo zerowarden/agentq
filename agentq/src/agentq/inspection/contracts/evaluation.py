@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from agentq.core import (
     ContractError,
+    Coverage,
     is_instance_of,
     optional_str,
     require_int,
     require_str,
     require_unique_strings,
+    typed_from_wire,
 )
 
-from .evidence import Binding, EvidenceVariant, ObservationKind
+from ._common import validate_scopes
+from .capability import CollectionStatus
+from .evidence import Binding, EvidenceVariant, ObservationKind, SourceVersion
 from .policy import (
     EvidenceRole,
     RequirementStrength,
@@ -129,14 +133,68 @@ class ScoredEvidence:
 
 
 @dataclass(frozen=True)
+class EvidenceProvenance:
+    """Compact acquisition provenance for one selected representation.
+
+    The evidence pool is never delivered whole; this projection carries the
+    facts an agent needs to judge an artifact: which adapter produced it, by
+    which method and version, over what scope, at which source versions, and
+    with what coverage and limitations.
+    """
+
+    acquisition_id: str
+    provider: str
+    provider_version: str | None
+    method: str
+    status: CollectionStatus
+    source_versions: tuple[SourceVersion, ...] = ()
+    effective_scope: tuple[str, ...] = ()
+    coverage: Coverage = field(default_factory=Coverage)
+
+    def __post_init__(self) -> None:
+        require_str(self.acquisition_id, "evidence provenance acquisition_id")
+        require_str(self.provider, "evidence provenance provider")
+        optional_str(self.provider_version, "evidence provenance provider_version")
+        require_str(self.method, "evidence provenance method")
+        if not isinstance(self.status, CollectionStatus):
+            raise ContractError("evidence provenance requires a CollectionStatus")
+        if not is_instance_of(self.source_versions, tuple) or not all(
+            is_instance_of(item, SourceVersion) for item in self.source_versions
+        ):
+            raise ContractError(
+                "evidence provenance source_versions must be SourceVersion records"
+            )
+        validate_scopes(self.effective_scope, "evidence provenance effective_scope")
+        if not isinstance(self.coverage, Coverage):
+            object.__setattr__(self, "coverage", typed_from_wire(self.coverage))
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "acquisition_id": self.acquisition_id,
+            "provider": self.provider,
+            "provider_version": self.provider_version,
+            "method": self.method,
+            "status": self.status.value,
+            "source_versions": [item.to_wire() for item in self.source_versions],
+            "effective_scope": list(self.effective_scope),
+            "coverage": self.coverage.to_wire(),
+        }
+
+
+@dataclass(frozen=True)
 class SelectedEvidence:
-    """One selected representation; the reason is separate from the score."""
+    """One selected representation; the reason is separate from the score.
+
+    ``provenance`` is the compact acquisition summary that lets a consumer
+    judge the artifact without receiving the whole evidence pool.
+    """
 
     variant: EvidenceVariant
     reason: str
     score: int = 0
     requirement_id: str | None = None
     contributions: tuple[ScoreContribution, ...] = ()
+    provenance: EvidenceProvenance | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.variant, EvidenceVariant):
@@ -148,6 +206,12 @@ class SelectedEvidence:
         ):
             raise ContractError(
                 "selected evidence contributions must be ScoreContribution records"
+            )
+        if self.provenance is not None and not isinstance(
+            self.provenance, EvidenceProvenance
+        ):
+            raise ContractError(
+                "selected evidence provenance must be an EvidenceProvenance"
             )
 
     @property
@@ -175,6 +239,9 @@ def selected_evidence_to_wire(item: SelectedEvidence) -> dict[str, object]:
             {"name": contribution.name, "value": contribution.value}
             for contribution in item.contributions
         ],
+        "provenance": (
+            item.provenance.to_wire() if item.provenance is not None else None
+        ),
         "variant": item.variant.to_wire(),
     }
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from agentq.core import SourceRef, canonical_json, typed_coverage
 from agentq.inspection.budgeting import DeliveryBudget
 from agentq.inspection.contracts import (
@@ -21,6 +23,7 @@ from agentq.inspection.contracts import (
     RepresentationKind,
     RequirementRule,
     RequirementStrength,
+    ScoreContribution,
     ScoredEvidence,
     SelectedEvidence,
     SelectionPlan,
@@ -40,6 +43,7 @@ from agentq.inspection.selection import (
     OMISSION_NO_REPRESENTATION,
     OMISSION_OVERLAP,
     OMISSION_SAME_FILE,
+    REASON_RELEVANCE,
     REASON_REQUIRED,
     REASON_ROLE,
     SelectionProfile,
@@ -240,6 +244,38 @@ def _selected_ids(plan: SelectionPlan) -> list[str]:
     return [item.observation_id for item in plan.selected]
 
 
+def _scored_with(
+    pool: EvidencePool, totals: dict[str, int]
+) -> tuple[ScoredEvidence, ...]:
+    """Replace fixture scores with explicit totals for ordering tests."""
+    scored: list[ScoredEvidence] = []
+    for item in _scores(pool):
+        total = totals.get(item.observation_id, item.score.total)
+        scored.append(
+            replace(
+                item,
+                score=replace(
+                    item.score,
+                    total=total,
+                    contributions=(ScoreContribution(name="test", value=total),),
+                ),
+            )
+        )
+    return tuple(scored)
+
+
+def _relevance_cost(variant: EvidenceVariant, score: int) -> int:
+    return selected_cost(
+        SelectedEvidence(
+            variant=variant,
+            reason=REASON_RELEVANCE,
+            score=score,
+            contributions=(ScoreContribution(name="test", value=score),),
+        ),
+        "text",
+    )
+
+
 def test_required_source_survives_and_is_selected_first() -> None:
     source = _source("src/a.py", 1, 3)
     noisy = [_reference(f"src/use{index}.py") for index in range(3)]
@@ -341,6 +377,41 @@ def test_per_file_limit_omits_repeated_use_sites() -> None:
     assert selected_paths.count("src/use.py") == 2
 
 
+def test_fill_prefers_relevance_per_serialized_cost() -> None:
+    """Several small artifacts can beat one large higher-scoring artifact."""
+    large = _source("src/large.py", 1, 8)
+    smalls = [_reference(f"src/use{index}.py") for index in range(4)]
+    pool = _pool(large, *smalls)
+    scores = _scored_with(
+        pool,
+        {
+            large[0].observation_id: 8,
+            **{small[0].observation_id: 6 for small in smalls},
+        },
+    )
+    large_cost = _relevance_cost(large[1][0], 8)
+    small_cost = _relevance_cost(smalls[0][1][0], 6)
+    assert small_cost < large_cost <= small_cost * len(smalls)
+    budget = DeliveryBudget(max_chars=small_cost * len(smalls) + 10, envelope_chars=10)
+    plan = _select(
+        pool,
+        scores,
+        _policy(),
+        budget=budget,
+        profile=SelectionProfile(
+            profile="selection-ratio-test",
+            reserve_required=False,
+            role_diversity=False,
+        ),
+    )
+    assert set(_selected_ids(plan)) == {small[0].observation_id for small in smalls}
+    assert any(
+        item.observation_id == large[0].observation_id
+        and item.reason == OMISSION_BUDGET
+        for item in plan.omitted
+    )
+
+
 def test_selection_is_deterministic_for_equal_scores() -> None:
     references = [_reference("src/a.py", line=4), _reference("src/b.py", line=4)]
     pool = _pool(*references)
@@ -399,6 +470,34 @@ def test_observations_without_variants_are_omitted_explicitly() -> None:
     plan = _select(pool, _scores(pool), _policy())
     assert plan.selected == ()
     assert any(item.reason == OMISSION_NO_REPRESENTATION for item in plan.omitted)
+
+
+def test_unstable_observations_cannot_be_reserved_or_selected() -> None:
+    source = _source("src/a.py", 1, 3)
+    pool = _pool(source)
+    unstable = replace(pool, unstable_observation_ids=(source[0].observation_id,))
+    plan = _select(unstable, _scores(unstable), _policy(_exact_source_requirement()))
+    assert plan.selected == ()
+    assert plan.reserved == ()
+    assert any(item.reason == "source_unstable" for item in plan.omitted)
+
+
+def test_stable_alternative_represents_a_requirement_an_unstable_one_cannot() -> None:
+    unstable_source = _source("src/a.py", 1, 3)
+    stable_source = _source("src/b.py", 1, 3)
+    pool = _pool(unstable_source, stable_source)
+    unstable = replace(
+        pool, unstable_observation_ids=(unstable_source[0].observation_id,)
+    )
+    plan = _select(unstable, _scores(unstable), _policy(_exact_source_requirement()))
+    assert [item.observation_id for item in plan.selected] == [
+        stable_source[0].observation_id
+    ]
+    assert plan.reserved == ("target_source",)
+    assert not any(
+        item.observation_id == unstable_source[0].observation_id
+        for item in plan.selected
+    )
 
 
 def test_budget_without_room_omits_everything_explicitly() -> None:

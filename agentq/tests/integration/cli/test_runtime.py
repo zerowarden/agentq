@@ -7,7 +7,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import time
 from pathlib import Path
 from unittest import mock
 
@@ -26,63 +25,6 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         self.assertIn("agentq 1.8.0", result.stdout)
-
-    def test_legacy_json_state_migrates_into_sqlite_store(self) -> None:
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq import tasking as tasking_module
-            from agentq.delivery import suppression as cache_module
-
-        state_db = Path(self.temp.name) / "legacy-state" / "state.db"
-        state_db.parent.mkdir(parents=True, exist_ok=True)
-        legacy_repo_id = cache_module.repo_id(self.repo)
-        legacy_task = self.telemetry / "tasks" / f"{legacy_repo_id}.json"
-        legacy_task.parent.mkdir(parents=True, exist_ok=True)
-        legacy_task.write_text(
-            json.dumps(
-                {
-                    "task_id": "legacy123",
-                    "started_at": 1.0,
-                    "baseline": {},
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {**self.env, "AGENTQ_STATE_DB": str(state_db)}
-        with mock.patch.dict(os.environ, env, clear=False):
-            from agentq.core import context_cache_dir
-
-            legacy_context = context_cache_dir() / f"{legacy_repo_id}.json"
-            legacy_context.parent.mkdir(parents=True, exist_ok=True)
-            legacy_context.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "entries": [
-                            {
-                                "context": "task:legacy123",
-                                "command": "search",
-                                "key": "a" * 64,
-                                "time": time.time(),
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            malformed = legacy_context.with_name(f"{'b' * 16}.json")
-            malformed.write_text("{broken legacy state", encoding="utf-8")
-            restored = tasking_module._read_state(self.repo)
-            self.assertIsNotNone(restored)
-            self.assertEqual(restored["task_id"], "legacy123")
-            # Legacy context entries record that an operation ran, not what
-            # final output contained: they are no longer imported and can
-            # never suppress new results. The file is left untouched.
-            hits, _ = cache_module._lookup(self.repo, "search", "operation", ["a" * 64])
-        self.assertEqual(hits, set())
-        self.assertTrue(legacy_context.exists())
-        self.assertFalse(legacy_task.exists())
-        self.assertTrue(malformed.exists())
 
     def test_concurrent_processes_preserve_context_state(self) -> None:
         env = {**self.env, "AGENTQ_SESSION_ID": "concurrent"}

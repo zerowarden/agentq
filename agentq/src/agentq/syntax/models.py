@@ -1,4 +1,4 @@
-"""Canonical syntax records shared by outline, navigation, and verification."""
+"""Canonical syntax records shared by outline and navigation."""
 
 from __future__ import annotations
 

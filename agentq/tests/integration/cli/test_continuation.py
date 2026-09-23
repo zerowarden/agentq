@@ -87,12 +87,14 @@ class ContinuationCliTests(AgentQIntegrationHarness):
             "AGENTQ_STATE_DB": str(Path(self.temp.name) / "ttl.db"),
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            from agentq.core import SearchOptions
-            from agentq.requests import request_for
+            from agentq.core import SearchOptions, new_operation_request
 
             record = continuations_module.QueryFollowUp(
-                request=request_for(
-                    self.repo, "search", SearchOptions(query="needle")
+                request=new_operation_request(
+                    root=self.repo,
+                    operation="search",
+                    options=SearchOptions(query="needle"),
+                    encode_options=SearchOptions.to_wire,
                 )
             )
             stored = continuations_module.store_block(self.repo, record.to_wire())

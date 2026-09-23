@@ -19,7 +19,6 @@ from agentq.core import (
     SAMPLED,
     AgentQError,
     Coverage,
-    dict_field,
     ensure_within,
     is_sensitive_path,
     list_field,
@@ -57,7 +56,6 @@ class ReadItem:
     truncated: bool = False
     refused: bool = False
     reason: str | None = None
-    suppressed: bool = False
     redaction: Mapping[str, int] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -72,8 +70,6 @@ class ReadItem:
             "version": self.version,
             "truncated": self.truncated,
         }
-        if self.suppressed:
-            data["suppressed"] = True
         if self.redaction:
             data["redaction"] = dict(self.redaction)
         return data
@@ -106,7 +102,6 @@ class ReadItem:
                 for item in list_field(payload, "lines")
             ),
             truncated=bool(payload.get("truncated")),
-            suppressed=bool(payload.get("suppressed")),
             redaction=payload.get("redaction"),
         )
 
@@ -127,67 +122,6 @@ class RequestedRange:
 
     def to_wire(self) -> dict[str, int]:
         return {"start": self.start, "end": self.end}
-
-
-@dataclass(frozen=True)
-class ReadOverlap:
-    """Typed read-overlap advice; ``unseen`` stays internal to the planner."""
-
-    overlapping_ranges: int
-    overlap_lines: int
-    overlap_percent: float
-    fully_covered_ranges: int
-    fully_covered_indices: tuple[int, ...]
-    scope: str
-    exact: bool
-    unseen: Mapping[int, tuple[tuple[int, int], ...]] = field(
-        default_factory=dict[int, tuple[tuple[int, int], ...]]
-    )
-
-    @classmethod
-    def from_advice(cls, payload: Mapping[str, Any]) -> ReadOverlap:
-        unseen_raw: dict[str, Any] = dict_field(payload, "_unseen_ranges")
-        unseen = {
-            int(index): tuple((int(left), int(right)) for left, right in intervals)
-            for index, intervals in unseen_raw.items()
-        }
-        return cls(
-            overlapping_ranges=int(payload.get("overlapping_ranges", 0)),
-            overlap_lines=int(payload.get("overlap_lines", 0)),
-            overlap_percent=float(payload.get("overlap_percent", 0.0) or 0.0),
-            fully_covered_ranges=int(payload.get("fully_covered_ranges", 0)),
-            fully_covered_indices=tuple(
-                int(index) for index in payload.get("fully_covered_indices", [])
-            ),
-            scope=str(payload.get("scope", "session")),
-            exact=bool(payload.get("exact", False)),
-            unseen=unseen,
-        )
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "overlapping_ranges": self.overlapping_ranges,
-            "overlap_lines": self.overlap_lines,
-            "overlap_percent": self.overlap_percent,
-            "fully_covered_ranges": self.fully_covered_ranges,
-            "fully_covered_indices": list(self.fully_covered_indices),
-            "scope": self.scope,
-            "exact": self.exact,
-        }
-
-    @classmethod
-    def from_wire(cls, payload: Mapping[str, Any]) -> ReadOverlap:
-        return cls(
-            overlapping_ranges=int(payload.get("overlapping_ranges", 0) or 0),
-            overlap_lines=int(payload.get("overlap_lines", 0) or 0),
-            overlap_percent=float(payload.get("overlap_percent", 0.0) or 0.0),
-            fully_covered_ranges=int(payload.get("fully_covered_ranges", 0) or 0),
-            fully_covered_indices=tuple(
-                int(index) for index in list_field(payload, "fully_covered_indices")
-            ),
-            scope=str(payload.get("scope", "session")),
-            exact=bool(payload.get("exact")),
-        )
 
 
 @dataclass(frozen=True)
@@ -230,8 +164,6 @@ class ReadRequest:
     max_chars: int = 260
     include_sensitive: bool = False
     allow_outside: bool = False
-    repeat: bool = False
-    cache_command: str = "read"
     budget: int = 0
     output_format: str = "text"
 
@@ -250,7 +182,6 @@ class ReadResult:
     windows: int
     candidate_lines: int
     candidate_chars: int
-    repeat: bool
     provenance: str = LEXICAL
     render_budget: int | None = None
     continuation: ReadContinuation | None = None
@@ -259,7 +190,6 @@ class ReadResult:
     anchors: tuple[int, ...] = ()
     requested_ranges: tuple[RequestedRange, ...] = ()
     redaction: Mapping[str, int] | None = None
-    read_overlap: ReadOverlap | None = None
 
     def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -276,7 +206,6 @@ class ReadResult:
             "windows": self.windows,
             "candidate_lines": self.candidate_lines,
             "candidate_chars": self.candidate_chars,
-            "repeat": self.repeat,
         }
         if self.render_budget_truncated and self.render_budget is not None:
             data["render_budget"] = self.render_budget
@@ -291,8 +220,6 @@ class ReadResult:
             ]
         if self.redaction:
             data["redaction"] = dict(self.redaction)
-        if self.read_overlap is not None:
-            data["read_overlap"] = self.read_overlap.to_wire()
         return data
 
     def with_wire_continuations(self, wire: Mapping[str, Any]) -> ReadResult:
@@ -311,7 +238,6 @@ class ReadResult:
     @classmethod
     def from_wire(cls, payload: Mapping[str, Any]) -> ReadResult:
         continuation = payload.get("continuation")
-        overlap = payload.get("read_overlap")
         ranges = list_field(payload, "requested_ranges")
         return cls(
             repo_root=str(payload.get("repo_root", "")),
@@ -328,7 +254,6 @@ class ReadResult:
             windows=int(payload.get("windows", 0) or 0),
             candidate_lines=int(payload.get("candidate_lines", 0) or 0),
             candidate_chars=int(payload.get("candidate_chars", 0) or 0),
-            repeat=bool(payload.get("repeat")),
             provenance=str(payload.get("provenance", LEXICAL)),
             render_budget=payload.get("render_budget"),
             continuation=(
@@ -347,11 +272,6 @@ class ReadResult:
                 for item in ranges
             ),
             redaction=payload.get("redaction"),
-            read_overlap=(
-                ReadOverlap.from_wire(cast("Mapping[str, Any]", overlap))
-                if isinstance(overlap, Mapping)
-                else None
-            ),
         )
 
 
@@ -528,7 +448,6 @@ def _read_continuation(
     budget: int,
     include_sensitive: bool,
     allow_outside: bool,
-    repeat: bool,
     output_format: str,
 ) -> ReadContinuation | None:
     if not windows:
@@ -547,55 +466,11 @@ def _read_continuation(
         options.append("--include-sensitive")
     if allow_outside:
         options.append("--allow-outside")
-    if repeat:
-        options.append("--repeat")
     return ReadContinuation(
         command=f"agentq read {' '.join(specs)} {' '.join(options)}",
         remaining_windows=len(windows),
         shown_windows=len(windows),
     )
-
-
-def _plan_read_overlap(
-    root: Path,
-    planned: list[ReadWindow],
-    repeat: bool,
-    *,
-    cache_command: str,
-    max_chars: int,
-) -> tuple[list[ReadWindow], list[ReadWindow], ReadOverlap | None]:
-    from agentq.delivery import read_repeat_advice
-
-    probe = {
-        "items": [
-            {
-                "path": window.path,
-                "version": window.version,
-                "start": window.start,
-                "end": window.end,
-                "redaction": window.redaction,
-            }
-            for window in planned
-        ],
-        "max_chars": max_chars,
-    }
-    advice = read_repeat_advice(root, probe, command=cache_command)
-    if not advice:
-        return planned, [], None
-    overlap = ReadOverlap.from_advice(advice)
-    if repeat:
-        return planned, [], overlap
-    unseen: list[ReadWindow] = []
-    suppressed: list[ReadWindow] = []
-    for index, window in enumerate(planned):
-        intervals = overlap.unseen.get(index, ((window.start, window.end),))
-        if not intervals:
-            suppressed.append(window)
-            continue
-        unseen.extend(
-            replace(window, start=left, end=right) for left, right in intervals
-        )
-    return unseen, suppressed, overlap
 
 
 def _validate_read_locations(
@@ -799,7 +674,6 @@ def _source_item(
         lines=lines,
         version=state.version,
         truncated=truncated,
-        suppressed=not selected,
         redaction=state.redaction,
     )
 
@@ -810,7 +684,6 @@ def _build_read_result(
     requests: list[_SourceState],
     base_items: list[ReadItem],
     planned: list[ReadWindow],
-    suppressed: list[ReadWindow],
     states_by_path: dict[str, _SourceState],
     *,
     requested_windows: int,
@@ -819,16 +692,6 @@ def _build_read_result(
     line_cap: int,
 ) -> ReadResult:
     items = list(base_items)
-    items.extend(
-        _source_item(
-            states_by_path[window.path],
-            window.start,
-            window.end,
-            max_chars=request.max_chars,
-            selected=False,
-        )
-        for window in suppressed
-    )
     remaining = max(0, line_cap)
     continuation_windows: list[ReadWindow] = []
     for index, window in enumerate(planned):
@@ -869,7 +732,6 @@ def _build_read_result(
         windows=requested_windows,
         candidate_lines=selected_lines,
         candidate_chars=sum(len(line.text) for item in items for line in item.lines),
-        repeat=request.repeat,
         render_budget=request.budget if line_cap < source_line_cap else None,
     )
     continuation = _read_continuation(
@@ -879,7 +741,6 @@ def _build_read_result(
         budget=request.budget,
         include_sensitive=request.include_sensitive,
         allow_outside=request.allow_outside,
-        repeat=request.repeat,
         output_format=request.output_format,
     )
     if continuation is not None:
@@ -953,7 +814,6 @@ def _fit_render_budget(
                 budget=required,
                 include_sensitive=request.include_sensitive,
                 allow_outside=request.allow_outside,
-                repeat=request.repeat,
                 output_format=request.output_format,
             ),
         )
@@ -971,13 +831,6 @@ def read(request: ReadRequest) -> ReadResult:
     requests = _plan_sources(request, specs, global_anchors, global_ranges)
     base_items, planned = _base_items_and_windows(requests)
     requested_windows = len(planned)
-    planned, suppressed, overlap = _plan_read_overlap(
-        root,
-        planned,
-        request.repeat,
-        cache_command=request.cache_command,
-        max_chars=request.max_chars,
-    )
     total_unseen_lines = sum(window.end - window.start + 1 for window in planned)
     source_line_cap = min(request.max_lines, total_unseen_lines)
     states_by_path = {state.path: state for state in requests if not state.refused}
@@ -989,15 +842,12 @@ def read(request: ReadRequest) -> ReadResult:
             requests,
             base_items,
             planned,
-            suppressed,
             states_by_path,
             requested_windows=requested_windows,
             total_unseen_lines=total_unseen_lines,
             source_line_cap=source_line_cap,
             line_cap=line_cap,
         )
-        if overlap is not None:
-            data = replace(data, read_overlap=overlap)
         return data
 
     data = build_data(source_line_cap)

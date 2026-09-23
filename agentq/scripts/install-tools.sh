@@ -12,7 +12,7 @@ Usage: install-tools.sh [--apply] [--update] [--no-cargo]
 Without --apply, prints the local tool status and installation plan only.
 --apply      install available Kubuntu/Ubuntu packages and missing Cargo tools
 --update     run apt-get update before package installation
---no-cargo   skip ast-grep/difftastic/hyperfine/tokei Cargo installation
+--no-cargo   skip the optional ast-grep Cargo installation
 EOF
 }
 
@@ -34,10 +34,9 @@ fi
 
 required=(git ripgrep python3)
 recommended=(jq universal-ctags shellcheck shfmt fd-find)
-optional_apt=(hyperfine tokei)
 
 available=()
-for package in "${required[@]}" "${recommended[@]}" "${optional_apt[@]}"; do
+for package in "${required[@]}" "${recommended[@]}"; do
   if apt-cache show "$package" >/dev/null 2>&1; then
     available+=("$package")
   fi
@@ -50,8 +49,7 @@ APT packages available on this system:
   ${available[*]:-(none detected)}
 
 Cargo tools (if Cargo is installed and --no-cargo is not set):
-  ast-grep difftastic
-  hyperfine/tokei only when not already available after APT installation
+  ast-grep
 
 Not auto-installed:
   Gitleaks — install a pinned official release separately, then configure it per repository
@@ -82,17 +80,8 @@ if ((no_cargo == 0)); then
     if ! command -v ast-grep >/dev/null 2>&1; then
       cargo install --locked ast-grep
     fi
-    if ! command -v difft >/dev/null 2>&1; then
-      cargo install --locked difftastic
-    fi
-    if ! command -v hyperfine >/dev/null 2>&1; then
-      cargo install --locked hyperfine
-    fi
-    if ! command -v tokei >/dev/null 2>&1; then
-      cargo install --locked tokei
-    fi
   else
-    echo "Cargo is not installed; skipped ast-grep and difftastic." >&2
+    echo "Cargo is not installed; skipped ast-grep." >&2
   fi
 fi
 
@@ -103,5 +92,5 @@ Installation complete. Ensure these directories are in PATH where applicable:
   $HOME/.cargo/bin
 
 Then run:
-  agentq doctor
+  agentq --version
 EOF

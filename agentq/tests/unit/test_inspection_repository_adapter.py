@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from agentq.core import ContractError
 from agentq.inspection.adapters.repository import RepositoryInspectionAdapter
 from agentq.inspection.capabilities import CapabilityRegistry
 from agentq.inspection.contracts import (
@@ -16,6 +15,7 @@ from agentq.inspection.contracts import (
     Fidelity,
     InspectionContext,
     ObservationKind,
+    PathKind,
     PathTarget,
     RangeTarget,
     RepositoryIdentity,
@@ -118,28 +118,14 @@ def test_missing_file_is_a_failed_acquisition_through_the_registry(
     assert results[0].record.diagnostics
 
 
-def test_read_bypasses_source_suppression(tmp_path: Path) -> None:
-    captured: dict = {}
-
-    def fake_read(request):
-        captured["request"] = request
-        raise ContractError("stop after capture")
-
-    _write(tmp_path, "src/a.py", "one\n")
-    adapter = RepositoryInspectionAdapter(reader=fake_read)
-    with pytest.raises(ContractError):
-        adapter.acquire(
-            _range_request(Capability.READ_SOURCE, "src/a.py", 1, 1),
-            _context(tmp_path),
-        )
-    assert captured["request"].repeat
-
-
 def test_outline_reports_file_structure(tmp_path: Path) -> None:
     _write(tmp_path, "src/a.py", "def alpha():\n    return 1\n")
     _write(tmp_path, "src/b.py", "class Beta:\n    pass\n")
     result = RepositoryInspectionAdapter().acquire(
-        _request(Capability.OUTLINE, PathTarget(path="src")),
+        _request(
+            Capability.OUTLINE,
+            PathTarget(path="src", path_kind=PathKind.DIRECTORY),
+        ),
         _context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
@@ -148,6 +134,38 @@ def test_outline_reports_file_structure(tmp_path: Path) -> None:
     names = {item.name for item in observation.payload.symbols}  # type: ignore[union-attr]
     assert names == {"alpha", "Beta"}
     assert "alpha" in result.variants[0].text
+    assert result.coverage.is_complete()
+
+
+def test_empty_file_outline_is_completed_explicit_evidence(tmp_path: Path) -> None:
+    _write(tmp_path, "src/empty.py", "")
+    result = RepositoryInspectionAdapter().acquire(
+        _request(
+            Capability.OUTLINE,
+            PathTarget(path="src/empty.py", path_kind=PathKind.FILE),
+        ),
+        _context(tmp_path),
+    )
+    assert result.status is CollectionStatus.COMPLETED
+    assert len(result.observations) == 1
+    assert result.observations[0].payload.symbols == ()  # type: ignore[union-attr]
+    assert result.coverage.is_complete()
+
+
+def test_empty_directory_outline_is_completed_explicit_evidence(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "empty").mkdir()
+    result = RepositoryInspectionAdapter().acquire(
+        _request(
+            Capability.OUTLINE,
+            PathTarget(path="empty", path_kind=PathKind.DIRECTORY),
+        ),
+        _context(tmp_path),
+    )
+    assert result.status is CollectionStatus.COMPLETED
+    assert len(result.observations) == 1
+    assert result.observations[0].payload.symbols == ()  # type: ignore[union-attr]
     assert result.coverage.is_complete()
 
 
@@ -227,7 +245,10 @@ def test_owning_package_is_found_from_the_declaration_path(
 def test_missing_manifest_is_a_complete_empty_outcome(tmp_path: Path) -> None:
     _write(tmp_path, "src/service.py", "def list_orders():\n    return 1\n")
     result = RepositoryInspectionAdapter().acquire(
-        _request(Capability.OWNING_PACKAGE, PathTarget(path="src/service.py")),
+        _request(
+            Capability.OWNING_PACKAGE,
+            PathTarget(path="src/service.py", path_kind=PathKind.FILE),
+        ),
         _context(tmp_path),
     )
     assert result.status is CollectionStatus.EMPTY
@@ -257,7 +278,7 @@ def test_availability_without_ripgrep(capability, available) -> None:
     "target",
     (
         pytest.param(SymbolTarget(name="x"), id="symbol"),
-        pytest.param(PathTarget(path="src"), id="path"),
+        pytest.param(PathTarget(path="src", path_kind=PathKind.DIRECTORY), id="path"),
         pytest.param(
             RangeTarget(
                 path="src/a.py", ranges=(SourceSpan(start_line=1, end_line=2),)

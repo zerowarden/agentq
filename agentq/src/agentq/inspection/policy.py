@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from agentq.core.languages import language_id_for
-
 from .contracts import (
     CandidateTarget,
     Capability,
@@ -28,6 +26,7 @@ from .contracts import (
     Intent,
     LocationTarget,
     ObservationKind,
+    PathKind,
     PathTarget,
     RangeTarget,
     RepresentationKind,
@@ -78,7 +77,7 @@ def compile_policy(
                 intent, Capability.RESOLVE_LOCATION
             )
         case PathTarget():
-            is_file = language_id_for(target.path) is not None
+            is_file = target.path_kind is PathKind.FILE
             requirements = _path_requirements(intent, is_file=is_file)
             if not is_file:
                 limitations.append(

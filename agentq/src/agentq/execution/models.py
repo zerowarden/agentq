@@ -68,21 +68,6 @@ class StdinPolicy(str, Enum):
     INHERIT = "inherit"
 
 
-class CheckKind(str, Enum):
-    TEST = "test"
-    TYPECHECK = "typecheck"
-    LINT = "lint"
-    BUILD = "build"
-    CUSTOM = "custom"
-
-
-class CheckStatus(str, Enum):
-    PASSED = "passed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    ERROR = "error"
-
-
 @dataclass(frozen=True)
 class ExecutionSpec:
     """Everything the supervisor needs; no field can request a shell."""

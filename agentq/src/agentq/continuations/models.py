@@ -1,10 +1,9 @@
 """Typed continuation records.
 
 A ``query-follow-up`` is the only executable continuation record: it carries a
-validated :class:`OperationRequest` for one resumable operation (``search`` or
-``git-diff``) plus an optional source guard. Replay renders argv from that
-request through the operation's registered codec; stored command text is never
-executed.
+validated :class:`OperationRequest` for one resumable operation (``search``).
+Replay renders argv from that request through the operation's registered codec;
+stored command text is never executed.
 
 Command-only producer blocks are presentation hints: they carry recovery
 guidance, are never stored, and never become cursors.
@@ -18,26 +17,19 @@ from typing import Any, cast
 from agentq.core import (
     ContractError,
     OperationRequest,
-    list_field,
     reject_unknown_keys,
     require_mapping,
-    require_relative_posix,
     require_schema,
     require_str,
     require_tag,
-    require_unique_strings,
 )
 
 CONTINUATION_SCHEMA = "agentq.continuation/v2"
 QUERY_FOLLOW_UP_KIND = "query-follow-up"
-GIT_DIFF_GUARD_KIND = "git-diff-source"
 
-GUARD_KINDS = frozenset({GIT_DIFF_GUARD_KIND})
-
-_TYPED_FIELDS = frozenset({"schema", "kind", "request", "guard"})
+_TYPED_FIELDS = frozenset({"schema", "kind", "request"})
 _DISPLAY_FIELDS = frozenset({"command", "omitted", "cursor", "expires_at"})
-_FOLLOW_UP_FIELDS = ("schema", "kind", "request", "guard", "reason")
-_GUARD_FIELDS = ("kind", "fingerprint", "paths")
+_FOLLOW_UP_FIELDS = ("schema", "kind", "request", "reason")
 
 
 def _require_strings(value: Any, what: str) -> tuple[str, ...]:
@@ -56,48 +48,8 @@ def _reason(value: Any, what: str) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
-class SourceGuard:
-    """A snapshot of mutable diff sources captured with a follow-up.
-
-    ``fingerprint`` is a digest over the index/worktree state that produced the
-    follow-up; recomputing the same comparison must yield the same digest or
-    the follow-up is stale. ``paths`` narrows the digest to the changed paths
-    the follow-up selected.
-    """
-
-    kind: str
-    fingerprint: str
-    paths: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.kind not in GUARD_KINDS:
-            raise ContractError(f"unsupported continuation guard: {self.kind!r}")
-        require_str(self.fingerprint, "guard.fingerprint")
-        for path in self.paths:
-            require_relative_posix(path, "guard.paths entry")
-        require_unique_strings(self.paths, "guard.paths")
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "fingerprint": self.fingerprint,
-            "paths": list(self.paths),
-        }
-
-    @classmethod
-    def from_wire(cls, value: Any, *, what: str = "source guard") -> SourceGuard:
-        payload = require_mapping(value, what)
-        reject_unknown_keys(payload, _GUARD_FIELDS, what)
-        return cls(
-            kind=require_tag(payload.get("kind"), f"{what}.kind"),
-            fingerprint=require_str(payload.get("fingerprint"), f"{what}.fingerprint"),
-            paths=_require_strings(list_field(payload, "paths"), f"{what}.paths"),
-        )
-
-
-@dataclass(frozen=True)
 class QueryFollowUp:
-    """One executable request plus an optional source guard.
+    """One executable request.
 
     The request is already refined: it carries the exact comparison mode,
     scopes, and presentation the follow-up must run with. Only operations with
@@ -106,7 +58,6 @@ class QueryFollowUp:
     """
 
     request: OperationRequest[Any]
-    guard: SourceGuard | None = None
     reason: tuple[str, ...] = ()
     schema: str = CONTINUATION_SCHEMA
     kind: str = QUERY_FOLLOW_UP_KIND
@@ -125,14 +76,6 @@ class QueryFollowUp:
                 "continuation replay is not implemented for operation "
                 f"{self.request.operation!r}"
             )
-        if self.guard is not None:
-            if not isinstance(self.guard, SourceGuard):
-                raise ContractError("continuation.guard must be a SourceGuard")
-            if not codec.accepts_source_guard:
-                raise ContractError(
-                    "a source guard conflicts with this operation: "
-                    f"{self.request.operation!r}"
-                )
         for reason in self.reason:
             require_str(reason, "continuation.reason entry")
 
@@ -150,7 +93,6 @@ class QueryFollowUp:
             "schema": self.schema,
             "kind": self.kind,
             "request": self.request.to_wire(codec.encode_options),
-            "guard": self.guard.to_wire() if self.guard is not None else None,
             "reason": list(self.reason),
         }
 
@@ -167,7 +109,6 @@ class QueryFollowUp:
             raise ContractError(
                 f"{what}.request names an unsupported operation: {operation!r}"
             )
-        guard_wire = payload.get("guard")
         return cls(
             schema=require_schema(
                 payload.get("schema", CONTINUATION_SCHEMA),
@@ -178,11 +119,6 @@ class QueryFollowUp:
             request=cast(
                 "OperationRequest[Any]",
                 OperationRequest.from_wire(request_wire, codec.decode_options),
-            ),
-            guard=(
-                SourceGuard.from_wire(guard_wire, what=f"{what}.guard")
-                if guard_wire is not None
-                else None
             ),
             reason=_reason(payload.get("reason"), f"{what}.reason"),
         )
@@ -229,10 +165,3 @@ def record_from_payload(payload: Any, *, what: str) -> ContinuationRecord:
     if kind == QUERY_FOLLOW_UP_KIND:
         return QueryFollowUp.from_wire(value, what=what)
     raise ContractError(f"unknown continuation kind: {kind!r}")
-
-
-def fingerprint_id(value: Any) -> str:
-    """Stable digest used for source guards."""
-    from agentq.core import canonical_json, stable_id
-
-    return stable_id(canonical_json(value), length=64)

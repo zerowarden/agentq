@@ -270,6 +270,7 @@ def _collect_candidates(
                 span=payload.span,
                 signature=payload.signature,
                 scope=payload.scope,
+                declaration_span=payload.declaration_span,
             )
             if candidate.candidate_id in seen:
                 continue

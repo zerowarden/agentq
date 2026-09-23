@@ -16,13 +16,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentq.inspection.adapters import default_registry
+from agentq.inspection.adapters import (
+    CapabilityRegistry,
+    RepositoryInspectionAdapter,
+    TypeScriptInspectionAdapter,
+    default_registry,
+)
 from agentq.inspection.contracts import (
     AmbiguousTarget,
+    Capability,
     InspectionContext,
     InspectionRequest,
     Intent,
     RepositoryIdentity,
+    RepresentationKind,
     ResolvedTarget,
     SymbolTarget,
 )
@@ -175,7 +182,9 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                 "run `npm install` in agentq/ for the pinned typescript dev dependency"
             )
 
-    def test_unique_declaration_resolves_and_batches_exact_locations(self) -> None:
+    def test_unique_declaration_resolves_and_the_bridge_batch_reports_locations(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="agentq-ts-unique-") as temp:
             root = _make_repo(
                 Path(temp),
@@ -224,6 +233,43 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                 any(item.path == "src/app.ts" for item in references.results)
             )
 
+    def test_selected_evidence_carries_real_provider_provenance(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentq-ts-provenance-") as temp:
+            root = _make_repo(
+                Path(temp),
+                {
+                    "src/service.ts": (
+                        "export function listOrders(): number {\n  return 1;\n}\n"
+                    ),
+                    "src/app.ts": (
+                        "import { listOrders } from './service';\n"
+                        "console.log(listOrders());\n"
+                    ),
+                },
+            )
+            self._require_typescript(root)
+            bundle = inspect(_request(), _context(root))
+            assert bundle.selection is not None
+            self.assertTrue(bundle.selection.selected)
+            provenance = {
+                item.variant.representation: item.provenance
+                for item in bundle.selection.selected
+            }
+            declaration = provenance[RepresentationKind.SIGNATURE]
+            self.assertIsNotNone(declaration)
+            assert declaration is not None
+            self.assertEqual(declaration.provider, "typescript")
+            self.assertEqual(declaration.method, "find_declarations")
+            self.assertIsNotNone(declaration.provider_version)
+            exact = provenance[RepresentationKind.EXACT_SOURCE]
+            self.assertIsNotNone(exact)
+            assert exact is not None
+            self.assertEqual(exact.provider, "repository")
+            self.assertEqual(exact.method, "read_source")
+            self.assertIn(
+                "src/service.ts", {stamp.path for stamp in exact.source_versions}
+            )
+
     def test_duplicate_declarations_stay_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentq-ts-ambiguous-") as temp:
             root = _make_repo(
@@ -238,6 +284,183 @@ class RealAdapterIntegrationTests(unittest.TestCase):
             self.assertIsInstance(bundle.resolution, AmbiguousTarget)
             assert isinstance(bundle.resolution, AmbiguousTarget)
             self.assertEqual(len(bundle.resolution.candidates), 2)
+
+    def test_multiline_declaration_source_covers_the_whole_body(self) -> None:
+        function = (
+            "export function listOrders(): number[] {\n"
+            "    const result: number[] = [];\n"
+            "    for (let index = 0; index < 10; index += 1) {\n"
+            "        result.push(index);\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="agentq-ts-body-") as temp:
+            root = _make_repo(
+                Path(temp),
+                {
+                    "src/service.ts": function,
+                    "src/app.ts": (
+                        "import { listOrders } from './service';\n"
+                        "console.log(listOrders());\n"
+                    ),
+                },
+            )
+            self._require_typescript(root)
+            bundle = inspect(_request(), _context(root))
+            self.assertIsInstance(bundle.resolution, ResolvedTarget)
+            assert isinstance(bundle.resolution, ResolvedTarget)
+            declaration = bundle.resolution.declaration
+            assert declaration is not None
+            self.assertIsNotNone(declaration.declaration_span)
+            assert declaration.declaration_span is not None
+            self.assertEqual(declaration.declaration_span.start_line, 1)
+            self.assertEqual(declaration.declaration_span.end_line, 7)
+            assert bundle.selection is not None
+            exact = [
+                item.variant.text
+                for item in bundle.selection.selected
+                if item.variant.representation is RepresentationKind.EXACT_SOURCE
+            ]
+            self.assertTrue(exact)
+            body = "\n".join(exact)
+            self.assertIn("export function listOrders", body)
+            self.assertIn("return result;", body)
+            self.assertGreaterEqual(body.count("\n") + 1, 7)
+            assert bundle.assessment is not None
+            self.assertEqual(
+                bundle.assessment.by_id("target_source").status.value,  # type: ignore[union-attr]
+                "satisfied",
+            )
+
+
+class InspectionBatchingIntegrationTests(unittest.TestCase):
+    """The pipeline itself must batch symbol operations into one bridge call."""
+
+    def _require_typescript(self, root: Path) -> None:
+        if not _node_available():
+            self.skipTest("node is required for the TypeScript bridge")
+        if not _link_typescript(root):
+            self.skipTest(
+                "run `npm install` in agentq/ for the pinned typescript dev dependency"
+            )
+
+    def test_inspection_batches_references_and_implementations(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentq-ts-batch-") as temp:
+            root = _make_repo(
+                Path(temp),
+                {
+                    "src/service.ts": (
+                        "export function listOrders(): number {\n  return 1;\n}\n"
+                    ),
+                    "src/app.ts": (
+                        "import { listOrders } from './service';\n"
+                        "console.log(listOrders());\n"
+                    ),
+                },
+            )
+            self._require_typescript(root)
+            calls: list[TypeScriptBatchRequest] = []
+
+            def counting_batch(request: TypeScriptBatchRequest):
+                calls.append(request)
+                return ts_nav_batch(request)
+
+            registry = CapabilityRegistry(
+                (
+                    TypeScriptInspectionAdapter(batch=counting_batch),
+                    RepositoryInspectionAdapter(),
+                )
+            )
+            context = InspectionContext(
+                identity=RepositoryIdentity(root=root),
+                registry=registry,
+                source_versions=FilesystemVersionReader(root),
+            )
+            bundle = inspect(
+                InspectionRequest(
+                    target=SymbolTarget(name="listOrders", scopes=("src",)),
+                    intent=Intent.REFACTOR,
+                ),
+                context,
+            )
+            self.assertIsInstance(bundle.resolution, ResolvedTarget)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                calls[0].operations, ("references", "implementations")
+            )
+            assert bundle.assessment is not None
+            self.assertEqual(
+                bundle.assessment.by_id("representative_reference").status.value,  # type: ignore[union-attr]
+                "satisfied",
+            )
+
+
+class MixedLanguageAffinityTests(unittest.TestCase):
+    """The resolved declaration, not the request scope, picks the provider."""
+
+    def _require_typescript(self, root: Path) -> None:
+        if not _node_available():
+            self.skipTest("node is required for the TypeScript bridge")
+        if not _link_typescript(root):
+            self.skipTest(
+                "run `npm install` in agentq/ for the pinned typescript dev dependency"
+            )
+
+    def test_python_declaration_in_a_mixed_repo_uses_python_mentions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentq-ts-mixed-py-") as temp:
+            root = _make_repo(
+                Path(temp),
+                {
+                    "src/orders/service.py": (
+                        "def list_orders():\n"
+                        "    return []\n"
+                        "\n"
+                        "value = list_orders()\n"
+                    ),
+                    "src/web/app.ts": "export const marker = 1;\n",
+                },
+            )
+            self._require_typescript(root)
+            bundle = inspect(_request("list_orders"), _context(root))
+            self.assertIsInstance(bundle.resolution, ResolvedTarget)
+            assert isinstance(bundle.resolution, ResolvedTarget)
+            declaration = bundle.resolution.declaration
+            assert declaration is not None
+            self.assertEqual(declaration.path, "src/orders/service.py")
+            assert bundle.collection is not None
+            planned = {item.capability for item in bundle.collection.requests}
+            self.assertIn(Capability.SYNTACTIC_MENTIONS, planned)
+            self.assertNotIn(Capability.SEMANTIC_REFERENCES, planned)
+
+    def test_typescript_declaration_in_a_mixed_repo_uses_semantic_references(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentq-ts-mixed-ts-") as temp:
+            root = _make_repo(
+                Path(temp),
+                {
+                    "src/service.ts": (
+                        "export function listOrders(): number {\n  return 1;\n}\n"
+                    ),
+                    "src/app.ts": (
+                        "import { listOrders } from './service';\n"
+                        "console.log(listOrders());\n"
+                    ),
+                    "src/tools/helper.py": "def helper():\n    return 1\n",
+                },
+            )
+            self._require_typescript(root)
+            bundle = inspect(_request(), _context(root))
+            self.assertIsInstance(bundle.resolution, ResolvedTarget)
+            assert isinstance(bundle.resolution, ResolvedTarget)
+            declaration = bundle.resolution.declaration
+            assert declaration is not None
+            self.assertEqual(declaration.provider, "typescript")
+            assert bundle.collection is not None
+            planned = {item.capability for item in bundle.collection.requests}
+            self.assertIn(Capability.SEMANTIC_REFERENCES, planned)
+            self.assertNotIn(Capability.SYNTACTIC_MENTIONS, planned)
 
 
 if __name__ == "__main__":

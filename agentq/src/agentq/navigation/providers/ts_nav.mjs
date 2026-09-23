@@ -198,7 +198,7 @@ function actionResults(service, action, file, position) {
   const raw = [];
   if (action === 'definition') {
     for (const item of service.getDefinitionAtPosition(file, position) || []) {
-      raw.push(location(service, item.fileName, item.textSpan, {
+      raw.push(declarationLocation(service, item.fileName, item.textSpan, {
         name: item.name,
         kind: item.kind,
         container: item.containerName || '',
@@ -206,7 +206,7 @@ function actionResults(service, action, file, position) {
     }
   } else if (action === 'implementations') {
     for (const item of service.getImplementationAtPosition(file, position) || []) {
-      raw.push(location(service, item.fileName, item.textSpan, {
+      raw.push(declarationLocation(service, item.fileName, item.textSpan, {
         name: item.name,
         kind: item.kind,
         display: item.displayParts ? ts.displayPartsToString(item.displayParts) : '',
@@ -253,6 +253,16 @@ function declarationSpan(service, file, position) {
   const start = source.getLineAndCharacterOfPosition(node.getStart(source));
   const end = source.getLineAndCharacterOfPosition(node.getEnd());
   return { start_line: start.line + 1, end_line: end.line + 1 };
+}
+
+// A declaration location keeps the identifier span as the anchor and adds the
+// enclosing declaration extent, so callers can read the whole body without
+// losing the exact position semantic queries need.
+function declarationLocation(service, fileName, textSpan, extra = {}) {
+  return location(service, fileName, textSpan, {
+    ...extra,
+    declaration_span: declarationSpan(service, fileName, textSpan.start),
+  });
 }
 
 function scopeAllows(fileName, scopes) {
@@ -474,13 +484,18 @@ function runSymbolMode() {
     if (items.length >= navigationLimit) discovery.truncated = true;
     for (const item of items) {
       if (item.name !== symbol || !scopeAllows(item.fileName, scopes)) continue;
-      const candidate = location(project.service, item.fileName, item.textSpan, {
-        name: item.name,
-        kind: item.kind,
-        match_kind: item.matchKind,
-        container: item.containerName || '',
-        config: rel(configPath),
-      });
+      const candidate = declarationLocation(
+        project.service,
+        item.fileName,
+        item.textSpan,
+        {
+          name: item.name,
+          kind: item.kind,
+          match_kind: item.matchKind,
+          container: item.containerName || '',
+          config: rel(configPath),
+        },
+      );
       const key = `${candidate.path}:${candidate.line}:${candidate.column}`;
       if (seen.has(key)) continue;
       seen.add(key);

@@ -10,6 +10,7 @@ from agentq.inspection.contracts import (
     InspectionRequest,
     Intent,
     LocationTarget,
+    PathKind,
     PathTarget,
     RangeTarget,
     RequirementStrength,
@@ -172,13 +173,13 @@ def test_candidate_target_uses_the_symbol_declaration_recipe() -> None:
 
 TARGET_CASES = (
     pytest.param(
-        PathTarget(path="src/orders"),
+        PathTarget(path="src/orders", path_kind=PathKind.DIRECTORY),
         ("target_structure", "owning_package"),
         ("target_source", "requested_source", "declaration_identity"),
         id="directory",
     ),
     pytest.param(
-        PathTarget(path="src/orders.ts"),
+        PathTarget(path="src/orders.ts", path_kind=PathKind.FILE),
         ("target_structure", "target_source", "owning_package"),
         ("requested_source", "declaration_identity"),
         id="file",
@@ -202,7 +203,7 @@ def test_target_kind_requirements(target, present, absent) -> None:
 
 
 def test_directory_target_never_claims_source_completeness() -> None:
-    policy = _policy("edit", PathTarget(path="src"))
+    policy = _policy("edit", PathTarget(path="src", path_kind=PathKind.DIRECTORY))
     assert policy.requirement("target_structure") is not None
     assert policy.requirement("target_source") is None
     assert policy.requirement("requested_source") is None
@@ -210,7 +211,13 @@ def test_directory_target_never_claims_source_completeness() -> None:
 
 
 def test_file_target_has_no_directory_limitation() -> None:
-    policy = _policy("edit", PathTarget(path="src/orders.ts"))
+    policy = _policy("edit", PathTarget(path="src/orders.ts", path_kind=PathKind.FILE))
+    assert not any("directory target" in item for item in policy.limitations)
+
+
+def test_extensionless_file_target_requires_source() -> None:
+    policy = _policy("edit", PathTarget(path="Dockerfile", path_kind=PathKind.FILE))
+    assert policy.requirement("target_source") is not None
     assert not any("directory target" in item for item in policy.limitations)
 
 
@@ -218,7 +225,11 @@ def test_file_target_has_no_directory_limitation() -> None:
     "target_kind,target",
     (
         pytest.param(TargetKind.SYMBOL, SymbolTarget(name="target"), id="symbol"),
-        pytest.param(TargetKind.PATH, PathTarget(path="src"), id="path"),
+        pytest.param(
+            TargetKind.PATH,
+            PathTarget(path="src", path_kind=PathKind.DIRECTORY),
+            id="path",
+        ),
     ),
 )
 def test_policy_records_the_target_kind(target_kind, target) -> None:

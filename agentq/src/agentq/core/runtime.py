@@ -46,29 +46,16 @@ def session_id() -> str | None:
     return stable_id(raw) if raw else None
 
 
-def telemetry_enabled() -> bool:
-    return env_enabled("AGENTQ_TELEMETRY")
-
-
 def default_runtime_root() -> Path:
     uid = os.getuid() if hasattr(os, "getuid") else "user"
     return Path(tempfile.gettempdir()) / f"agentq-{uid}"
-
-
-def telemetry_hot_dir() -> Path:
-    override = os.environ.get("AGENTQ_TELEMETRY_HOT")
-    return (
-        Path(override).expanduser()
-        if override
-        else default_runtime_root() / "_telemetry"
-    )
 
 
 def context_cache_dir() -> Path:
     override = os.environ.get("AGENTQ_CONTEXT_CACHE_HOME")
     if override:
         return Path(override).expanduser()
-    return telemetry_hot_dir().parent / "_context"
+    return default_runtime_root() / "_context"
 
 
 def _writable_runtime_dir(base: Path, digest: str) -> Path | None:

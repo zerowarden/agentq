@@ -20,6 +20,29 @@ from .targets import TARGET_TYPES, InspectionTarget, Intent
 if TYPE_CHECKING:
     from ..debug import TraceRecorder
     from .capability import CapabilityRegistry
+    from .evidence import Admission, Observation
+
+
+@runtime_checkable
+class ExecutionLedger(Protocol):
+    """Per-inspection accounting shared by resolution and collection.
+
+    The ledger bounds actual adapter invocations, admitted observations,
+    distinct source files, and wall-clock time. It is created once per
+    inspection; it never persists and never crosses a request boundary.
+    """
+
+    def exhausted_reason(self) -> str | None:
+        """Why no further adapter invocation may run, or ``None``."""
+        ...
+
+    def charge_call(self) -> None:
+        """Record one actual adapter invocation."""
+        ...
+
+    def admit(self, observations: tuple[Observation, ...]) -> Admission:
+        """Admit observations under the aggregate observation/file bounds."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +134,7 @@ class InspectionContext:
     registry: CapabilityRegistry | None = None
     source_versions: SourceVersionReader | None = None
     trace: TraceRecorder | None = None
+    execution: ExecutionLedger | None = None
 
     @property
     def root(self) -> Path:

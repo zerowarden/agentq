@@ -53,19 +53,20 @@ Use the PATH-installed `agentq`. Choose the narrowest operation matching the evi
 
 | Evidence already known | Preferred operation |
 |---|---|
-| Unknown repository layout | `agentq repo-map` |
 | Unknown/partial identifier, route, string, config key, SQL fragment | `agentq search TERM --path SCOPE --format compact-json` |
-| Filename/path fragment | `agentq files FRAGMENT --path SCOPE` |
-| Exact TypeScript/JavaScript or Python symbol | `agentq inspect SYMBOL --path OWNER` |
-| Known file but unknown structure | `agentq outline FILE --match PATTERN` |
-| Known source range | `agentq read FILE:START-END` |
-| Shared symbol/file/API/contract/schema/config blast radius | `agentq impact TARGET --path SCOPE` |
-| Monorepo package dependants | `agentq dependencies --target PACKAGE --depth 2` |
-| Relevant existing Git state/diff | `agentq git-status`, then bounded `agentq git-diff` |
+| Exact TypeScript/JavaScript or Python symbol | `agentq inspect SYMBOL --path OWNER --intent understand` |
+| Known file or directory, unknown structure | `agentq inspect PATH --intent understand` |
+| Known source range | `agentq inspect FILE --lines START:END` |
+| Declaration ambiguity across candidates | `agentq inspect SYMBOL --candidate ID` using a reported candidate id |
+| Shared symbol/API/contract blast radius | `agentq inspect SYMBOL --path SCOPE --intent impact` |
+| Rename or reference inventory | `agentq inspect SYMBOL --path SCOPE --intent rename` |
+| Unknown repository layout | the host's bounded file listing or `agentq search` for a known manifest marker |
+| Monorepo package dependants | `agentq search` for the package specifier, plus direct manifest inspection |
+| Relevant existing Git state/diff | host Git tooling: `git status`, then a bounded `git diff` |
 
-Follow the stricter policies of installed `repo-exploration`, `semantic-code-navigation`, `change-impact-analysis`, `workspace-dependency-inspection`, `git-change-inspection`, and `targeted-verification` skills when applicable. Consult installed tool documentation when invocation details or coverage are uncertain; do not invent flags or capabilities.
+`agentq inspect` resolves symbols, existing paths, and source ranges only; literal content belongs to `agentq search`. The `agentq` surface is `search`, `inspect`, and `continue`; it no longer exposes Git, outline, dependency, impact, or repo-map commands. Consult `agentq COMMAND --help` when invocation details or coverage are uncertain; do not invent flags or capabilities.
 
-Do not use raw broad `tree`, `find`, `rg`, `grep`, `cat`, or unbounded Git output when `agentq` covers the operation. Use a scoped, bounded fallback only when `agentq` cannot express the operation or actually fails, including being unavailable. Record only evidence limitations that matter to the handoff, not tool transcripts.
+Do not use raw broad `tree`, `find`, `rg`, `grep`, `cat`, or unbounded Git output when `agentq` covers the operation. For Git state and file listing, use the host's bounded tooling because `agentq` does not expose them. Use a scoped, bounded fallback only when `agentq` cannot express the operation or actually fails, including being unavailable. Record only evidence limitations that matter to the handoff, not tool transcripts.
 
 Read complete owning functions or coherent bounded ranges before drawing behavioral conclusions. Resolve relevant truncation or incomplete results. Treat lexical references, import graphs, and package graphs as lower bounds; inspect runtime registration, configuration, generated contracts, or external consumers when implicated.
 
@@ -97,7 +98,7 @@ Inspect only enough context to route the work:
 3. Owning packages, manifests, configuration, and the smallest relevant entry boundary.
 4. Existing conventions for the affected behavior and its tests.
 
-Do not emit a repository tour or run `repo-map` when ownership is already known. Mention dirty paths only when they affect planned anchors, ownership, or integration.
+Do not emit a repository tour when ownership is already known. Mention dirty paths only when they affect planned anchors, ownership, or integration.
 
 Separate **current implementation** from **intended design**. Inspect disagreements among code, tests, documentation, and the user's request rather than silently choosing a convenient source. An intentional change requested by the user is not itself a conflict; an unresolved material disagreement is.
 
