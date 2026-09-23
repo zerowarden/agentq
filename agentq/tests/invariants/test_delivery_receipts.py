@@ -105,7 +105,7 @@ class DeliveryHarness(unittest.TestCase):
 
     def data(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
         result = self.aq(
-            *args, "--format", "json", "--budget", "100000", extra_env=extra_env
+            *args, "--format", "json", extra_env=extra_env
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         return json.loads(result.stdout)
@@ -129,15 +129,32 @@ class CollectorWritesNothingTests(DeliveryHarness):
         from agentq.discovery import ReadRequest, read
         from agentq.git import DiffRequest
         from agentq.git import diff as git_diff
-        from agentq.navigation import InspectRequest, inspect
+        from agentq.inspection.adapters import (
+            default_registry,
+            filesystem_version_reader,
+        )
+        from agentq.inspection.contracts import (
+            InspectionContext,
+            InspectionRequest,
+            Intent,
+            RepositoryIdentity,
+            SymbolTarget,
+        )
+        from agentq.inspection.service import inspect as inspect_service
 
         with mock.patch.dict(os.environ, self.env, clear=False):
             read(ReadRequest(root=self.repo, specs=("pkg/mod.py:1-3",)))
             git_diff(DiffRequest(root=self.repo, selection=DiffSelection()))
-            inspect(
-                InspectRequest(
-                    root=self.repo, target="target", paths=("pkg",), lang="python"
-                )
+            inspect_service(
+                InspectionRequest(
+                    target=SymbolTarget(name="target", scopes=("pkg",)),
+                    intent=Intent.UNDERSTAND,
+                ),
+                InspectionContext(
+                    identity=RepositoryIdentity(root=self.repo),
+                    registry=default_registry(),
+                    source_versions=filesystem_version_reader(self.repo),
+                ),
             )
             self.assertEqual(self.ledger_counts(), (0, 0))
 
@@ -152,8 +169,6 @@ class CollectorWritesNothingTests(DeliveryHarness):
                     "search",
                     "--format",
                     "json",
-                    "--budget",
-                    "100000",
                     "line",
                     "--path",
                     "pkg/mod.py",
@@ -174,31 +189,54 @@ class CollectorWritesNothingTests(DeliveryHarness):
 
 
 class EmissionRecordingTests(DeliveryHarness):
-    def test_small_budget_edit_omits_declaration_then_direct_inspect_returns_it(
+    def test_tight_delivery_budget_omits_declaration_and_direct_inspect_returns_it(
         self,
     ) -> None:
+        from agentq.inspection.adapters import (
+            default_registry,
+            filesystem_version_reader,
+        )
+        from agentq.inspection.budgeting import DeliveryBudget
+        from agentq.inspection.contracts import (
+            InspectionContext,
+            InspectionRequest,
+            Intent,
+            RepositoryIdentity,
+            SymbolTarget,
+        )
+        from agentq.inspection.service import inspect as inspect_service
+
         (self.repo / "pkg" / "edited.py").write_text(
             "class Edited:\n    def method(self) -> int:\n        return 7\n",
             encoding="utf-8",
         )
-        rendered = self.aq(
-            "inspect",
-            "--format",
-            "text",
-            "--budget",
-            "120",
-            "Edited",
-            "--path",
-            "pkg",
-            "--intent",
-            "edit",
-        )
-        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
-        self.assertNotIn("return 7", rendered.stdout)
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            tight = inspect_service(
+                InspectionRequest(
+                    target=SymbolTarget(name="Edited", scopes=("pkg",)),
+                    intent=Intent.EDIT,
+                ),
+                InspectionContext(
+                    identity=RepositoryIdentity(root=self.repo),
+                    registry=default_registry(),
+                    source_versions=filesystem_version_reader(self.repo),
+                    delivery=DeliveryBudget(max_chars=140, envelope_chars=20),
+                ),
+            )
+            assert tight.render is not None and tight.selection is not None
+            self.assertNotIn("return 7", tight.render.text)
+            self.assertTrue(
+                any(
+                    item.reason == "delivery_budget"
+                    for item in tight.selection.omitted
+                )
+            )
         direct = self.data("inspect", "pkg/edited.py", "--lines", "1:3")
-        source = direct["source"]
-        self.assertEqual(len(source["items"][0]["lines"]), 3)
-        self.assertNotIn("read_overlap", source)
+        text = "\n".join(
+            item["variant"]["text"] for item in direct["selection"]["selected"]
+        )
+        self.assertEqual(text.count("\n") + 1, 3)
+        self.assertIn("return 7", text)
 
     def test_partial_window_records_only_emitted_fragments(self) -> None:
         from dataclasses import replace
@@ -325,42 +363,33 @@ class EmissionRecordingTests(DeliveryHarness):
                 cache_module.read_repeat_advice(self.repo, stale_probe, command="read")
             )
 
-    def test_nested_read_suppression_is_context_scoped(self) -> None:
-        # A text inspect first: its JSON sibling would be suppressed at the
-        # whole-operation level, which is not the nested read under test.
-        rendered = self.aq(
-            "inspect",
-            "--format",
-            "text",
-            "--budget",
-            "100000",
-            "target",
-            "--path",
-            "pkg",
-            "--intent",
-            "edit",
-        )
-        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+    def test_inspection_evidence_is_never_suppressed_but_receipted(self) -> None:
+        rendered = self._inspect_text()
         self.assertIn("return 1", rendered.stdout)
         self.assertGreater(self.ledger_counts()[1], 0)
 
-        nested = self.data("inspect", "target", "--path", "pkg", "--intent", "edit")
-        declaration = nested["edit"]["declaration"]["items"][0]
-        self.assertTrue(declaration["suppressed"])
-        self.assertEqual(declaration["lines"], [])
+        repeated = self._inspect_text()
+        self.assertIn("return 1", repeated.stdout)
+        self.assertGreater(self.ledger_counts()[1], 0)
 
-        fresh = self.data(
-            "inspect",
-            "target",
-            "--path",
-            "pkg",
-            "--intent",
-            "edit",
-            extra_env={"AGENTQ_SESSION_ID": "delivery-fresh"},
+    def _inspect_text(self):
+        return subprocess.run(
+            [
+                str(AGENTQ),
+                "inspect",
+                "--format",
+                "text",
+                "target",
+                "--path",
+                "pkg",
+                "--intent",
+                "edit",
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            cwd=self.repo,
         )
-        declaration = fresh["edit"]["declaration"]["items"][0]
-        self.assertFalse(declaration.get("suppressed", False))
-        self.assertTrue(declaration["lines"])
 
     def test_failed_write_flush_and_partial_create_no_receipt(self) -> None:
         from agentq.cli import emit

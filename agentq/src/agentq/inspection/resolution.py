@@ -31,7 +31,9 @@ from .contracts import (
     AcquiredEvidence,
     AcquisitionRecord,
     AmbiguousTarget,
+    AvailabilityStatus,
     CandidateTarget,
+    CapabilityEntry,
     CapabilityReport,
     CollectionStatus,
     DeclarationCandidate,
@@ -63,29 +65,33 @@ def resolve(
 ) -> ResolutionResult:
     """Resolve one request against the applicable capabilities."""
     target = request.target
-    if isinstance(target, (PathTarget, RangeTarget)):
-        return ResolvedTarget(
-            target=target,
-            method=SelectionMethod.DIRECT_TARGET,
-            candidate_coverage=typed_coverage(UNKNOWN),
-        )
-    if isinstance(target, LocationTarget):
-        return _availability_blocker(
-            target,
-            capabilities,
-            Capability.RESOLVE_LOCATION,
-            message=(
-                "location resolution is unavailable; resolve the entity by "
-                "symbol or use an explicit source range"
-            ),
-        ) or _resolve_location(request, target, context)
-    if isinstance(target, CandidateTarget):
-        return _availability_blocker(
-            target, capabilities, Capability.FIND_DECLARATIONS
-        ) or _resolve_candidate(request, target, context)
-    return _availability_blocker(
-        target, capabilities, Capability.FIND_DECLARATIONS
-    ) or _resolve_candidates(request, target, target.scopes, context)
+    match target:
+        case PathTarget() | RangeTarget():
+            return ResolvedTarget(
+                target=target,
+                method=SelectionMethod.DIRECT_TARGET,
+                candidate_coverage=typed_coverage(UNKNOWN),
+            )
+        case LocationTarget():
+            return _availability_blocker(
+                target,
+                capabilities,
+                Capability.RESOLVE_LOCATION,
+                message=(
+                    "location resolution is unavailable; resolve the entity by "
+                    "symbol or use an explicit source range"
+                ),
+            ) or _resolve_location(request, target, capabilities, context)
+        case CandidateTarget():
+            return _availability_blocker(
+                target, capabilities, Capability.FIND_DECLARATIONS
+            ) or _resolve_candidate(request, target, capabilities, context)
+        case _:
+            return _availability_blocker(
+                target, capabilities, Capability.FIND_DECLARATIONS
+            ) or _resolve_candidates(
+                request, target, target.scopes, capabilities, context
+            )
 
 
 def _availability_blocker(
@@ -151,7 +157,12 @@ def _acquire(
 
 @dataclass(frozen=True)
 class _Declarations:
-    """One declaration acquisition parsed into selectable candidates."""
+    """One declaration acquisition parsed into selectable candidates.
+
+    ``unavailable`` records applicable adapters whose runtime or project
+    configuration could not run: their missing evidence must keep a candidate
+    list from claiming completeness even when another adapter answered.
+    """
 
     acquisitions: tuple[AcquiredEvidence, ...]
     candidates: tuple[DeclarationCandidate, ...]
@@ -159,29 +170,57 @@ class _Declarations:
     coverage: Coverage
     blocker: UnresolvedReason | None
     skipped: bool
+    unavailable: tuple[CapabilityEntry, ...] = ()
 
 
 def _read_declarations(
     acquisitions: tuple[AcquiredEvidence, ...],
+    unavailable: tuple[CapabilityEntry, ...] = (),
 ) -> _Declarations:
     records = tuple(acquired.record for acquired in acquisitions)
     candidates, skipped_diagnostics, skipped = _collect_candidates(acquisitions)
+    diagnostics = list(_diagnostics_from(acquisitions, skipped_diagnostics))
+    coverage = _candidate_coverage(acquisitions, skipped=skipped)
+    for entry in unavailable:
+        diagnostics.append(
+            Diagnostic(
+                message=(
+                    f"{entry.provider or 'adapter'} cannot provide "
+                    f"{'declaration candidates'}: "
+                    f"{entry.reason or 'capability unavailable'}"
+                ),
+                code=PROVIDER_UNAVAILABLE,
+                severity="warning",
+            )
+        )
+        coverage = coverage.with_failure(PROVIDER_UNAVAILABLE, status=PARTIAL)
     return _Declarations(
         acquisitions=acquisitions,
         candidates=candidates,
-        diagnostics=_diagnostics_from(acquisitions, skipped_diagnostics),
-        coverage=_candidate_coverage(acquisitions, skipped=skipped),
+        diagnostics=tuple(diagnostics),
+        coverage=coverage,
         blocker=_blocking_reason(records),
         skipped=skipped,
+        unavailable=unavailable,
+    )
+
+
+def _unavailable_entries(
+    capabilities: CapabilityReport, capability: Capability
+) -> tuple[CapabilityEntry, ...]:
+    return tuple(
+        entry
+        for entry in capabilities.entries_for(capability)
+        if entry.status is AvailabilityStatus.UNAVAILABLE
     )
 
 
 def _terminal_unresolved(
     target: InspectionTarget, declarations: _Declarations
 ) -> UnresolvedTarget | None:
-    """Failures and unattributed evidence end resolution before selection."""
+    """Failures, unavailable adapters, and unattributed evidence end resolution."""
     reason: UnresolvedReason | None = declarations.blocker
-    if reason is None and declarations.skipped:
+    if reason is None and (declarations.skipped or declarations.unavailable):
         reason = UnresolvedReason.INCOMPLETE
     if reason is None:
         return None
@@ -299,11 +338,21 @@ def _resolve_candidates(
     request: InspectionRequest,
     target: InspectionTarget,
     scope: tuple[str, ...],
+    capabilities: CapabilityReport,
     context: InspectionContext,
 ) -> ResolutionResult:
     declarations = _read_declarations(
-        _acquire(Capability.FIND_DECLARATIONS, target, scope, request, context)
+        _acquire(Capability.FIND_DECLARATIONS, target, scope, request, context),
+        _unavailable_entries(capabilities, Capability.FIND_DECLARATIONS),
     )
+    if len(declarations.candidates) > 1:
+        return AmbiguousTarget(
+            target=target,
+            candidates=declarations.candidates,
+            candidate_total=len(declarations.candidates),
+            count_quality=_count_quality(declarations.coverage),
+            candidate_coverage=declarations.coverage,
+        )
     terminal = _terminal_unresolved(target, declarations)
     if terminal is not None:
         return terminal
@@ -312,14 +361,6 @@ def _resolve_candidates(
             target=target,
             reason=UnresolvedReason.NOT_FOUND,
             diagnostics=declarations.diagnostics,
-            candidate_coverage=declarations.coverage,
-        )
-    if len(declarations.candidates) > 1:
-        return AmbiguousTarget(
-            target=target,
-            candidates=declarations.candidates,
-            candidate_total=len(declarations.candidates),
-            count_quality=_count_quality(declarations.coverage),
             candidate_coverage=declarations.coverage,
         )
     candidate = declarations.candidates[0]
@@ -349,10 +390,12 @@ def _count_quality(coverage: Coverage) -> str:
 def _resolve_candidate(
     request: InspectionRequest,
     target: CandidateTarget,
+    capabilities: CapabilityReport,
     context: InspectionContext,
 ) -> ResolutionResult:
     declarations = _read_declarations(
-        _acquire(Capability.FIND_DECLARATIONS, target, target.scopes, request, context)
+        _acquire(Capability.FIND_DECLARATIONS, target, target.scopes, request, context),
+        _unavailable_entries(capabilities, Capability.FIND_DECLARATIONS),
     )
     terminal = _terminal_unresolved(target, declarations)
     if terminal is not None:
@@ -408,10 +451,12 @@ def _resolve_candidate(
 def _resolve_location(
     request: InspectionRequest,
     target: LocationTarget,
+    capabilities: CapabilityReport,
     context: InspectionContext,
 ) -> ResolutionResult:
     declarations = _read_declarations(
-        _acquire(Capability.RESOLVE_LOCATION, target, (), request, context)
+        _acquire(Capability.RESOLVE_LOCATION, target, (), request, context),
+        _unavailable_entries(capabilities, Capability.RESOLVE_LOCATION),
     )
     terminal = _terminal_unresolved(target, declarations)
     if terminal is not None:

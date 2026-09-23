@@ -9,12 +9,12 @@ policy change rather than an implicit side effect of rendering.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from agentq.core import ContractError, canonical_json, require_int
+from agentq.core import ContractError, require_int
 
 if TYPE_CHECKING:
-    from .contracts import Capability, EvidenceVariant
+    from .contracts import Capability
 
 DEFAULT_DELIVERY_CHARS = 12_000
 DEFAULT_ENVELOPE_CHARS = 256
@@ -88,22 +88,9 @@ class DeliveryBudget:
         """Capacity left for evidence after the response envelope allowance."""
         return max(0, self.max_chars - self.envelope_chars)
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "max_chars": self.max_chars,
             "envelope_chars": self.envelope_chars,
             "available_chars": self.available_chars(),
         }
-
-
-def evidence_cost(variant: EvidenceVariant, output_format: str) -> int:
-    """Incremental cost of one selected variant in the requested format.
-
-    Character counts are measured serialized characters in exactly one named
-    format; they are never presented as a token estimate.
-    """
-    if output_format not in DELIVERY_FORMATS:
-        raise ContractError(f"unsupported delivery format: {output_format!r}")
-    if output_format == "text":
-        return len(variant.text) + 2 * variant.text.count("\n")
-    return len(canonical_json(variant.to_wire()))

@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 from agentq.core import COMPLETE, Coverage, typed_coverage
+from agentq.inspection.acquisition import acquire, plan_collection
 from agentq.inspection.budgeting import DeliveryBudget
 from agentq.inspection.contracts import (
     AmbiguousTarget,
@@ -16,6 +17,7 @@ from agentq.inspection.contracts import (
     CollectionStatus,
     EvidenceRole,
     InspectionRequest,
+    Intent,
     PathTarget,
     RangeTarget,
     RepresentationKind,
@@ -26,12 +28,18 @@ from agentq.inspection.contracts import (
     UnresolvedTarget,
 )
 from agentq.inspection.debug import TraceRecorder
-from agentq.inspection.scoring import ScoringProfile
-from agentq.inspection.selection import SelectionProfile
-from agentq.inspection.service import inspect
+from agentq.inspection.features import extract_features
+from agentq.inspection.policy import POLICY_PROFILE, compile_policy
+from agentq.inspection.resolution import resolve
+from agentq.inspection.scoring import DEFAULT_SCORING, ScoringProfile, score_evidence
+from agentq.inspection.selection import SelectionProfile, select_evidence
+from agentq.inspection.service import (
+    describe_capabilities,
+    inspect,
+    normalize_request,
+)
 from tests.support.inspection_fakes import (
     CHANGED_VERSION,
-    DECLARATION_BODY,
     DEFAULT_PATH,
     PACKAGE_PATH,
     REFERENCE_PATH,
@@ -79,7 +87,7 @@ class PipelineTraversalTests(unittest.TestCase):
         assert bundle.collection is not None
         assert bundle.selection is not None
         assert bundle.assessment is not None
-        self.assertEqual(bundle.policy.profile, "intent-policy-v0")  # type: ignore[union-attr]
+        self.assertEqual(bundle.policy.profile, POLICY_PROFILE)  # type: ignore[union-attr]
         collected = {item.capability for item in bundle.collection.requests}
         self.assertIn(Capability.READ_SOURCE, collected)
         self.assertIn(Capability.SEMANTIC_REFERENCES, collected)
@@ -122,9 +130,18 @@ class PipelineTraversalTests(unittest.TestCase):
         self.assertEqual(plain.selection, debugged.selection)
 
     def test_bundle_render_never_exceeds_the_delivery_budget(self) -> None:
-        context = fake_context(default_symbol_handler())
-        bundle = inspect(symbol_request(), context)
-        self.assertLessEqual(bundle.render.chars, context.delivery.max_chars)  # type: ignore[union-attr]
+        for output_format in ("text", "json", "compact-json"):
+            with self.subTest(output_format=output_format):
+                handler = default_symbol_handler()
+                context = fake_context(handler, output_format=output_format)
+                bundle = inspect(symbol_request(), context)
+                assert bundle.render is not None
+                self.assertLessEqual(bundle.render.chars, context.delivery.max_chars)
+                assert bundle.selection is not None
+                self.assertLessEqual(
+                    bundle.selection.measured_cost,
+                    context.delivery.available_chars(),
+                )
 
     def test_adapter_replacement_keeps_the_pipeline_contract(self) -> None:
         handler = default_symbol_handler(name="fake-alt")
@@ -237,7 +254,7 @@ class StageIsolationTests(unittest.TestCase):
         custom_profile = ScoringProfile(
             profile="scoring-test-v1",
             binding_bonus=5,
-            role_priorities=((EvidenceRole.REFERENCE, 8),),
+            intent_priorities=((Intent.EDIT, ((EvidenceRole.REFERENCE, 8),)),),
         )
         custom_bundle = inspect(
             symbol_request(),
@@ -267,6 +284,7 @@ class StageIsolationTests(unittest.TestCase):
             selection=SelectionProfile(
                 profile="selection-test-v1",
                 reserve_required=True,
+                role_diversity=False,
                 fill_by_score=False,
             ),
         )
@@ -281,9 +299,95 @@ class StageIsolationTests(unittest.TestCase):
             RequirementStatus.UNSATISFIED,
         )
 
+    def test_scorer_replacement_runs_on_one_unchanged_evidence_pool(self) -> None:
+        handler = default_symbol_handler()
+        context = fake_context(handler)
+        request = normalize_request(symbol_request(), context)
+        report = describe_capabilities(request, context)
+        resolution = resolve(request, report, context)
+        assert isinstance(resolution, ResolvedTarget)
+        policy = compile_policy(request, resolution)
+        plan = plan_collection(
+            policy,
+            resolution,
+            report,
+            context.limits,
+            request_id=request.request_id,
+            evidence_scopes=request.evidence_scopes,
+        )
+        pool = acquire(plan, context)
+        calls_before = tuple(handler.calls)
+        features = extract_features(pool)
+
+        default = score_evidence(features, DEFAULT_SCORING, intent=request.intent)
+        custom = ScoringProfile(
+            profile="scoring-isolation-v1",
+            binding_bonus=9,
+            intent_priorities=((Intent.EDIT, ((EvidenceRole.REFERENCE, 1),)),),
+        )
+        replaced = score_evidence(features, custom, intent=request.intent)
+
+        self.assertEqual(calls_before, tuple(handler.calls))
+        self.assertEqual(
+            tuple(item.observation_id for item in default),
+            tuple(item.observation_id for item in replaced),
+        )
+        self.assertNotEqual(
+            tuple(item.score.total for item in default),
+            tuple(item.score.total for item in replaced),
+        )
+        self.assertEqual(len(features), len(pool.observations))
+
+    def test_selector_replacement_never_calls_providers(self) -> None:
+        handler = default_symbol_handler()
+        context = fake_context(handler)
+        request = normalize_request(symbol_request(), context)
+        report = describe_capabilities(request, context)
+        resolution = resolve(request, report, context)
+        assert isinstance(resolution, ResolvedTarget)
+        policy = compile_policy(request, resolution)
+        plan = plan_collection(
+            policy,
+            resolution,
+            report,
+            context.limits,
+            request_id=request.request_id,
+            evidence_scopes=request.evidence_scopes,
+        )
+        pool = acquire(plan, context)
+        scores = score_evidence(
+            extract_features(pool), DEFAULT_SCORING, intent=request.intent
+        )
+        calls_before = tuple(handler.calls)
+
+        first = select_evidence(pool, scores, policy, context.delivery)
+        second = select_evidence(
+            pool,
+            scores,
+            policy,
+            context.delivery,
+            profile=SelectionProfile(
+                profile="selection-isolation-v1",
+                reserve_required=True,
+                role_diversity=False,
+                fill_by_score=True,
+            ),
+        )
+
+        self.assertEqual(calls_before, tuple(handler.calls))
+        self.assertTrue(first.selected)
+        self.assertTrue(second.selected)
+        self.assertEqual(first.profile, "selection-v1")
+        self.assertEqual(second.profile, "selection-isolation-v1")
+        required_missing = [
+            item for item in first.selected if item.reason == "required"
+        ]
+        self.assertTrue(required_missing)
+
     def test_tight_budget_reports_missing_required_source(self) -> None:
-        exact_cost = len(DECLARATION_BODY) + 2 * DECLARATION_BODY.count("\n")
-        budget = DeliveryBudget(max_chars=exact_cost - 10, envelope_chars=4)
+        # The fake fixture's declaration signature fits in 96 serialized
+        # characters; its exact source body does not fit the 100 available here.
+        budget = DeliveryBudget(max_chars=110, envelope_chars=10)
         bundle = inspect(
             symbol_request(),
             fake_context(default_symbol_handler(), delivery=budget),
@@ -337,6 +441,10 @@ class RenderFormatTests(unittest.TestCase):
         self.assertEqual(payload["resolution"]["outcome"], "resolved")
         self.assertIn("selection", payload)
         self.assertEqual(payload["selection"]["measured_cost"], bundle.selection.measured_cost)  # type: ignore[index]
+        selected = payload["selection"]["selected"]
+        self.assertTrue(selected)
+        self.assertIn("function listOrders", selected[0]["variant"]["text"])
+        self.assertIn("contributions", selected[0])
 
     def test_partial_collection_coverage_flows_into_the_bundle(self) -> None:
         handler = default_symbol_handler(name="fake-partial")

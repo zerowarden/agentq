@@ -3,3 +3,5 @@
 .venv/
 .ruff_cache/
 *.egg-info/
+
+node_modules/

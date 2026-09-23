@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from time import perf_counter
-from typing import Any, cast
+from typing import cast
 
 from agentq.core import ContractError, require_int, require_str
 
@@ -51,7 +51,7 @@ class TraceEvent:
         require_int(self.sequence, "trace event sequence", minimum=1)
         require_str(self.stage, "trace event stage")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "sequence": self.sequence,
             "stage": self.stage,
@@ -73,7 +73,7 @@ class InspectionTrace:
         require_int(self.dropped, "trace dropped count", minimum=0)
         require_int(self.max_events, "trace max events", minimum=1)
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "schema": TRACE_SCHEMA,
             "max_events": self.max_events,
@@ -89,26 +89,24 @@ def _clean_text(value: str, max_chars: int) -> str:
     return collapsed[: max_chars - 3] + "..."
 
 
-def _sanitize_value(value: Any, max_chars: int) -> TraceValue:
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    if isinstance(value, float):
+def _sanitize_value(value: object, max_chars: int) -> TraceValue:
+    if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
         return _clean_text(value, max_chars)
     if isinstance(value, Mapping):
-        mapping = cast("Mapping[Any, Any]", value)
+        mapping = cast("Mapping[object, object]", value)
         return {
             _clean_text(str(key), max_chars): _sanitize_scalar(item, max_chars)
             for key, item in mapping.items()
         }
     if isinstance(value, Sequence):
-        sequence = cast("Sequence[Any]", value)
+        sequence = cast("Sequence[object]", value)
         return tuple(_sanitize_scalar(item, max_chars) for item in sequence)
     return type(value).__name__
 
 
-def _sanitize_scalar(value: Any, max_chars: int) -> TraceScalar:
+def _sanitize_scalar(value: object, max_chars: int) -> TraceScalar:
     sanitized = _sanitize_value(value, max_chars)
     if isinstance(sanitized, (tuple, dict, list)):
         raise ContractError("trace nested values must be scalar")
@@ -136,11 +134,11 @@ class TraceRecorder:
     ) -> None:
         require_int(max_events, "trace max_events", minimum=1)
         require_int(max_value_chars, "trace max_value_chars", minimum=8)
-        self._max_events = max_events
-        self._max_value_chars = max_value_chars
+        self._max_events: int = max_events
+        self._max_value_chars: int = max_value_chars
         self._events: list[TraceEvent] = []
-        self._dropped = 0
-        self._sequence = 0
+        self._dropped: int = 0
+        self._sequence: int = 0
 
     def record(
         self,

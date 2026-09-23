@@ -88,12 +88,14 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         self.assertGreater(text_parts["advice_chars"], 0)
 
     def test_text_output_records_exact_attribution_and_view(self) -> None:
+        source = self.repo / "packages/a/src/attribution.py"
+        source.write_text("alpha = 1\nbeta = 2\ngamma = 3\n", encoding="utf-8")
         argv = [
             str(AGENTQ),
             "inspect",
             "--format",
             "text",
-            "packages/a/src/index.ts",
+            "packages/a/src/attribution.py",
             "--lines",
             "1:3",
         ]
@@ -108,7 +110,7 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             .splitlines()[-1]
         )
         self.assertEqual(event["output_format"], "text")
-        self.assertEqual(event["output_view"], "source-windows")
+        self.assertEqual(event["output_view"], "inspection")
         self.assertTrue(event["output_attributed"])
         self.assertEqual(sum(event["output_attribution"].values()), len(visible))
         self.assertGreater(event["output_attribution"]["unique_evidence_chars"], 0)
@@ -371,8 +373,6 @@ class TelemetryCliTests(AgentQIntegrationHarness):
                     "OldName",
                     "--format",
                     "json",
-                    "--budget",
-                    "100000",
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -429,8 +429,8 @@ class TelemetryCliTests(AgentQIntegrationHarness):
             "inspect", "packages/a/src/index.ts", "--lines", "1:3",
             extra_env=disabled_env,
         )
-        self.assertTrue(first_inspect["source"]["items"][0]["lines"])
-        self.assertTrue(second_inspect["source"]["items"][0]["lines"])
+        self.assertTrue(first_inspect["selection"]["selected"])
+        self.assertTrue(second_inspect["selection"]["selected"])
         self.assertFalse(second_inspect.get("repeat_suppressed", False))
 
         self.assertFalse(disabled_hot.exists())
@@ -548,27 +548,26 @@ class TelemetryCliTests(AgentQIntegrationHarness):
         self.assertEqual(stats["tool_errors"], 0)
         self.assertEqual(stats["project_commands"]["failed"], 1)
 
-    def test_inspect_read_overlap_is_version_aware_and_private(self) -> None:
+    def test_repeated_overlapping_inspection_reemits_and_stays_private(
+        self,
+    ) -> None:
         session = {**self.env, "AGENTQ_SESSION_ID": "read-overlap"}
-        first = self.data(
-            "inspect", "packages/a/src/index.ts", "--lines", "1:3", extra_env=session
-        )
-        self.assertNotIn("read_overlap", first["source"])
-        second = self.data(
-            "inspect", "packages/a/src/index.ts", "--lines", "2:4", extra_env=session
-        )
-        self.assertEqual(second["source"]["read_overlap"]["overlap_lines"], 2)
-        self.assertEqual(second["source"]["read_overlap"]["scope"], "session")
-
-        raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("packages/a/src/index.ts", raw)
-
-        path = self.repo / "packages/a/src/index.ts"
-        path.write_text(
-            path.read_text(encoding="utf-8") + "\nexport const versionChanged = 1\n",
+        source = self.repo / "packages/a/src/repeat_overlap.py"
+        source.write_text(
+            "\n".join(f"line{index} = {index}" for index in range(1, 7)) + "\n",
             encoding="utf-8",
         )
-        third = self.data(
-            "inspect", "packages/a/src/index.ts", "--lines", "2:4", extra_env=session
+        first = self.data(
+            "inspect", "packages/a/src/repeat_overlap.py", "--lines", "1:3",
+            extra_env=session,
         )
-        self.assertNotIn("read_overlap", third["source"])
+        second = self.data(
+            "inspect", "packages/a/src/repeat_overlap.py", "--lines", "2:4",
+            extra_env=session,
+        )
+        for payload in (first, second):
+            with self.subTest(payload=payload["request"]["request_id"]):
+                self.assertTrue(payload["selection"]["selected"])
+
+        raw = (self.telemetry / "events.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("packages/a/src/repeat_overlap.py", raw)

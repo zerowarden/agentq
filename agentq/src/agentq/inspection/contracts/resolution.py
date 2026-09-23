@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
 
 from agentq.core import (
     ContractError,
@@ -77,7 +77,7 @@ class DeclarationCandidate:
         require_str(self.source_version, "declaration candidate source_version")
         optional_str(self.scope, "declaration candidate scope")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "candidate_id": self.candidate_id,
             "provider": self.provider,
@@ -132,7 +132,7 @@ class ResolvedTarget:
                 "direct target resolution must not select a declaration"
             )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "outcome": "resolved",
             "method": self.method.value,
@@ -176,7 +176,7 @@ class AmbiguousTarget:
                 self, "candidate_coverage", typed_from_wire(self.candidate_coverage)
             )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "outcome": "ambiguous",
             "target": self.target.to_wire(),
@@ -212,7 +212,7 @@ class UnresolvedTarget:
                 self, "candidate_coverage", typed_from_wire(self.candidate_coverage)
             )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "outcome": "unresolved",
             "reason": self.reason.value,
@@ -225,7 +225,7 @@ class UnresolvedTarget:
 ResolutionResult = ResolvedTarget | AmbiguousTarget | UnresolvedTarget
 
 
-def resolution_to_wire(result: ResolutionResult) -> dict[str, Any]:
+def resolution_to_wire(result: ResolutionResult) -> dict[str, object]:
     return result.to_wire()
 
 

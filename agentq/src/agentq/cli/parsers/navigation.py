@@ -6,10 +6,9 @@ import argparse
 
 from ..commands.navigation import run_continue, run_inspect
 from ..registry import CommandSpec, Group
-from .options import (
-    line_range,
-    positive_int,
-)
+from .options import line_range, positive_int
+
+INTENTS = ("understand", "edit", "rename", "refactor", "impact")
 
 
 def _continue_options(p: argparse.ArgumentParser) -> None:
@@ -19,12 +18,22 @@ def _continue_options(p: argparse.ArgumentParser) -> None:
 
 
 def _inspect_options(p: argparse.ArgumentParser) -> None:
-    p.add_argument("target")
+    p.add_argument(
+        "target",
+        help=(
+            "symbol name, repository-relative path, or a symbol:/path: prefixed "
+            "selector when the string is ambiguous"
+        ),
+    )
     p.add_argument(
         "--intent",
-        choices=("understand", "edit"),
+        choices=INTENTS,
         default="understand",
-        help="understand: declaration and references; edit: adds declaration body, tests, owning package, and verification scope",
+        help=(
+            "evidence emphasis: understand context, edit source and tests, "
+            "rename references and mentions, refactor implementations, or impact "
+            "dependents and ownership"
+        ),
     )
     p.add_argument(
         "--line",
@@ -44,12 +53,23 @@ def _inspect_options(p: argparse.ArgumentParser) -> None:
         help="explicit START:END source range when TARGET is a file; repeatable",
     )
     p.add_argument(
+        "--column",
+        type=positive_int,
+        default=None,
+        help="one-based column with a single --line; expresses an exact location",
+    )
+    p.add_argument(
         "--candidate",
         metavar="ID",
         help=(
-            "select a declaration candidate by its opaque candidate id "
-            "(requires --intent edit)"
+            "select a declaration candidate by the opaque id issued for this "
+            "repository state; applies to symbol targets under any intent"
         ),
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="write structured stage trace records to stderr",
     )
 
 
@@ -67,7 +87,7 @@ COMMANDS = (
     ),
     CommandSpec(
         "inspect",
-        help="single-entry repository inspection for symbols, literals, files, or source anchors",
+        help="single-entry repository inspection for symbols, paths, or source ranges",
         execute=run_inspect,
         groups=(Group.COMMON, Group.SCOPE),
         configure=_inspect_options,

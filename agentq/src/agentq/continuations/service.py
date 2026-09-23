@@ -34,7 +34,6 @@ from agentq.persistence import (
 
 from .models import (
     ContinuationRecord,
-    QueryFollowUp,
     display_fields,
     is_typed_block,
     parse_block,
@@ -222,11 +221,7 @@ def dispatch_argv(record: ContinuationRecord) -> list[str]:
     # request options while this module is already loaded.
     from agentq.requests import request_argv
 
-    if isinstance(record, QueryFollowUp):
-        return request_argv(record.request)
-    raise AgentQError(
-        "artifact page continuations are served by their page handler, not by argv"
-    )
+    return request_argv(record.request)
 
 
 def display_command(record: ContinuationRecord) -> str | None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agentq.core import (
     ContractError,
@@ -84,7 +84,7 @@ class SourceVersion:
         require_str(self.version, "source version value")
         require_str(self.method, "source version method")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {"path": self.path, "version": self.version, "method": self.method}
 
 
@@ -104,7 +104,7 @@ class DeclarationPayload:
             raise ContractError("declaration payload span must be a SourceSpan")
         optional_str(self.scope, "declaration payload scope")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "name": self.name,
             "kind": self.kind,
@@ -130,7 +130,7 @@ class ReferencePayload:
         optional_str(self.domain, "reference payload domain")
         optional_str(self.configuration, "reference payload configuration")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "relationship": self.relationship,
             "text": self.text,
@@ -152,7 +152,7 @@ class SourceWindowPayload:
             raise ContractError("source window span must be a SourceSpan")
         require_bool(self.truncated, "source window truncated")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "text": self.text,
             "span": self.span.to_wire(),
@@ -172,7 +172,7 @@ class OutlineSymbolRef:
         if not isinstance(self.span, SourceSpan):
             raise ContractError("outline symbol span must be a SourceSpan")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {"name": self.name, "kind": self.kind, "span": self.span.to_wire()}
 
 
@@ -190,7 +190,7 @@ class OutlinePayload:
             )
         require_bool(self.truncated, "outline payload truncated")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "symbols": [item.to_wire() for item in self.symbols],
             "truncated": self.truncated,
@@ -213,7 +213,7 @@ class PackagePayload:
         ):
             raise ContractError("package payload scripts must be a tuple of strings")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "path": self.path,
             "kind": self.kind,
@@ -231,7 +231,7 @@ class MentionPayload:
         require_str(self.text, "mention payload text", allow_empty=True)
         optional_str(self.domain, "mention payload domain")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {"text": self.text, "domain": self.domain}
 
 
@@ -253,7 +253,7 @@ PAYLOAD_TYPES = (
 )
 
 
-def payload_to_wire(payload: ObservationPayload) -> dict[str, Any]:
+def payload_to_wire(payload: ObservationPayload) -> dict[str, object]:
     return payload.to_wire()
 
 
@@ -295,7 +295,7 @@ class Observation:
                 return stamp.version
         return None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "observation_id": self.observation_id,
             "kind": self.kind.value,
@@ -333,7 +333,7 @@ class EvidenceVariant:
         if self.span is not None and not isinstance(self.span, SourceSpan):
             raise ContractError("evidence variant span must be a SourceSpan")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "variant_id": self.variant_id,
             "observation_id": self.observation_id,
@@ -365,8 +365,11 @@ class EvidencePool:
         require_str(self.request_id, "evidence pool request id")
         if not isinstance(self.coverage, Coverage):
             object.__setattr__(self, "coverage", typed_from_wire(self.coverage))
-        for name in ("acquisitions", "observations", "variants"):
-            values = getattr(self, name)
+        for name, values in (
+            ("acquisitions", self.acquisitions),
+            ("observations", self.observations),
+            ("variants", self.variants),
+        ):
             if not is_instance_of(values, tuple):
                 raise ContractError(f"evidence pool {name} must be a tuple")
         if not all(is_instance_of(item, Diagnostic) for item in self.limitations):

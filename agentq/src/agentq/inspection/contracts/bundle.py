@@ -1,9 +1,6 @@
-"""The final inspection bundle and its rendered projection."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from agentq.core import (
     ContractError,
@@ -17,7 +14,7 @@ from agentq.core import (
 
 from ..budgeting import DELIVERY_FORMATS
 from .collection import CollectionPlan
-from .evaluation import PolicyAssessment, SelectionPlan
+from .evaluation import PolicyAssessment, SelectionPlan, selected_evidence_to_wire
 from .policy import EvidencePolicy
 from .requests import InspectionRequest
 from .resolution import ResolutionResult, ResolvedTarget, resolution_to_wire
@@ -87,7 +84,7 @@ class InspectionBundle:
         ):
             raise ContractError("inspection bundle gaps must be Diagnostics")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "schema": self.schema,
             "request": self.request.to_wire(),
@@ -125,12 +122,7 @@ class InspectionBundle:
                 {
                     "profile": self.selection.profile,
                     "selected": [
-                        {
-                            "observation_id": item.observation_id,
-                            "variant_id": item.variant_id,
-                            "reason": item.reason,
-                            "score": item.score,
-                        }
+                        selected_evidence_to_wire(item)
                         for item in self.selection.selected
                     ],
                     "omitted": [

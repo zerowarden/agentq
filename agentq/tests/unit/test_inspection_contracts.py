@@ -245,7 +245,9 @@ class ScoreContractTests(unittest.TestCase):
         profile = ScoringProfile(profile="test-v1", binding_bonus=2)
         scored = {
             item.observation_id: item
-            for item in score_evidence((reference, declaration), profile)
+            for item in score_evidence(
+                (reference, declaration), profile, intent=Intent.EDIT
+            )
         }
         self.assertEqual(scored["obs-ref"].score.contribution("binding_resolved"), 2)
         self.assertIsNone(scored["obs-decl"].score.contribution("binding_resolved"))
@@ -260,21 +262,24 @@ class ScoreContractTests(unittest.TestCase):
         profile = ScoringProfile(
             profile="test-v1",
             binding_bonus=2,
-            role_priorities=((EvidenceRole.REFERENCE, 6),),
+            intent_priorities=((Intent.UNDERSTAND, ((EvidenceRole.REFERENCE, 6),)),),
         )
-        scored = score_evidence((features,), profile)[0]
+        scored = score_evidence((features,), profile, intent=Intent.UNDERSTAND)[0]
         self.assertEqual(scored.score.total, 8)
-        self.assertEqual(scored.score.contribution("role_priority"), 6)
+        self.assertEqual(scored.score.contribution("reference_priority"), 6)
         self.assertEqual(scored.score.contribution("binding_resolved"), 2)
 
     def test_unknown_features_score_zero(self) -> None:
         features = EvidenceFeatures(
-            observation_id="obs-ref",
-            role=EvidenceRole.REFERENCE,
-            observation_kind=ObservationKind.SEMANTIC_REFERENCE,
+            observation_id="obs-unknown",
+            role=None,
+            observation_kind=ObservationKind.DECLARATION,
         )
         profile = ScoringProfile(profile="test-v1")
-        self.assertEqual(score_evidence((features,), profile)[0].score.total, 0)
+        self.assertEqual(
+            score_evidence((features,), profile, intent=Intent.EDIT)[0].score.total,
+            0,
+        )
 
 
 class DecisionContractTests(unittest.TestCase):

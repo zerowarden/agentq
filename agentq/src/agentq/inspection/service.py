@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from agentq.core import ContractError, merge_typed
+from agentq.core import merge_typed
 
 from .acquisition import acquire, plan_collection
 from .capabilities import empty_capability_report
@@ -123,11 +123,19 @@ def inspect(
 
     with recorder.stage("scoring") as span:
         features = extract_features(pool)
-        scores = score_evidence(features, scoring)
+        scores = score_evidence(features, scoring, intent=normalized.intent)
         span.note(
             profile=scoring.profile,
             scored=len(scores),
             scores={item.observation_id: item.score.total for item in scores},
+            contributions={
+                item.observation_id: ",".join(
+                    f"{contribution.name}={contribution.value}"
+                    for contribution in item.score.contributions
+                )
+                for item in scores
+                if item.score.contributions
+            },
         )
 
     with recorder.stage("selection") as span:
@@ -139,7 +147,7 @@ def inspect(
             output_format=context.presentation.output_format,
             profile=selection,
         )
-        assessment = assess_selected_evidence(policy, pool, selection_plan)
+        assessment = assess_selected_evidence(policy, plan, pool, selection_plan)
         span.note(
             profile=selection_plan.profile,
             acquired=len(pool.observations),
@@ -181,9 +189,7 @@ def inspect(
 def normalize_request(
     request: InspectionRequest, context: InspectionContext
 ) -> InspectionRequest:
-    """Validate the request and bind it to a stable semantic identity."""
-    if not isinstance(request, InspectionRequest):
-        raise ContractError("inspect requires an InspectionRequest")
+    """Bind the request to a stable semantic identity."""
     request_id = inspection_request_identity(request, context.root)
     return with_request_id(request, request_id)
 
@@ -239,11 +245,13 @@ def attach_render(
 
 
 def _outcome_name(resolution: ResolutionResult) -> str:
-    if isinstance(resolution, ResolvedTarget):
-        return "resolved"
-    if isinstance(resolution, AmbiguousTarget):
-        return "ambiguous"
-    return "unresolved"
+    match resolution:
+        case ResolvedTarget():
+            return "resolved"
+        case AmbiguousTarget():
+            return "ambiguous"
+        case _:
+            return "unresolved"
 
 
 def _candidate_count(resolution: ResolutionResult) -> int:

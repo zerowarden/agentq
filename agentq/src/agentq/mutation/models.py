@@ -349,8 +349,6 @@ def _planned_file_from_wire(value: Any, what: str, index: int) -> PlannedFile:
         f"{what}.files[{index}]",
     )
     spans: list[Any] = list_field(entry, "match_spans")
-    if not isinstance(spans, list):
-        raise ContractError(f"{what}.files[{index}].match_spans must be an array")
     decoded_spans: list[tuple[int, int]] = []
     for span in spans:
         if not isinstance(span, list) or len(cast("list[Any]", span)) != 2:
@@ -358,8 +356,6 @@ def _planned_file_from_wire(value: Any, what: str, index: int) -> PlannedFile:
         pair = cast("list[Any]", span)
         decoded_spans.append((pair[0], pair[1]))
     edits: list[Any] = list_field(entry, "edits")
-    if not isinstance(edits, list):
-        raise ContractError(f"{what}.files[{index}].edits must be an array")
     decoded_edits: list[ByteEdit] = []
     for edit in edits:
         item = require_mapping(edit, f"{what}.files[{index}].edits entry")

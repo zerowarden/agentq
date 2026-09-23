@@ -192,6 +192,44 @@ class AcquisitionOutcomeTests(unittest.TestCase):
         )
 
 
+def _explode(*_args, **_kwargs):
+    raise RuntimeError("broken adapter")
+
+
+class BrokenAdapterTests(unittest.TestCase):
+    def test_applicability_failure_is_reported_not_raised(self) -> None:
+        handler = FakeHandler(
+            name="broken",
+            supported=frozenset({Capability.FIND_DECLARATIONS}),
+            applicable_to=_explode,
+        )
+        registry = CapabilityRegistry((handler,))
+        report = registry.describe(_symbol_request(), fake_context(handler))
+        entry = report.entries_for(Capability.FIND_DECLARATIONS)[0]
+        self.assertIs(entry.status, AvailabilityStatus.UNAVAILABLE)
+        self.assertIn("applicability check failed", entry.reason or "")
+        self.assertEqual(
+            registry.handlers_for(
+                Capability.FIND_DECLARATIONS,
+                SymbolTarget(name="listOrders"),
+                fake_context(handler),
+            ),
+            (),
+        )
+
+    def test_availability_failure_is_reported_not_raised(self) -> None:
+        handler = FakeHandler(
+            name="broken",
+            supported=frozenset({Capability.FIND_DECLARATIONS}),
+        )
+        handler.availability = _explode  # type: ignore[method-assign]
+        registry = CapabilityRegistry((handler,))
+        report = registry.describe(_symbol_request(), fake_context(handler))
+        entry = report.entries_for(Capability.FIND_DECLARATIONS)[0]
+        self.assertIs(entry.status, AvailabilityStatus.UNAVAILABLE)
+        self.assertIn("availability check failed", entry.reason or "")
+
+
 class ThirdLanguageIndependenceTests(unittest.TestCase):
     def test_adapter_applicability_is_target_dependent(self) -> None:
         python_fake = FakeHandler(

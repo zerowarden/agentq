@@ -418,7 +418,9 @@ def run(request: RunRequest) -> RunResult:
     )
 
 
-def render_run(result: RunResult, *, budget: int = 0) -> str:
+def render_run(
+    result: RunResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     status = (
         "TIMEOUT" if result.timed_out else "PASS" if result.exit_code == 0 else "FAIL"
     )

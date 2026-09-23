@@ -25,8 +25,8 @@ class _SubParserChoices(Protocol):
 
 
 _SubParsersActionType = (
-    argparse._SubParsersAction
-)  # pyright: ignore[reportPrivateUsage]
+    argparse._SubParsersAction  # pyright: ignore[reportPrivateUsage]
+)
 
 
 class AgentQArgumentParser(argparse.ArgumentParser):
@@ -100,13 +100,6 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def nonnegative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be non-negative")
-    return parsed
-
-
 def add_common(
     parser: argparse.ArgumentParser, *, formats: tuple[str, ...] = ("text", "json")
 ) -> None:
@@ -116,13 +109,6 @@ def add_common(
         default="text",
         help="bounded human output or structured JSON",
     )
-    parser.add_argument(
-        "--budget",
-        type=positive_int,
-        default=12000,
-        help="maximum model-visible characters; default 12000",
-    )
-
 
 def add_scope(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -139,7 +125,6 @@ def expansion_controls(args: argparse.Namespace) -> dict[str, int]:
     return {
         target: int(value)
         for target, value in (
-            ("budget", getattr(args, "budget", None)),
             ("limit", getattr(args, "limit", None)),
             ("max_lines", getattr(args, "max_lines", None)),
             ("max_files", getattr(args, "max_files", None)),

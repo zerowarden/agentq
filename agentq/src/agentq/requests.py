@@ -58,11 +58,7 @@ def current_context(root: Path, *, consumer_id: str | None = None) -> RequestCon
 
 
 def search_options_from_args(args: Any) -> SearchOptions:
-    return SearchOptions(
-        query=args.query,
-        mode=args.mode,
-        scan_cap=args.scan_cap,
-    )
+    return SearchOptions(query=args.query, mode=args.mode)
 
 
 def request_from_args(
@@ -169,11 +165,12 @@ def request_argv(request: OperationRequest[Any]) -> list[str]:
 
 
 def _presentation_args(request: OperationRequest[Any]) -> list[str]:
-    """Presentation flags shared by every continuation argv."""
-    args = ["--format", request.output_format]
-    if request.budget.output_chars > 0:
-        args += ["--budget", str(request.budget.output_chars)]
-    return args
+    """Presentation flags shared by every continuation argv.
+
+    Output budgets are internal in M1: a stored request keeps its budget for
+    typed replay, but argv reconstruction cannot express it.
+    """
+    return ["--format", request.output_format]
 
 
 def _reject_role_scoped_search(options: SearchOptions) -> None:
@@ -202,6 +199,7 @@ def _reject_unrepresentable_search_policy(options: SearchOptions) -> None:
         "max_files",
         "coverage_policy",
         "include_sensitive",
+        "scan_cap",
     )
     if any(
         getattr(options, name) != getattr(defaults, name) for name in unrepresentable
@@ -223,11 +221,14 @@ def _search_argv(request: OperationRequest[Any]) -> list[str]:
             "this search request stored a forced repeat that argv replay cannot "
             "express; dispatch the typed request instead"
         )
+    if request.budget.output_chars:
+        raise ContractError(
+            "this search request stored an output budget that argv replay "
+            "cannot express; dispatch the typed request instead"
+        )
     argv = ["agentq", "search", options.query]
     if options.mode == "regex":
         argv.append("--regex")
-    if options.scan_cap != SearchOptions().scan_cap:
-        argv.extend(("--scan-cap", str(options.scan_cap)))
     for scope in request.scopes:
         argv.extend(("--path", scope))
     argv.extend(_presentation_args(request))

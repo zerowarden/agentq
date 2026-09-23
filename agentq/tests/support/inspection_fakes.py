@@ -47,6 +47,7 @@ from agentq.inspection.contracts import (
     make_observation,
     make_variant,
 )
+from agentq.inspection.lifecycle import content_version
 
 VERSION = "v1"
 CHANGED_VERSION = "v2"
@@ -65,6 +66,19 @@ class DictVersionReader:
 
     def __call__(self, relative_path: str) -> str | None:
         return self.versions.get(relative_path)
+
+
+class FilesystemVersionReader:
+    """A source version reader backed by the live repository files."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def __call__(self, relative_path: str) -> str | None:
+        try:
+            return content_version((self.root / relative_path).read_bytes())
+        except OSError:
+            return None
 
 
 def complete(coverage: Coverage | None = None) -> Coverage:
@@ -282,7 +296,7 @@ class FakeHandler:
 
     name: str
     supported: frozenset[Capability]
-    results: Mapping[Capability, CapabilityResult] = field(
+    results: dict[Capability, CapabilityResult] = field(
         default_factory=dict[Capability, CapabilityResult]
     )
     applicable_to: Any = None
@@ -296,7 +310,7 @@ class FakeHandler:
     def capabilities(self) -> frozenset[Capability]:
         return self.supported
 
-    def applicable(self, target: InspectionTarget, context: InspectionContext) -> bool:
+    def applicable(self, target: InspectionTarget, _context: InspectionContext) -> bool:
         if self.applicable_to is None:
             return True
         return self.applicable_to(target)
@@ -304,8 +318,8 @@ class FakeHandler:
     def availability(
         self,
         capability: Capability,
-        target: InspectionTarget,
-        context: InspectionContext,
+        _target: InspectionTarget,
+        _context: InspectionContext,
     ) -> CapabilityAvailability:
         if self.unavailable_reason is not None:
             return CapabilityAvailability(
@@ -317,7 +331,7 @@ class FakeHandler:
         return CapabilityAvailability(available=True)
 
     def acquire(
-        self, request: EvidenceRequest, context: InspectionContext
+        self, request: EvidenceRequest, _context: InspectionContext
     ) -> CapabilityResult:
         self.calls.append((request.capability.value, request.request_id))
         if self.acquire_error is not None:

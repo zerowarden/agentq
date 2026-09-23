@@ -36,7 +36,7 @@ class GoVerificationProvider:
         limit: int,
         mode: str,
         dependents: str,
-        include_build: bool,
+        include_build: bool,  # pyright: ignore[reportUnusedParameter]
         config: VerifyConfig,
     ) -> ProviderPlan:
         workspace = discover_go(root, repo_files)

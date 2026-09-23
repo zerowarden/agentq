@@ -114,7 +114,7 @@ class NodeVerificationProvider:
         limit: int,
         mode: str,
         dependents: str,
-        include_build: bool,
+        include_build: bool,  # pyright: ignore[reportUnusedParameter]
         config: VerifyConfig,
     ) -> ProviderPlan:
         contract_changed = _node_contract_changed(changes, config)
@@ -255,7 +255,7 @@ class NodeVerificationProvider:
         pkg: NodePackage,
         owned_files: Sequence[str],
         packages: Mapping[UnitId, NodePackage],
-        graph: ProjectGraph,
+        _graph: ProjectGraph,
     ) -> _PackageFacts:
         package_dir = root if unit_id.path == "." else root / unit_id.path
         local_files = sorted(relpath(package_dir, root / path) for path in owned_files)
@@ -293,7 +293,7 @@ class NodeVerificationProvider:
         manager: PackageManager,
         limit: int,
         mode: str,
-        include_build: bool,
+        include_build: bool,  # pyright: ignore[reportUnusedParameter]
         contract_changed: bool,
     ) -> tuple[list[CheckSpec], Coverage]:
         scripts = {
@@ -528,7 +528,7 @@ class NodeVerificationProvider:
         scripts: Mapping[str, str | None],
         manager: PackageManager,
         mode: str,
-        include_build: bool,
+        include_build: bool,  # pyright: ignore[reportUnusedParameter]
         contract_changed: bool,
     ) -> list[CheckSpec]:
         checks: list[CheckSpec] = []

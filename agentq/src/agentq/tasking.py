@@ -228,7 +228,9 @@ _TASK_SIMPLE_RENDERINGS = {
 }
 
 
-def render_task(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_task(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     action = data.get("action")
     if action == "changes":
         return _render_task_changes(data)

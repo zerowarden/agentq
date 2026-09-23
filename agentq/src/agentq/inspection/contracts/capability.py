@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agentq.core import (
     ContractError,
@@ -112,7 +112,7 @@ class CapabilityEntry:
                 "capability entry diagnostics must be a tuple of Diagnostic"
             )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "capability": self.capability.value,
             "status": self.status.value,
@@ -132,7 +132,7 @@ class CapabilityGap:
     reason: str | None = None
     requirement_ids: tuple[str, ...] = ()
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "capability": self.capability.value,
             "status": self.status.value,
@@ -309,7 +309,7 @@ class AcquisitionRecord:
                 "acquisition record observed_inputs must be a tuple of strings"
             )
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "acquisition_id": self.acquisition_id,
             "capability": self.capability.value,
@@ -402,7 +402,7 @@ class CapabilityHandler(Protocol):
     def capabilities(self) -> frozenset[Capability]: ...
 
     def applicable(
-        self, target: InspectionTarget, context: InspectionContext
+        self, target: InspectionTarget, context: InspectionContext, /
     ) -> bool: ...
 
     def availability(
@@ -410,10 +410,11 @@ class CapabilityHandler(Protocol):
         capability: Capability,
         target: InspectionTarget,
         context: InspectionContext,
+        /,
     ) -> CapabilityAvailability: ...
 
     def acquire(
-        self, request: EvidenceRequest, context: InspectionContext
+        self, request: EvidenceRequest, context: InspectionContext, /
     ) -> CapabilityResult: ...
 
 

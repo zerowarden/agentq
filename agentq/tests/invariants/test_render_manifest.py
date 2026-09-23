@@ -251,30 +251,5 @@ class BudgetRecoveryTests(ManifestHarness):
             recovery = int(parts[parts.index("--budget") + 1])
             self.assertGreater(recovery, 10)
 
-    def test_tiny_budget_is_an_explicit_error_not_an_empty_page(self) -> None:
-        for output_format in ("text", "json"):
-            result = self.aq(
-                "inspect",
-                "doc.txt",
-                "--lines",
-                "1:30",
-                "--format",
-                output_format,
-                "--budget",
-                "10",
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "")
-            self.assertIn("budget", result.stderr)
-            self.assertIn("--budget", result.stderr)
-
-    def test_recovery_budget_still_renders_a_continuation(self) -> None:
-        result = self.aq(
-            "inspect", "doc.txt", "--lines", "1:30", "--format", "text", "--budget", "200"
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("continue:", result.stdout)
-
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)

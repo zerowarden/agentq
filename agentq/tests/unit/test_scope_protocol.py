@@ -197,10 +197,9 @@ class ScopeWireNormalizationTests(unittest.TestCase):
                 ):
                     from agentq.navigation import TypeScriptNavRequest
 
-                    tsnav_module._symbol_ts_nav(
+                    tsnav_module.ts_nav(
                         TypeScriptNavRequest(
                             root=root,
-                            action="locate",
                             symbol="Foo",
                             paths=(str(root / "src"),),
                             limit=10,

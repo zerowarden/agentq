@@ -11,7 +11,6 @@ from agentq import continuations
 from agentq.core import (
     Budget,
     ContractError,
-    Coverage,
     DiffSelection,
     OperationRequest,
     ProviderResult,
@@ -733,7 +732,7 @@ class RequestNormalizationTests(unittest.TestCase):
             coverage_policy="auto",
             include_sensitive=False,
             format="json",
-            budget=5000,
+            budget=0,
             repeat=False,
         )
 
@@ -756,6 +755,22 @@ class RequestNormalizationTests(unittest.TestCase):
         follow_up = continuations.QueryFollowUp(request=decoded)
         self.assertEqual(continuations.dispatch_argv(follow_up), argv)
 
+    def test_argv_codec_refuses_an_internal_output_budget(self) -> None:
+        from agentq import requests
+
+        args = self._args()
+        args.budget = 5000
+        request = requests.request_from_args(
+            Path("."),
+            args,
+            "search",
+            requests.search_options_from_args(args),
+            scopes=("src",),
+        )
+        self.assertEqual(request.budget.output_chars, 5000)
+        with self.assertRaises(ContractError):
+            requests.request_argv(request)
+
     def test_request_json_rejects_unknown_operation(self) -> None:
         from agentq import requests
 
@@ -774,135 +789,6 @@ class RequestNormalizationTests(unittest.TestCase):
         )
         with self.assertRaises(ContractError):
             requests.request_argv(request)
-
-
-class NavigationBoundaryTests(unittest.TestCase):
-    def test_provider_without_payload_is_unavailable_not_complete(self) -> None:
-        from agentq import navigation
-        from agentq.navigation import query_provider
-
-        class SilentProvider:
-            name = "silent"
-            provenance = evidence.SEMANTIC
-
-            def supports(self, request) -> bool:
-                return True
-
-            def inspect_symbol(self, request, *, include_references):
-                return None
-
-        request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = query_provider(SilentProvider(), request, include_references=True)
-        self.assertEqual(result.status, ProviderStatus.UNAVAILABLE)
-        self.assertFalse(result.coverage.is_complete())
-        self.assertEqual(result.payload, None)
-
-    def test_explicit_empty_scan_can_be_complete_empty(self) -> None:
-        from agentq import navigation
-        from agentq.navigation import query_provider
-
-        class EmptyProvider:
-            name = "python"
-            provenance = evidence.SYNTACTIC
-
-            def supports(self, request) -> bool:
-                return True
-
-            def inspect_symbol(self, request, *, include_references):
-                return navigation.SymbolEvidence(
-                    provider=self.name,
-                    provenance=self.provenance,
-                    coverage=evidence.typed_coverage(evidence.COMPLETE),
-                )
-
-        request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = query_provider(EmptyProvider(), request, include_references=True)
-        self.assertEqual(result.status, ProviderStatus.EMPTY)
-        self.assertTrue(result.coverage.is_complete())
-
-    def test_missing_coverage_is_unknown_not_complete(self) -> None:
-        from agentq import navigation
-        from agentq.navigation import query_provider
-
-        class BareProvider:
-            name = "python"
-            provenance = evidence.SYNTACTIC
-
-            def supports(self, request) -> bool:
-                return True
-
-            def inspect_symbol(self, request, *, include_references):
-                return navigation.SymbolEvidence(
-                    provider=self.name,
-                    provenance=self.provenance,
-                    coverage=Coverage(),
-                    candidate_count=1,
-                )
-
-        request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = query_provider(BareProvider(), request, include_references=True)
-        self.assertEqual(result.status, ProviderStatus.OK)
-        self.assertFalse(result.coverage.is_complete())
-
-    def test_navigation_request_validation(self) -> None:
-        from agentq import navigation
-
-        with self.assertRaises(ContractError):
-            navigation.NavigationRequest(root=Path("."), symbol="")
-        with self.assertRaises(ContractError):
-            navigation.NavigationRequest(root=Path("."), symbol="X", lang="ruby")
-        with self.assertRaises(ContractError):
-            navigation.NavigationRequest(root=Path("."), symbol="X", limit=0)
-
-    def test_provider_metadata_comes_from_the_provider(self) -> None:
-        from agentq import navigation
-        from agentq.navigation import query_provider
-
-        class CustomProvider:
-            name = "custom-provider"
-            provenance = evidence.SEMANTIC
-
-            def supports(self, request) -> bool:
-                return True
-
-            def inspect_symbol(self, request, *, include_references):
-                return navigation.SymbolEvidence(
-                    provider=self.name,
-                    provenance=self.provenance,
-                    coverage=evidence.typed_coverage(evidence.COMPLETE),
-                    candidate_count=1,
-                )
-
-        request = navigation.NavigationRequest(root=Path("."), symbol="X")
-        result = query_provider(CustomProvider(), request, include_references=True)
-        self.assertEqual(result.status, ProviderStatus.OK)
-        self.assertEqual(result.provenance, evidence.SEMANTIC)
-        self.assertEqual(result.candidate_count, 1)
-        metadata = navigation.SymbolResolution(outcomes=[result]).entries()[0]
-        self.assertEqual(metadata.provenance, evidence.SEMANTIC)
-        self.assertEqual(metadata.candidate_count, 1)
-
-    def test_not_applicable_provider_is_neutral_in_composition(self) -> None:
-        from agentq import navigation
-
-        not_applicable = ProviderResult(
-            provider="absent", status=ProviderStatus.NOT_APPLICABLE
-        )
-        applicable = ProviderResult(
-            provider="python",
-            status=ProviderStatus.OK,
-            payload=navigation.SymbolEvidence(
-                provider="python",
-                provenance=evidence.SYNTACTIC,
-                coverage=evidence.typed_coverage(evidence.COMPLETE),
-                candidate_count=1,
-            ),
-            provenance=evidence.SYNTACTIC,
-            candidate_count=1,
-            coverage=evidence.typed_coverage(evidence.COMPLETE),
-        )
-        resolution = navigation.SymbolResolution(outcomes=[not_applicable, applicable])
-        self.assertEqual(resolution.coverage().status, evidence.COMPLETE)
 
 
 if __name__ == "__main__":

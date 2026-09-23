@@ -199,67 +199,55 @@ class SuppressionCliTests(AgentQIntegrationHarness):
             self.assertFalse(changed.repeat_suppressed)
             self.assertIn("editedDiff", changed.patch or "")
 
-    def test_exact_operation_cache_suppresses_and_invalidates_search_and_inspect(
-        self,
-    ) -> None:
+    def test_exact_operation_cache_suppresses_and_invalidates_search(self) -> None:
         session = {**self.env, "AGENTQ_SESSION_ID": "operation-cache"}
-        operations = [
-            ("search", ("OldName",)),
-            ("inspect", ("packages/a/src/index.ts",)),
-        ]
-        for command, arguments in operations:
-            first = self.data(command, *arguments, extra_env=session)
-            self.assertFalse(first.get("repeat_suppressed", False))
-            repeated = self.data(command, *arguments, extra_env=session)
-            self.assertTrue(repeated["repeat_suppressed"])
-            fresh = self.data(
-                command,
-                *arguments,
-                extra_env={**self.env, "AGENTQ_SESSION_ID": f"fresh-{command}"},
-            )
-            self.assertFalse(fresh.get("repeat_suppressed", False))
+        first = self.data("search", "OldName", extra_env=session)
+        self.assertFalse(first.get("repeat_suppressed", False))
+        repeated = self.data("search", "OldName", extra_env=session)
+        self.assertTrue(repeated["repeat_suppressed"])
+        fresh = self.data(
+            "search",
+            "OldName",
+            extra_env={**self.env, "AGENTQ_SESSION_ID": "fresh-search"},
+        )
+        self.assertFalse(fresh.get("repeat_suppressed", False))
 
         self.change_a("\nexport const cacheInvalidated = true\n")
         refreshed = self.data("search", "OldName", extra_env=session)
         self.assertFalse(refreshed.get("repeat_suppressed", False))
 
-    def test_inspect_caches_only_source_lines_visible_inside_the_wrapper(self) -> None:
-        path = self.repo / "packages/a/src/budgeted_inspect.py"
+    def test_inspection_is_delivered_again_rather_than_suppressed(self) -> None:
+        session = {**self.env, "AGENTQ_SESSION_ID": "inspect-cache"}
+        (self.repo / "packages/a/pysrc").mkdir(parents=True, exist_ok=True)
+        (self.repo / "packages/a/pysrc/repeat_target.py").write_text(
+            "def repeat_target():\n    return 1\n", encoding="utf-8"
+        )
+        first = self.data(
+            "inspect", "repeat_target", "--path", "packages/a/pysrc", extra_env=session
+        )
+        repeated = self.data(
+            "inspect", "repeat_target", "--path", "packages/a/pysrc", extra_env=session
+        )
+        self.assertFalse(repeated.get("repeat_suppressed", False))
+        self.assertTrue(first["selection"]["selected"])
+        self.assertEqual(
+            first["selection"]["selected"], repeated["selection"]["selected"]
+        )
+
+    def test_range_inspection_returns_the_requested_source_exactly(self) -> None:
+        path = self.repo / "packages/a/src/ranged_inspect.py"
         path.write_text(
             "".join(f"line_{index:02d} = {'x' * 32!r}\n" for index in range(1, 21)),
             encoding="utf-8",
         )
-        session = {**self.env, "AGENTQ_SESSION_ID": "inspect-cache"}
-
-        first = self.data(
-            "inspect",
-            "packages/a/src/budgeted_inspect.py",
-            "--lines",
-            "1:20",
-            "--budget",
-            "1200",
-            extra_env=session,
+        payload = self.data(
+            "inspect", "packages/a/src/ranged_inspect.py", "--lines", "1:20"
         )
-        first_lines = [
-            line["line"] for item in first["source"]["items"] for line in item["lines"]
-        ]
-        self.assertTrue(first_lines)
-        self.assertNotIn("_agentq", first)
-
-        resumed = self.data(
-            "inspect",
-            "packages/a/src/budgeted_inspect.py",
-            "--lines",
-            "1:20",
-            "--budget",
-            "100000",
-            extra_env=session,
+        text = "\n".join(
+            item["variant"]["text"] for item in payload["selection"]["selected"]
         )
-        resumed_lines = [
-            line["line"]
-            for item in resumed["source"]["items"]
-            for line in item["lines"]
-        ]
-        self.assertEqual(sorted(first_lines + resumed_lines), list(range(1, 21)))
+        for marker in ("line_01 = ", "line_20 = "):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
 
 

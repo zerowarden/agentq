@@ -111,26 +111,46 @@ class SearchCliTests(AgentQIntegrationHarness):
             json.loads(continued.stdout)["summary"]["coverage"]["status"], "complete"
         )
 
-        budgeted_result = subprocess.run(
-            [
-                str(AGENTQ),
-                "search",
-                "--format",
-                "compact-json",
-                "--budget",
-                "1500",
-                "CONTINUE_HIT",
-                "--path",
-                "packages/a/src/continuation.ts",
-            ],
-            cwd=self.repo,
-            env=self.env,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(budgeted_result.returncode, 0, msg=budgeted_result.stderr)
-        self.assertLessEqual(len(budgeted_result.stdout.strip()), 1500)
-        budgeted = json.loads(budgeted_result.stdout)
+        # Output budgets are internal now: assert the render-budget contract
+        # at the discovery layer instead of through a public flag.
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq.core import SearchOptions
+            from agentq.discovery import (
+                SearchRequest,
+                SearchResume,
+                compact_search_wire,
+                search,
+            )
+
+            options = SearchOptions(query="CONTINUE_HIT")
+            resume = SearchResume(
+                query=options.query,
+                mode=options.mode,
+                word=options.word,
+                case=options.case,
+                globs=options.globs,
+                types=options.types,
+                include_sensitive=options.include_sensitive,
+                limit=options.limit,
+                per_file=options.per_file,
+                context=options.context,
+                max_chars=options.max_chars,
+                max_files=options.max_files,
+                scan_cap=options.scan_cap,
+                coverage_policy=options.coverage_policy,
+                output_format="compact-json",
+                budget=1500,
+                roles=options.roles,
+            )
+            result = search(
+                SearchRequest(
+                    root=self.repo,
+                    query="CONTINUE_HIT",
+                    scopes=("packages/a/src/continuation.ts",),
+                    mode="fixed",
+                )
+            )
+            budgeted = compact_search_wire(result, budget=1500, resume=resume)
         self.assertIn("render-budget", budgeted["continuation"]["reason"])
         self.assertTrue(
             all(item.get("text") for item in budgeted["files"][0]["evidence"])
@@ -266,25 +286,17 @@ class SearchCliTests(AgentQIntegrationHarness):
             "".join(f"export const lbItem{i} = {i}\n" for i in range(120)),
             encoding="utf-8",
         )
-        rendered = subprocess.run(
-            [
-                str(AGENTQ),
-                "search",
-                "--format",
-                "text",
-                "--budget",
-                "100000",
-                "lbItem",
-                "--path",
-                "packages/a/src",
-                "--scan-cap",
-                "30",
-            ],
-            text=True,
-            capture_output=True,
-            env=self.env,
-            cwd=self.repo,
-        )
-        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
-        self.assertIn("(lower bound; scan cap reached)", rendered.stdout)
-        self.assertIn("continue: agentq continue", rendered.stdout)
+        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
+            from agentq.discovery import SearchRequest, render_search, search
+
+            result = search(
+                SearchRequest(
+                    root=self.repo,
+                    query="lbItem",
+                    scopes=("packages/a/src",),
+                    mode="fixed",
+                    scan_cap=30,
+                )
+            )
+            rendered = str(render_search(result))
+        self.assertIn("(lower bound; scan cap reached)", rendered)

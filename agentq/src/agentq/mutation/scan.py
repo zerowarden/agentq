@@ -309,8 +309,6 @@ def _scan_ast(
         objects: list[Any] = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
         objects = []
-    if not isinstance(objects, list):
-        objects = []
     samples: list[ScanSample] = []
     files: dict[str, int] = {}
     for obj in objects:

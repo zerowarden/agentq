@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agentq.core import (
     ContractError,
@@ -48,7 +48,7 @@ class InspectionRequest:
         validate_scopes(self.evidence_scopes, "inspection evidence scopes")
         require_str(self.request_id, "inspection request id", allow_empty=True)
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "target": self.target.to_wire(),
             "intent": self.intent.value,
@@ -71,7 +71,7 @@ class PresentationOptions:
             )
         require_bool(self.debug, "presentation debug")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {"output_format": self.output_format, "debug": self.debug}
 
 
@@ -116,7 +116,7 @@ class InspectionContext:
     def root(self) -> Path:
         return self.identity.root
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "repo_id": self.identity.repo_id,
             "worktree_id": self.identity.worktree_id,

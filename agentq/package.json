@@ -1,0 +1,8 @@
+{
+  "name": "agentq-typescript-fixture",
+  "private": true,
+  "description": "Pinned TypeScript runtime used by the real inspection adapter integration tests. Run `npm install` before M1 sign-off so those tests execute instead of skipping.",
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}

@@ -58,7 +58,7 @@ class CapabilityRegistry:
         for handler in handlers:
             self.register(handler)
 
-    def register(self, handler: CapabilityHandler) -> None:
+    def register(self, handler: object) -> None:
         if not isinstance(handler, CapabilityHandler):
             raise ContractError(
                 "capability handler must implement the handler protocol"
@@ -118,14 +118,25 @@ class CapabilityRegistry:
         target: InspectionTarget,
         context: InspectionContext,
     ) -> CapabilityEntry:
-        if not handler.applicable(target, context):
+        try:
+            applicable = handler.applicable(target, context)
+        except Exception as exc:
+            return _adapter_failure(
+                handler, capability, "applicability check failed", exc
+            )
+        if not applicable:
             return CapabilityEntry(
                 capability=capability,
                 status=AvailabilityStatus.NOT_APPLICABLE,
                 provider=handler.name,
                 reason="adapter does not apply to this target",
             )
-        availability = handler.availability(capability, target, context)
+        try:
+            availability = handler.availability(capability, target, context)
+        except Exception as exc:
+            return _adapter_failure(
+                handler, capability, "availability check failed", exc
+            )
         if availability.available:
             return CapabilityEntry(
                 capability=capability,
@@ -248,6 +259,26 @@ def unsupported_entry(capability: Capability) -> CapabilityEntry:
         capability=capability,
         status=AvailabilityStatus.UNSUPPORTED,
         reason="no registered adapter implements this capability",
+    )
+
+
+def _adapter_failure(
+    handler: CapabilityHandler,
+    capability: Capability,
+    what: str,
+    exc: Exception,
+) -> CapabilityEntry:
+    """A broken availability check is a reported limitation, not a crash."""
+    return CapabilityEntry(
+        capability=capability,
+        status=AvailabilityStatus.UNAVAILABLE,
+        provider=handler.name,
+        reason=f"{what}: {type(exc).__name__}",
+        diagnostics=(
+            Diagnostic(
+                message=f"{what}: {exc}", code=PROVIDER_ERROR, severity="warning"
+            ),
+        ),
     )
 
 

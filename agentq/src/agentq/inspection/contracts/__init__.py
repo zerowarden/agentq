@@ -44,6 +44,7 @@ from .evaluation import (
     ScoredEvidence,
     SelectedEvidence,
     SelectionPlan,
+    selected_evidence_to_wire,
 )
 from .evidence import (
     Binding,
@@ -189,5 +190,6 @@ __all__ = [
     "make_variant",
     "payload_to_wire",
     "resolution_to_wire",
+    "selected_evidence_to_wire",
     "with_request_id",
 ]

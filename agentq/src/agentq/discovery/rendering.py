@@ -23,7 +23,9 @@ from .repo_map import RepoMapResult
 from .search import SearchFile, SearchResult
 
 
-def render_files(result: FilesResult, *, budget: int = 0) -> str:
+def render_files(
+    result: FilesResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     lines = [
         f"files: {result.shown}/{result.total}"
         + (" (truncated)" if result.truncated else "")
@@ -203,7 +205,9 @@ def render_read(result: ReadResult, *, budget: int = 0) -> RenderedText:
     return rendered
 
 
-def render_repo_map(result: RepoMapResult, *, budget: int = 0) -> str:
+def render_repo_map(
+    result: RepoMapResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     lines = [
         f"repository: {result.repo_root}",
         f"branch: {result.branch}",
@@ -228,7 +232,9 @@ def render_repo_map(result: RepoMapResult, *, budget: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_outline(result: OutlineResult, *, budget: int = 0) -> str:
+def render_outline(
+    result: OutlineResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     status = status_of(result.coverage)
     lines = [
         f"outline engine: {result.engine}",

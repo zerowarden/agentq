@@ -65,7 +65,7 @@ class CargoVerificationProvider:
         limit: int,
         mode: str,
         dependents: str,
-        include_build: bool,
+        include_build: bool,  # pyright: ignore[reportUnusedParameter]
         config: VerifyConfig,
     ) -> ProviderPlan:
         contract_changed = _cargo_contract_changed(changes, config)

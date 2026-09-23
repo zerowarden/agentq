@@ -1,12 +1,22 @@
 """Intent requirements and policy compilation.
 
 Requirements precede scores: each requirement names acceptable evidence, a
-strength, and one satisfaction rule. The M1.1 baseline compiles
-target-appropriate requirements shared by all intents; the per-intent emphasis
-profiles replace this baseline in M1.3 without changing this module's contract.
+strength, and one satisfaction rule. Every intent compiles its own collection
+emphasis, and target kinds compile target-appropriate requirements: a
+directory inspection reports structure and ownership without pretending that
+an outline accounts for all editable source.
+
+Capability lists are ordered recipes. When a language cannot provide semantic
+references the planner falls back to syntactic mentions; the compiled
+requirement stays the same, so the plan shows exactly which capability was
+chosen and which gap remained.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+
+from agentq.core.languages import language_id_for
 
 from .contracts import (
     CandidateTarget,
@@ -27,7 +37,7 @@ from .contracts import (
     SymbolTarget,
 )
 
-POLICY_PROFILE = "intent-policy-v0"
+POLICY_PROFILE = "intent-policy-v1"
 
 INTENT_LIMITATIONS: dict[Intent, str] = {
     Intent.UNDERSTAND: "representative context, not exhaustive dependency analysis",
@@ -45,39 +55,64 @@ INTENT_LIMITATIONS: dict[Intent, str] = {
 REQUIRED = RequirementStrength.REQUIRED
 OPTIONAL = RequirementStrength.OPTIONAL
 
+# Ordered capability recipes: the planner takes the first available entry.
+REFERENCE_CAPABILITIES = (
+    Capability.SEMANTIC_REFERENCES,
+    Capability.SYNTACTIC_MENTIONS,
+)
+
 
 def compile_policy(
     request: InspectionRequest, resolution: ResolutionResult
 ) -> EvidencePolicy:
-    """Compile the evidence requirements for one resolved request."""
+    """Compile the intent- and target-appropriate evidence requirements."""
     target = resolution.target
-    if isinstance(target, (SymbolTarget, CandidateTarget)):
-        requirements = _symbol_requirements()
-    elif isinstance(target, PathTarget):
-        requirements = _path_requirements()
-    elif isinstance(target, RangeTarget):
-        requirements = _range_requirements()
-    elif isinstance(target, LocationTarget):
-        requirements = _location_requirements()
-    else:
-        requirements = ()
+    intent = request.intent
+    limitations = [INTENT_LIMITATIONS[intent]]
+    requirements: tuple[EvidenceRequirement, ...] = ()
+    match target:
+        case SymbolTarget() | CandidateTarget():
+            requirements = _symbol_requirements(intent)
+        case LocationTarget():
+            requirements = _declaration_requirements(
+                intent, Capability.RESOLVE_LOCATION
+            )
+        case PathTarget():
+            is_file = language_id_for(target.path) is not None
+            requirements = _path_requirements(intent, is_file=is_file)
+            if not is_file:
+                limitations.append(
+                    "directory target: structure and ownership are inspected; "
+                    "source completeness for the directory's files is not claimed"
+                )
+        case RangeTarget():
+            requirements = _range_requirements(intent)
     return EvidencePolicy(
         profile=POLICY_PROFILE,
-        intent=request.intent,
+        intent=intent,
         target_kind=target.kind,
         requirements=requirements,
-        limitations=(INTENT_LIMITATIONS[request.intent],),
+        limitations=tuple(limitations),
     )
 
 
-def _declaration_requirement(capability: Capability) -> EvidenceRequirement:
+# ---------------------------------------------------------------------------
+# Requirement builders
+# ---------------------------------------------------------------------------
+
+
+def _strength(required: bool) -> RequirementStrength:
+    return REQUIRED if required else OPTIONAL
+
+
+def _declaration(capability: Capability) -> EvidenceRequirement:
     return EvidenceRequirement(
         requirement_id="declaration_identity",
         role=EvidenceRole.DECLARATION,
         rule=RequirementRule.MINIMUM_EVIDENCE,
         strength=REQUIRED,
         description="the selected declaration must be represented in the bundle",
-        capability=capability,
+        capabilities=(capability,),
         acceptable_kinds=(ObservationKind.DECLARATION,),
         representations=(
             RepresentationKind.SIGNATURE,
@@ -86,16 +121,16 @@ def _declaration_requirement(capability: Capability) -> EvidenceRequirement:
     )
 
 
-def _source_requirement() -> EvidenceRequirement:
+def _source(*, required: bool) -> EvidenceRequirement:
     return EvidenceRequirement(
         requirement_id="target_source",
         role=EvidenceRole.TARGET_SOURCE,
         rule=RequirementRule.EXACT_SOURCE,
-        strength=REQUIRED,
+        strength=_strength(required),
         description=(
             "an exact source representation of the requested span must be selected"
         ),
-        capability=Capability.READ_SOURCE,
+        capabilities=(Capability.READ_SOURCE,),
         acceptable_kinds=(
             ObservationKind.SOURCE_WINDOW,
             ObservationKind.DECLARATION,
@@ -104,112 +139,190 @@ def _source_requirement() -> EvidenceRequirement:
     )
 
 
-def _optional_evidence() -> tuple[EvidenceRequirement, ...]:
-    """Optional role evidence collected for every intent in the baseline."""
-    return (
-        EvidenceRequirement(
-            requirement_id="representative_reference",
-            role=EvidenceRole.REFERENCE,
-            rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
-            strength=OPTIONAL,
-            description="select an admissible reference when one was acquired",
-            capability=Capability.SEMANTIC_REFERENCES,
-            acceptable_kinds=(
-                ObservationKind.SEMANTIC_REFERENCE,
-                ObservationKind.SYNTACTIC_MENTION,
-            ),
+def _references(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="representative_reference",
+        role=EvidenceRole.REFERENCE,
+        rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
+        strength=_strength(required),
+        description=(
+            "representative references; semantic references are preferred and "
+            "syntactic mentions are the labeled fallback"
         ),
-        EvidenceRequirement(
-            requirement_id="implementations",
-            role=EvidenceRole.IMPLEMENTATION,
-            rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
-            strength=OPTIONAL,
-            description="select an admissible implementation when one was acquired",
-            capability=Capability.IMPLEMENTATIONS,
-            acceptable_kinds=(ObservationKind.IMPLEMENTATION,),
-        ),
-        EvidenceRequirement(
-            requirement_id="test_search",
-            role=EvidenceRole.TEST,
-            rule=RequirementRule.COLLECTION_OUTCOME,
-            strength=OPTIONAL,
-            description=(
-                "the requested test-domain acquisition must have an explicit outcome"
-            ),
-            capability=Capability.LEXICAL_MENTIONS,
-            acceptable_kinds=(
-                ObservationKind.TEST_MENTION,
-                ObservationKind.LEXICAL_MENTION,
-            ),
-            domain="test",
-        ),
-        EvidenceRequirement(
-            requirement_id="owning_package",
-            role=EvidenceRole.OWNERSHIP,
-            rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
-            strength=OPTIONAL,
-            description="select owning-package evidence when it was acquired",
-            capability=Capability.OWNING_PACKAGE,
-            acceptable_kinds=(ObservationKind.OWNING_PACKAGE,),
-        ),
-        EvidenceRequirement(
-            requirement_id="additional_lexical_mention",
-            role=EvidenceRole.LEXICAL_MENTION,
-            rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
-            strength=OPTIONAL,
-            description=(
-                "select an admissible lexical mention when one was acquired; "
-                "lexical evidence stays labeled separately from semantic references"
-            ),
-            capability=Capability.LEXICAL_MENTIONS,
-            acceptable_kinds=(ObservationKind.LEXICAL_MENTION,),
+        capabilities=REFERENCE_CAPABILITIES,
+        acceptable_kinds=(
+            ObservationKind.SEMANTIC_REFERENCE,
+            ObservationKind.SYNTACTIC_MENTION,
         ),
     )
 
 
-def _symbol_requirements() -> tuple[EvidenceRequirement, ...]:
-    return (
-        _declaration_requirement(Capability.FIND_DECLARATIONS),
-        _source_requirement(),
-        *_optional_evidence(),
+def _implementations(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="implementations",
+        role=EvidenceRole.IMPLEMENTATION,
+        rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
+        strength=_strength(required),
+        description="select an admissible implementation when one was acquired",
+        capabilities=(Capability.IMPLEMENTATIONS,),
+        acceptable_kinds=(ObservationKind.IMPLEMENTATION,),
     )
 
 
-def _location_requirements() -> tuple[EvidenceRequirement, ...]:
-    return (
-        _declaration_requirement(Capability.RESOLVE_LOCATION),
-        _source_requirement(),
-        *_optional_evidence(),
+def _test_search(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="test_search",
+        role=EvidenceRole.TEST,
+        rule=RequirementRule.COLLECTION_OUTCOME,
+        strength=_strength(required),
+        description=(
+            "the requested test-domain acquisition must have an explicit outcome; "
+            "an empty completed search does not establish that no tests exist"
+        ),
+        capabilities=(Capability.LEXICAL_MENTIONS,),
+        acceptable_kinds=(ObservationKind.TEST_MENTION,),
+        domain="test",
     )
 
 
-def _path_requirements() -> tuple[EvidenceRequirement, ...]:
-    return (
-        EvidenceRequirement(
-            requirement_id="target_structure",
-            role=EvidenceRole.TARGET_STRUCTURE,
-            rule=RequirementRule.MINIMUM_EVIDENCE,
-            strength=REQUIRED,
-            description="the requested target structure must be represented",
-            capability=Capability.OUTLINE,
-            acceptable_kinds=(
-                ObservationKind.OUTLINE,
-                ObservationKind.SOURCE_WINDOW,
-            ),
+def _ownership(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="owning_package",
+        role=EvidenceRole.OWNERSHIP,
+        rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
+        strength=_strength(required),
+        description="select owning-package evidence when it was acquired",
+        capabilities=(Capability.OWNING_PACKAGE,),
+        acceptable_kinds=(ObservationKind.OWNING_PACKAGE,),
+    )
+
+
+def _lexical_mentions(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="additional_lexical_mention",
+        role=EvidenceRole.LEXICAL_MENTION,
+        rule=RequirementRule.REPRESENTATIVE_EVIDENCE,
+        strength=_strength(required),
+        description=(
+            "lexical mentions, labeled separately from semantic and syntactic "
+            "reference evidence"
+        ),
+        capabilities=(Capability.LEXICAL_MENTIONS,),
+        acceptable_kinds=(ObservationKind.LEXICAL_MENTION,),
+    )
+
+
+def _structure(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="target_structure",
+        role=EvidenceRole.TARGET_STRUCTURE,
+        rule=RequirementRule.MINIMUM_EVIDENCE,
+        strength=_strength(required),
+        description="the requested target structure must be represented",
+        capabilities=(Capability.OUTLINE,),
+        acceptable_kinds=(
+            ObservationKind.OUTLINE,
+            ObservationKind.SOURCE_WINDOW,
         ),
     )
 
 
-def _range_requirements() -> tuple[EvidenceRequirement, ...]:
-    return (
-        EvidenceRequirement(
-            requirement_id="requested_source",
-            role=EvidenceRole.TARGET_SOURCE,
-            rule=RequirementRule.EXACT_SOURCE,
-            strength=REQUIRED,
-            description="the requested source range must be selected exactly",
-            capability=Capability.READ_SOURCE,
-            acceptable_kinds=(ObservationKind.SOURCE_WINDOW,),
-            representations=(RepresentationKind.EXACT_SOURCE,),
-        ),
+def _requested_source(*, required: bool) -> EvidenceRequirement:
+    return EvidenceRequirement(
+        requirement_id="requested_source",
+        role=EvidenceRole.TARGET_SOURCE,
+        rule=RequirementRule.EXACT_SOURCE,
+        strength=_strength(required),
+        description="the requested source range must be selected exactly",
+        capabilities=(Capability.READ_SOURCE,),
+        acceptable_kinds=(ObservationKind.SOURCE_WINDOW,),
+        representations=(RepresentationKind.EXACT_SOURCE,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Intent profiles
+# ---------------------------------------------------------------------------
+
+
+def _declaration_requirements(
+    intent: Intent, capability: Capability
+) -> tuple[EvidenceRequirement, ...]:
+    return (_declaration(capability), *_symbol_extras(intent))
+
+
+def _symbol_requirements(intent: Intent) -> tuple[EvidenceRequirement, ...]:
+    return (
+        _declaration(Capability.FIND_DECLARATIONS),
+        *_symbol_extras(intent),
+    )
+
+
+# Per-intent collection emphasis: (builder, required) in bundle order.
+_INTENT_RECIPES: dict[
+    Intent, tuple[tuple[Callable[..., EvidenceRequirement], bool], ...]
+] = {
+    Intent.UNDERSTAND: (
+        (_source, True),
+        (_references, False),
+        (_implementations, False),
+        (_ownership, False),
+    ),
+    Intent.EDIT: (
+        (_source, True),
+        (_references, False),
+        (_test_search, True),
+        (_ownership, False),
+    ),
+    Intent.RENAME: (
+        (_source, False),
+        (_references, True),
+        (_lexical_mentions, True),
+        (_test_search, True),
+    ),
+    Intent.REFACTOR: (
+        (_source, True),
+        (_references, False),
+        (_implementations, True),
+        (_test_search, True),
+        (_ownership, False),
+    ),
+    Intent.IMPACT: (
+        (_source, False),
+        (_references, True),
+        (_implementations, False),
+        (_test_search, True),
+        (_ownership, True),
+    ),
+}
+
+
+def _symbol_extras(intent: Intent) -> tuple[EvidenceRequirement, ...]:
+    return tuple(
+        builder(required=required) for builder, required in _INTENT_RECIPES[intent]
+    )
+
+
+_PATH_SOURCE_INTENTS = frozenset({Intent.UNDERSTAND, Intent.EDIT, Intent.REFACTOR})
+_PATH_OWNERSHIP_INTENTS = frozenset(
+    {Intent.UNDERSTAND, Intent.EDIT, Intent.REFACTOR, Intent.IMPACT}
+)
+_RANGE_OWNERSHIP_INTENTS = frozenset({Intent.EDIT, Intent.REFACTOR, Intent.IMPACT})
+
+
+def _path_requirements(
+    intent: Intent, *, is_file: bool
+) -> tuple[EvidenceRequirement, ...]:
+    requirements: list[EvidenceRequirement] = [_structure(required=True)]
+    if is_file and intent in _PATH_SOURCE_INTENTS:
+        requirements.append(_source(required=True))
+    if intent in _PATH_OWNERSHIP_INTENTS:
+        requirements.append(_ownership(required=intent is Intent.IMPACT))
+    return tuple(requirements)
+
+
+def _range_requirements(intent: Intent) -> tuple[EvidenceRequirement, ...]:
+    requirements: list[EvidenceRequirement] = [_requested_source(required=True)]
+    if intent in _RANGE_OWNERSHIP_INTENTS:
+        requirements.append(_ownership(required=False))
+    return tuple(requirements)

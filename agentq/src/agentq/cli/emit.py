@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,8 @@ from typing import Any, cast
 from agentq.continuations import attach_continuation_cursors
 from agentq.core import (
     as_dict,
+    canonical_digest,
+    canonical_json,
     dict_field,
     list_field,
     repo_id,
@@ -27,6 +30,8 @@ from agentq.delivery import (
     DeliveryContext,
     DispatchResult,
     EmittedBytes,
+    EvidenceFragment,
+    RenderedOutput,
     Renderer,
     begin_cached_operation,
     extract_delivered_fragments,
@@ -37,12 +42,28 @@ from agentq.delivery import (
     require_usable_budget,
     suppression_identity,
 )
-from agentq.output_attribution import attribute_output, output_view
+from agentq.inspection.contracts import InspectionBundle, RenderedBundle
+from agentq.inspection.rendering import selected_cost
+from agentq.output_attribution import (
+    attribute_output,
+    empty_attribution,
+    output_view,
+)
 
-from .transport import sink_encoding, write_stdout
+from .transport import sink_encoding, write_stderr, write_stdout
 
 _PRESENTATION_ARGS = frozenset(
-    {"command", "repo", "format", "budget", "repeat", "color", "plain", "utc", "watch"}
+    {
+        "command",
+        "repo",
+        "format",
+        "repeat",
+        "color",
+        "plain",
+        "utc",
+        "watch",
+        "debug",
+    }
 )
 
 
@@ -93,6 +114,7 @@ def emit(
     exit_code: int = 0,
     root: Path | None = None,
     result: Any | None = None,
+    budget: int = 0,
 ) -> DispatchResult:
     internal: dict[str, Any] = as_dict(data.pop("_agentq_internal", None))
     telemetry_data: dict[str, Any] = dict_field(internal, "telemetry_data") or dict(
@@ -101,7 +123,6 @@ def emit(
     command = str(getattr(args, "command", "unknown"))
     repo_text = str(getattr(args, "repo", "."))
     output_format = str(getattr(args, "format", "text"))
-    budget = int(getattr(args, "budget", 0) or 0)
     encoding = sink_encoding()
     rendered = project_output(
         data,
@@ -170,7 +191,9 @@ def emit(
     return dispatch
 
 
-def render_context_repeat(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_context_repeat(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     return (
         f"{data['command']}: exact result already returned in this {data['repeat_scope']}; "
         "use --repeat to render it again"
@@ -186,12 +209,13 @@ def emit_cached(
     formatter: Renderer,
     *,
     wire: Callable[[Any], dict[str, Any]] | None = None,
+    budget: int = 0,
 ) -> DispatchResult:
     decision = begin_cached_operation(
         root,
         command,
         options,
-        budget=args.budget,
+        budget=budget,
         output_format=args.format,
         repeat=bool(getattr(args, "repeat", False)),
     )
@@ -218,4 +242,139 @@ def emit_cached(
     attach_continuation_cursors(root, data)
     if typed is not None and hasattr(typed, "with_wire_continuations"):
         typed = typed.with_wire_continuations(data)
-    return emit(args, data, formatter, root=root, result=typed)
+    return emit(args, data, formatter, root=root, result=typed, budget=budget)
+
+
+def emit_rendered(
+    args: argparse.Namespace,
+    root: Path,
+    command: str,
+    rendered: RenderedBundle,
+    *,
+    bundle: InspectionBundle | None = None,
+) -> DispatchResult:
+    """Deliver an already-selected, already-bounded inspection result.
+
+    The inspection service owns evidence selection and serialization cost; this
+    path writes exactly those bytes and records the same receipt as any other
+    command. It performs no projection, suppression, or continuation: a
+    selected bundle is never dropped or shortened a second time.
+    """
+    encoding = sink_encoding()
+    visible = rendered.text
+    payload = (visible + "\n").encode(encoding, errors="replace")
+    fragments, rows = (
+        _inspection_fragments(bundle) if bundle is not None else ([], [])
+    )
+    write_stdout(visible)
+    identity = suppression_identity(root)
+    data: dict[str, Any] = {"command": command, "kind": "inspection"}
+    dispatch = finalize_output(
+        data,
+        rendered=RenderedOutput(
+            visible=visible, prebudget_chars=len(visible), truncated=False
+        ),
+        context=DeliveryContext(
+            request_id=invocation_request_id(args),
+            repo_id=repo_id(root),
+            context_id=identity[0] if identity is not None else None,
+            consumer_id=(identity[1] or None) if identity is not None else session_id(),
+            output_view=output_view(command, data),
+            output_attribution=_inspection_attribution(bundle, visible, rendered.format),
+            encoding=encoding,
+            record_receipt=True,
+        ),
+        sink=EmittedBytes(
+            written_bytes=len(payload),
+            output_digest=hashlib.sha256(payload).hexdigest(),
+        ),
+        fragments=tuple(fragments),
+        telemetry_data={
+            "command": command,
+            "selection": (
+                len(bundle.selection.selected)
+                if bundle is not None and bundle.selection is not None
+                else 0
+            ),
+        },
+    )
+    return record_delivery(command, dispatch, {}, rows)
+
+
+def _inspection_attribution(
+    bundle: InspectionBundle | None, visible: str, output_format: str
+) -> dict[str, int]:
+    """Label the selected evidence text separately from framing.
+
+    The generic attributor understands search/read payload shapes; inspection
+    evidence is already selected and measurable here, so it is measured here.
+    """
+    attribution = empty_attribution()
+    evidence = 0
+    if bundle is not None and bundle.selection is not None and visible:
+        for item in bundle.selection.selected:
+            if output_format == "text":
+                evidence += selected_cost(item, "text") - 1
+            else:
+                evidence += len(canonical_json(item.variant.to_wire()))
+    evidence = min(evidence, len(visible))
+    attribution["unique_evidence_chars"] = evidence
+    attribution["framing_chars"] = len(visible) - evidence
+    return attribution
+
+
+def _inspection_fragments(
+    bundle: InspectionBundle,
+) -> tuple[list[EvidenceFragment], list[dict[str, Any]]]:
+    """Evidence records and ledger rows for the representations actually emitted."""
+    selection = bundle.selection
+    if selection is None:
+        return [], []
+    fragments: list[EvidenceFragment] = []
+    rows: list[dict[str, Any]] = [
+        {
+            "kind": "operation",
+            "key": canonical_digest(
+                {"command": "inspect", "request_id": bundle.request.request_id},
+                length=32,
+            ),
+        }
+    ]
+    for item in selection.selected:
+        variant = item.variant
+        key = canonical_digest(
+            {
+                "observation_id": item.observation_id,
+                "variant_id": item.variant_id,
+                "reason": item.reason,
+            },
+            length=32,
+        )
+        fragments.append(
+            EvidenceFragment(
+                evidence_id=item.observation_id,
+                kind=variant.representation.value,
+                source=variant.source,
+                variant=variant.fidelity.value,
+                rendered_chars=len(variant.text),
+            )
+        )
+        rows.append(
+            {
+                "kind": "inspection-evidence",
+                "key": key,
+                "payload": {
+                    "path": variant.source.path,
+                    "representation": variant.representation.value,
+                    "fidelity": variant.fidelity.value,
+                    "reason": item.reason,
+                    "score": item.score,
+                },
+            }
+        )
+    return fragments, rows
+
+
+def write_trace(trace_wire: dict[str, Any]) -> None:
+    """Write one structured debug record to stderr, never to stdout."""
+    write_stderr(json.dumps(trace_wire, ensure_ascii=False, sort_keys=True) + "\n")

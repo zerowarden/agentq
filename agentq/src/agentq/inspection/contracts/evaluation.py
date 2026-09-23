@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from agentq.core import (
     ContractError,
@@ -58,7 +57,7 @@ class EvidenceFeatures:
         optional_str(self.relation, "evidence features relation")
         optional_str(self.domain, "evidence features domain")
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "observation_id": self.observation_id,
             "role": self.role.value if self.role else None,
@@ -137,12 +136,19 @@ class SelectedEvidence:
     reason: str
     score: int = 0
     requirement_id: str | None = None
+    contributions: tuple[ScoreContribution, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.variant, EvidenceVariant):
             raise ContractError("selected evidence requires an EvidenceVariant")
         require_str(self.reason, "selected evidence reason")
         optional_str(self.requirement_id, "selected evidence requirement_id")
+        if not is_instance_of(self.contributions, tuple) or not all(
+            is_instance_of(item, ScoreContribution) for item in self.contributions
+        ):
+            raise ContractError(
+                "selected evidence contributions must be ScoreContribution records"
+            )
 
     @property
     def observation_id(self) -> str:
@@ -151,6 +157,26 @@ class SelectedEvidence:
     @property
     def variant_id(self) -> str:
         return self.variant.variant_id
+
+
+def selected_evidence_to_wire(item: SelectedEvidence) -> dict[str, object]:
+    """The canonical projection one selected representation serializes to.
+
+    Rendering and cost accounting both use this projection, so a measured cost
+    is the cost of the bytes actually delivered.
+    """
+    return {
+        "observation_id": item.observation_id,
+        "variant_id": item.variant_id,
+        "reason": item.reason,
+        "score": item.score,
+        "requirement_id": item.requirement_id,
+        "contributions": [
+            {"name": contribution.name, "value": contribution.value}
+            for contribution in item.contributions
+        ],
+        "variant": item.variant.to_wire(),
+    }
 
 
 @dataclass(frozen=True)
@@ -205,7 +231,7 @@ class RequirementAssessment:
     supporting: tuple[str, ...] = ()
     detail: str | None = None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "requirement_id": self.requirement_id,
             "status": self.status.value,

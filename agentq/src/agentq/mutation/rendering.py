@@ -6,7 +6,9 @@ from .apply import ApplyResult
 from .scan import ScanResult
 
 
-def render_scan(result: ScanResult, *, budget: int = 0) -> str:
+def render_scan(
+    result: ScanResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     lines = [
         f"codemod scan [{result.mode}]: {result.matches} matches in "
         f"{result.files} files",
@@ -34,7 +36,9 @@ def render_scan(result: ScanResult, *, budget: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_apply(result: ApplyResult, *, budget: int = 0) -> str:
+def render_apply(
+    result: ApplyResult, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     if not result.applied:
         return _apply_scan_summary(result) + f"\n\n{result.message}"
     outcome = result.outcome

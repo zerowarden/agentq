@@ -86,16 +86,19 @@ class RuntimeCliTests(AgentQIntegrationHarness):
 
     def test_concurrent_processes_preserve_context_state(self) -> None:
         env = {**self.env, "AGENTQ_SESSION_ID": "concurrent"}
+        probes = self.repo / "packages/a/src/concurrent_probes.ts"
+        probes.write_text(
+            "".join(f"export const ConcurrentProbe{index} = {index}\n" for index in range(8)),
+            encoding="utf-8",
+        )
         processes = [
             subprocess.Popen(
                 [
                     str(AGENTQ),
                     "search",
-                    "OldName",
+                    f"ConcurrentProbe{index}",
                     "--format",
                     "json",
-                    "--budget",
-                    str(4000 + index),
                     "--path",
                     "packages/a/src",
                 ],
@@ -143,8 +146,8 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         self.assertIn("use --line N or --lines START:END", include_source.stderr)
         self.assertLess(len(include_source.stderr), 600)
 
-        typo = self.aq("search", "OldName", "--budgt", "2000", expect=2)
-        self.assertIn("did you mean --budget?", typo.stderr)
+        typo = self.aq("search", "OldName", "--formt", "2000", expect=2)
+        self.assertIn("did you mean --format?", typo.stderr)
         invalid_command = subprocess.run(
             [str(AGENTQ), "searh"],
             text=True,

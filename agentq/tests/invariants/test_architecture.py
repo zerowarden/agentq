@@ -345,21 +345,20 @@ class DependencyDirectionTests(unittest.TestCase):
 
 
 class NavigationProviderBoundaryTests(unittest.TestCase):
-    def test_orchestration_does_not_import_concrete_payload_classes(self) -> None:
+    def test_navigation_is_a_low_level_boundary(self) -> None:
         offenders: dict[str, list[str]] = {}
-        for relative in ("navigation/inspect.py", "navigation/resolution.py"):
-            module = f"{ROOT}.{relative[:-3].replace('/', '.')}"
-            package = module.rsplit(".", 1)[0]
-            path = PACKAGE_DIR / relative
+        for module, path, package in _iter_modules():
+            if not _under(module, NAVIGATION_ROOT):
+                continue
             hits = sorted(
                 item
                 for item in _imports_from_source(path.read_text(), package)
-                if item.rsplit(".", 1)[-1] in CONCRETE_PAYLOAD_NAMES
+                if _under(item, CLI_ROOT) or _under(item, INSPECTION_ROOT)
             )
             if hits:
                 offenders[module] = hits
         self.assertFalse(
-            offenders, f"orchestration importing concrete payloads: {offenders}"
+            offenders, f"navigation importing CLI or inspection: {offenders}"
         )
 
 

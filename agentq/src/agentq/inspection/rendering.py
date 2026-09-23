@@ -3,6 +3,10 @@
 Rendering serializes the selected bundle. It never truncates evidence, drops
 assessments, or performs acquisition: the selector owns the delivery budget,
 and a rendered bundle is exactly the selected bundle in one format.
+
+The text block builder and the serialized cost measure live here together, so
+a measured delivery cost is the character count of the bytes rendering emits
+for that selection in the requested format.
 """
 
 from __future__ import annotations
@@ -15,9 +19,11 @@ from .contracts import (
     InspectionBundle,
     RenderedBundle,
     ResolvedTarget,
+    SelectedEvidence,
     SourceSpan,
     UnresolvedTarget,
     describe_target,
+    selected_evidence_to_wire,
 )
 
 
@@ -121,6 +127,39 @@ def _requirement_lines(bundle: InspectionBundle) -> list[str]:
     return lines
 
 
+def evidence_block(item: SelectedEvidence) -> tuple[str, ...]:
+    """The exact text lines one selected representation serializes to."""
+    variant = item.variant
+    header = (
+        f"  [{item.reason}] {variant.representation.value}/"
+        f"{variant.fidelity.value} {_source_label(variant.source)} · score {item.score}"
+    )
+    contributions = ", ".join(
+        f"{contribution.name}={contribution.value}"
+        for contribution in item.contributions
+    )
+    if contributions:
+        header += f" ({contributions})"
+    return (
+        header,
+        *(f"    {line}" for line in variant.text.rstrip("\n").splitlines()),
+    )
+
+
+def selected_cost(item: SelectedEvidence, output_format: str) -> int:
+    """Incremental serialized cost of one selected representation.
+
+    The measure is characters of the exact projection rendering emits in that
+    format, including separators; the response envelope allowance covers the
+    fixed bundle scaffolding (resolution, policy, assessment, gaps, headers).
+    """
+    if output_format not in DELIVERY_FORMATS:
+        raise ContractError(f"unsupported delivery format: {output_format!r}")
+    if output_format == "text":
+        return sum(len(line) + 1 for line in evidence_block(item)) + 1
+    return len(canonical_json(selected_evidence_to_wire(item))) + 1
+
+
 def _evidence_lines(bundle: InspectionBundle) -> list[str]:
     if bundle.selection is None or not bundle.selection.selected:
         return []
@@ -129,12 +168,7 @@ def _evidence_lines(bundle: InspectionBundle) -> list[str]:
         f"{bundle.selection.measured_cost}/{bundle.selection.budget_chars} chars):"
     ]
     for item in bundle.selection.selected:
-        variant = item.variant
-        lines.append(
-            f"  [{item.reason}] {variant.representation.value}/"
-            f"{variant.fidelity.value} {_source_label(variant.source)}"
-        )
-        lines.extend(f"    {line}" for line in variant.text.rstrip("\n").splitlines())
+        lines.extend(evidence_block(item))
     return lines
 
 

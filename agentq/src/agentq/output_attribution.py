@@ -38,6 +38,7 @@ _SAFE_VIEWS = {
     "directory",
     "file",
     "hunks",
+    "inspection",
     "lexical",
     "matches",
     "patch",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from agentq.core import (
     ContractError,
@@ -27,7 +27,7 @@ class Intent(str, Enum):
     IMPACT = "impact"
 
     @classmethod
-    def parse(cls, value: Any) -> Intent:
+    def parse(cls, value: object) -> Intent:
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
@@ -88,7 +88,7 @@ class SourceSpan:
     def is_line_only(self) -> bool:
         return self.start_column is None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "start_line": self.start_line,
             "start_column": self.start_column,
@@ -114,7 +114,12 @@ class SymbolTarget:
         require_str(self.name, "symbol target name")
         validate_scopes(self.scopes, "symbol target scopes")
 
-    def to_wire(self) -> dict[str, Any]:
+    @property
+    def scope_paths(self) -> tuple[str, ...]:
+        """Repository-relative scopes this target constrains evidence to."""
+        return self.scopes
+
+    def to_wire(self) -> dict[str, object]:
         return {"kind": self.kind.value, "name": self.name, "scopes": list(self.scopes)}
 
 
@@ -128,7 +133,12 @@ class PathTarget:
     def __post_init__(self) -> None:
         require_relative_posix(self.path, "path target", allow_root=True)
 
-    def to_wire(self) -> dict[str, Any]:
+    @property
+    def scope_paths(self) -> tuple[str, ...]:
+        """Repository-relative scopes this target constrains evidence to."""
+        return (self.path,)
+
+    def to_wire(self) -> dict[str, object]:
         return {"kind": self.kind.value, "path": self.path}
 
 
@@ -146,7 +156,12 @@ class LocationTarget:
         require_int(self.line, "location target line", minimum=1)
         require_int(self.column, "location target column", minimum=1)
 
-    def to_wire(self) -> dict[str, Any]:
+    @property
+    def scope_paths(self) -> tuple[str, ...]:
+        """Repository-relative scopes this target constrains evidence to."""
+        return (self.path,)
+
+    def to_wire(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
             "path": self.path,
@@ -171,7 +186,12 @@ class RangeTarget:
             if not isinstance(span, SourceSpan):
                 raise ContractError("range target spans must be SourceSpan records")
 
-    def to_wire(self) -> dict[str, Any]:
+    @property
+    def scope_paths(self) -> tuple[str, ...]:
+        """Repository-relative scopes this target constrains evidence to."""
+        return (self.path,)
+
+    def to_wire(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
             "path": self.path,
@@ -193,7 +213,12 @@ class CandidateTarget:
         require_str(self.symbol, "candidate target symbol")
         validate_scopes(self.scopes, "candidate target scopes")
 
-    def to_wire(self) -> dict[str, Any]:
+    @property
+    def scope_paths(self) -> tuple[str, ...]:
+        """Repository-relative scopes this target constrains evidence to."""
+        return self.scopes
+
+    def to_wire(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
             "candidate_id": self.candidate_id,

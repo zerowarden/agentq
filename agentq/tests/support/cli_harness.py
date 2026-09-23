@@ -271,15 +271,7 @@ class AgentQIntegrationHarness(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         if not args:
             raise AssertionError("missing agentq subcommand")
-        argv = [
-            str(AGENTQ),
-            args[0],
-            "--format",
-            "json",
-            "--budget",
-            "1000000",
-            *args[1:],
-        ]
+        argv = [str(AGENTQ), args[0], "--format", "json", *args[1:]]
         env = self.env.copy()
         if extra_env:
             env.update(extra_env)

@@ -19,14 +19,18 @@ from tests.support.cli_harness import (
 class ContinuationCliTests(AgentQIntegrationHarness):
     def test_continuation_cursors_are_short_scoped_and_replayable(self) -> None:
         session = {"AGENTQ_SESSION_ID": "cursor-test"}
+        # Exceed the internal search page so acquisition issues a cursor.
+        broad = self.repo / "packages/a/src/cursor_broad.ts"
+        broad.write_text(
+            "".join(f"export const OldName{index} = {index}\n" for index in range(200)),
+            encoding="utf-8",
+        )
         rendered = subprocess.run(
             [
                 str(AGENTQ),
                 "search",
                 "--format",
                 "text",
-                "--budget",
-                "250",
                 "OldName",
                 "--path",
                 "packages",
@@ -63,8 +67,6 @@ class ContinuationCliTests(AgentQIntegrationHarness):
             "OldName",
             "--path",
             "packages",
-            "--budget",
-            "600",
             "--format",
             "compact-json",
             extra_env=session,
@@ -112,7 +114,7 @@ class ContinuationCliTests(AgentQIntegrationHarness):
                 continuations_module.load_cursor(self.repo, stored.cursor)
             )
 
-    def test_inspect_continuations_are_display_hints(self) -> None:
+    def test_inspection_results_carry_no_continuation_cursor(self) -> None:
         (self.repo / "packages/a/src/cursor_nav.py").write_text(
             "def cursorNav(value):\n"
             "    return value\n"
@@ -122,19 +124,26 @@ class ContinuationCliTests(AgentQIntegrationHarness):
             "three = cursorNav(two)\n",
             encoding="utf-8",
         )
-        with mock.patch.object(sys, "path", [str(AGENTQ.parent), *sys.path]):
-            from agentq.navigation import InspectRequest, inspect
+        payload = self.data("inspect", "cursorNav", "--path", "packages/a/src")
+        self.assertNotIn("continuation", payload)
 
-        inspected = inspect(
-            InspectRequest(
-                root=self.repo,
-                target="cursorNav",
-                paths=("packages/a/src",),
-                limit=1,
-            )
-        ).to_wire()
-        block = inspected["python"]["continuation"]
-        self.assertNotIn("cursor", block)
-        self.assertTrue(block["command"].startswith("agentq inspect "))
+        rendered = subprocess.run(
+            [
+                str(AGENTQ),
+                "inspect",
+                "cursorNav",
+                "--path",
+                "packages/a/src",
+                "--format",
+                "text",
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            cwd=self.repo,
+        )
+        self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
+        self.assertNotIn("agentq continue", rendered.stdout)
+        self.assertNotIn("agentq read", rendered.stdout)
 
 

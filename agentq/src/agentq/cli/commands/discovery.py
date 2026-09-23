@@ -19,6 +19,10 @@ from agentq.requests import search_options_from_args
 from ..emit import emit_cached
 from ..registry import Outcome
 
+# The public surface carries no budget: search keeps a named internal ceiling
+# for the characters it may render in one response.
+_SEARCH_RENDER_BUDGET = 12_000
+
 
 def run_search(args: argparse.Namespace, root: Path) -> Outcome:
     search_paths = list(args.paths)
@@ -39,7 +43,7 @@ def run_search(args: argparse.Namespace, root: Path) -> Outcome:
         scan_cap=options.scan_cap,
         coverage_policy=options.coverage_policy,
         output_format=str(args.format),
-        budget=args.budget,
+        budget=_SEARCH_RENDER_BUDGET,
         roles=options.roles,
     )
     request = SearchRequest(
@@ -80,12 +84,13 @@ def run_search(args: argparse.Namespace, root: Path) -> Outcome:
         wire=(
             (
                 lambda result: compact_search_wire(
-                    result, budget=args.budget, resume=resume
+                    result, budget=_SEARCH_RENDER_BUDGET, resume=resume
                 )
             )
             if compact
             else None
         ),
+        budget=_SEARCH_RENDER_BUDGET,
     )
 
 

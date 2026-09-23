@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from agentq.core import (
     ContractError,
@@ -60,7 +59,7 @@ class EvidenceRequirement:
     rule: RequirementRule
     strength: RequirementStrength
     description: str = ""
-    capability: Capability | None = None
+    capabilities: tuple[Capability, ...] = ()
     acceptable_kinds: tuple[ObservationKind, ...] = ()
     representations: tuple[RepresentationKind, ...] = ()
     domain: str | None = None
@@ -78,21 +77,34 @@ class EvidenceRequirement:
         require_str(
             self.description, "evidence requirement description", allow_empty=True
         )
-        if self.capability is not None and not isinstance(self.capability, Capability):
-            raise ContractError("evidence requirement capability must be a Capability")
+        if not is_instance_of(self.capabilities, tuple) or not all(
+            is_instance_of(item, Capability) for item in self.capabilities
+        ):
+            raise ContractError(
+                "evidence requirement capabilities must be Capability records"
+            )
+        require_unique_strings(
+            tuple(item.value for item in self.capabilities),
+            "evidence requirement capabilities",
+        )
         optional_str(self.domain, "evidence requirement domain")
+
+    @property
+    def preferred_capability(self) -> Capability | None:
+        """The first acceptable capability in preference order."""
+        return self.capabilities[0] if self.capabilities else None
 
     def is_required(self) -> bool:
         return self.strength is RequirementStrength.REQUIRED
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "requirement_id": self.requirement_id,
             "role": self.role.value,
             "rule": self.rule.value,
             "strength": self.strength.value,
             "description": self.description,
-            "capability": self.capability.value if self.capability else None,
+            "capabilities": [item.value for item in self.capabilities],
             "acceptable_kinds": [kind.value for kind in self.acceptable_kinds],
             "representations": [item.value for item in self.representations],
             "domain": self.domain,
@@ -138,7 +150,7 @@ class EvidencePolicy:
                 return item
         return None
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, object]:
         return {
             "profile": self.profile,
             "intent": self.intent.value,

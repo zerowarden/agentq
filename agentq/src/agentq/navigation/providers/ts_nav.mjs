@@ -14,6 +14,12 @@ const rootArg = symbolMode ? argv[2] : argv[1];
 if (!rootArg) fail('missing repository root');
 const root = fs.realpathSync(rootArg);
 
+const DISCOVERY_CONFIG_LIMIT = 64;
+const DISCOVERY_DIR_LIMIT = 2500;
+const NAVIGATION_ITEM_MIN = 200;
+const NAVIGATION_ITEM_FACTOR = 4;
+const OPERATIONS = new Set(['definition', 'references', 'implementations']);
+
 let ts = null;
 function loadTs() {
   if (ts) return ts;
@@ -21,10 +27,42 @@ function loadTs() {
     const requireFromRoot = createRequire(path.join(root, 'package.json'));
     ts = requireFromRoot('typescript');
   } catch (error) {
-    fail('TypeScript package is not resolvable from the repository; use the project\'s existing typescript dependency', { detail: String(error?.message || error) });
+    fail('TypeScript package is not resolvable from the repository; use the project\'s existing typescript dependency', { detail: String(error?.message || error), code: 'typescript_unavailable' });
   }
   return ts;
 }
+
+function runtimeMeta() {
+  return { node: process.version, typescript: ts ? ts.version : null };
+}
+
+function metaPayload(discovery = null, project = null) {
+  return {
+    runtime: runtimeMeta(),
+    discovery: {
+      configs: discovery ? discovery.configs.length : 0,
+      truncated: Boolean(discovery?.truncated),
+      errors: discovery?.errors || [],
+      limit: DISCOVERY_CONFIG_LIMIT,
+    },
+    project,
+  };
+}
+
+function projectMeta(service, configPath) {
+  let programFiles = 0;
+  try {
+    programFiles = service.getProgram()?.getSourceFiles()?.length || 0;
+  } catch {
+    programFiles = 0;
+  }
+  return {
+    config: configPath ? rel(configPath) : null,
+    root_dir: configPath ? rel(path.dirname(configPath)) : null,
+    program_files: programFiles,
+  };
+}
+
 
 function canonicalAbsolute(abs) {
   try {
@@ -228,6 +266,8 @@ function scopeAllows(fileName, scopes) {
 
 function discoverConfigs(scopes) {
   const found = new Set();
+  let visited = 0;
+  let truncated = false;
   const addUpward = (start) => {
     const config = ts.findConfigFile(start, ts.sys.fileExists, 'tsconfig.json');
     if (config) found.add(path.resolve(config));
@@ -236,13 +276,20 @@ function discoverConfigs(scopes) {
   const roots = scopes.length ? scopes : ['.'];
   const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo']);
   for (const scope of roots) {
+    if (found.size >= DISCOVERY_CONFIG_LIMIT || visited >= DISCOVERY_DIR_LIMIT) {
+      truncated = true;
+      break;
+    }
     const absolute = path.resolve(root, scope);
     if (!fs.existsSync(absolute)) continue;
     const start = fs.statSync(absolute).isDirectory() ? absolute : path.dirname(absolute);
     addUpward(start);
     const stack = [start];
-    let visited = 0;
-    while (stack.length && found.size < 64 && visited < 2500) {
+    while (stack.length) {
+      if (found.size >= DISCOVERY_CONFIG_LIMIT || visited >= DISCOVERY_DIR_LIMIT) {
+        truncated = true;
+        break;
+      }
       const dir = stack.pop();
       visited += 1;
       const config = path.join(dir, 'tsconfig.json');
@@ -255,8 +302,9 @@ function discoverConfigs(scopes) {
       }
     }
   }
-  return [...found].sort();
+  return { configs: [...found].sort(), truncated, visited, errors: [] };
 }
+
 
 function runPositionMode() {
   const [action, , fileArg, lineArg, columnArg, limitArg] = argv;
@@ -269,16 +317,17 @@ function runPositionMode() {
   const column = Number(columnArg);
   const limit = Math.max(1, Number(limitArg || 80));
   const configPath = ts.findConfigFile(path.dirname(file), ts.sys.fileExists, 'tsconfig.json');
-  if (!configPath) fail('no tsconfig.json found from target file toward filesystem root');
+  if (!configPath) fail('no tsconfig.json found from target file toward filesystem root', { code: 'no_config' });
   const { service } = makeService(configPath, file);
   const sf = service.getProgram()?.getSourceFile(file);
-  if (!sf) fail('target file is not part of the resolved TypeScript program', { config: configPath });
+  if (!sf) fail('target file is not part of the resolved TypeScript program', { config: configPath, code: 'target_outside_program' });
   if (!Number.isInteger(line) || line < 1 || line > sf.getLineAndCharacterOfPosition(sf.getEnd()).line + 1) fail('line is outside target file');
   const lineStart = sf.getPositionOfLineAndCharacter(line - 1, 0);
   const lineText = sf.text.slice(lineStart, sf.getLineEndOfPosition(lineStart));
   const clampedColumn = Math.max(1, Math.min(column, lineText.length + 1));
   const position = sf.getPositionOfLineAndCharacter(line - 1, clampedColumn - 1);
   const unique = actionResults(service, action, file, position);
+  const discovery = { configs: [configPath], truncated: false, errors: [] };
   process.stdout.write(JSON.stringify({
     ok: true,
     action,
@@ -291,8 +340,106 @@ function runPositionMode() {
     shown: Math.min(unique.length, limit),
     truncated: unique.length > limit,
     results: unique.slice(0, limit),
+    meta: metaPayload(discovery, projectMeta(service, configPath)),
   }));
 }
+
+function parseOperations(operationsJson) {
+  let operations;
+  try {
+    operations = JSON.parse(operationsJson || '[]');
+  } catch {
+    fail('operations must be a JSON array', { code: 'invalid_operations' });
+  }
+  if (!Array.isArray(operations) || !operations.length) {
+    fail('at least one operation is required', { code: 'invalid_operations' });
+  }
+  for (const operation of operations) {
+    if (!OPERATIONS.has(operation)) {
+      fail(`unsupported operation: ${JSON.stringify(operation)}`, { code: 'invalid_operations' });
+    }
+  }
+  return [...new Set(operations)];
+}
+
+function operationPayload(service, action, file, position, limit) {
+  try {
+    const results = actionResults(service, action, file, position);
+    return {
+      status: 'completed',
+      total: results.length,
+      shown: Math.min(results.length, limit),
+      truncated: results.length > limit,
+      results: results.slice(0, limit),
+      error: null,
+    };
+  } catch (error) {
+    // One failed operation is a reported outcome, not a failed acquisition.
+    return {
+      status: 'failed',
+      total: 0,
+      shown: 0,
+      truncated: false,
+      results: [],
+      error: String(error?.message || error),
+    };
+  }
+}
+
+function runAtMode() {
+  const [, , fileArg, lineArg, columnArg, operationsArg, limitArg] = argv;
+  if (!fileArg || !lineArg || !columnArg || !operationsArg) {
+    fail('usage: ts_nav.mjs at <root> <file> <line> <column> <operations-json> [limit]');
+  }
+  const operations = parseOperations(operationsArg);
+  loadTs();
+  const file = fs.realpathSync(path.isAbsolute(fileArg) ? fileArg : path.join(root, fileArg));
+  const line = Number(lineArg);
+  const column = Number(columnArg);
+  const limit = Math.max(1, Number(limitArg || 80));
+  const configPath = ts.findConfigFile(path.dirname(file), ts.sys.fileExists, 'tsconfig.json');
+  if (!configPath) fail('no tsconfig.json found from target file toward filesystem root', { code: 'no_config' });
+  const { service } = makeService(configPath, file);
+  const sf = service.getProgram()?.getSourceFile(file);
+  if (!sf) fail('target file is not part of the resolved TypeScript program', { config: rel(configPath), code: 'target_outside_program' });
+  if (!Number.isInteger(line) || line < 1 || line > sf.getLineAndCharacterOfPosition(sf.getEnd()).line + 1) fail('line is outside target file', { code: 'invalid_position' });
+  const lineStart = sf.getPositionOfLineAndCharacter(line - 1, 0);
+  const lineText = sf.text.slice(lineStart, sf.getLineEndOfPosition(lineStart));
+  const clampedColumn = Math.max(1, Math.min(column, lineText.length + 1));
+  const position = sf.getPositionOfLineAndCharacter(line - 1, clampedColumn - 1);
+  const operationsPayload = {};
+  for (const operation of operations) {
+    operationsPayload[operation] = operationPayload(service, operation, file, position, limit);
+  }
+  const discovery = { configs: [configPath], truncated: false, errors: [] };
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    action: 'at',
+    root,
+    config: rel(configPath),
+    target: rel(file),
+    line,
+    column: clampedColumn,
+    declaration_span: declarationSpan(service, file, position),
+    operations: operationsPayload,
+    meta: metaPayload(discovery, projectMeta(service, configPath)),
+  }));
+}
+
+function runProbeMode() {
+  const [, , scopesJson] = argv;
+  const scopes = parseWireScopes(scopesJson);
+  loadTs();
+  const discovery = discoverConfigs(scopes);
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    action: 'probe',
+    root,
+    paths: scopes,
+    meta: metaPayload(discovery),
+  }));
+}
+
 
 function runSymbolMode() {
   const [, action, , symbol, scopesJson, limitArg, pickArg] = argv;
@@ -304,21 +451,27 @@ function runSymbolMode() {
   loadTs();
   const limit = Math.max(1, Number(limitArg || 80));
   const pick = pickArg ? Number(pickArg) : null;
-  const configs = discoverConfigs(scopes);
-  if (!configs.length) fail('no tsconfig.json found for the requested scope');
+  const discovery = discoverConfigs(scopes);
+  if (!discovery.configs.length) fail('no tsconfig.json found for the requested scope', { code: 'no_config' });
 
+  const navigationLimit = Math.max(NAVIGATION_ITEM_MIN, limit * NAVIGATION_ITEM_FACTOR);
   const services = new Map();
   const candidates = [];
   const seen = new Set();
-  for (const configPath of configs) {
+  for (const configPath of discovery.configs) {
     const project = makeService(configPath);
     services.set(configPath, project.service);
     let items = [];
     try {
-      items = project.service.getNavigateToItems(symbol, Math.max(200, limit * 4), undefined, true, true) || [];
-    } catch {
+      items = project.service.getNavigateToItems(symbol, navigationLimit, undefined, true, true) || [];
+    } catch (error) {
+      // A failed project navigation is reported, never silently skipped.
+      discovery.errors.push({ config: rel(configPath), message: String(error?.message || error) });
       continue;
     }
+    // Reaching the bridge-side enumeration bound means the candidate list may
+    // be incomplete for this project even when the CLI limit was not hit.
+    if (items.length >= navigationLimit) discovery.truncated = true;
     for (const item of items) {
       if (item.name !== symbol || !scopeAllows(item.fileName, scopes)) continue;
       const candidate = location(project.service, item.fileName, item.textSpan, {
@@ -346,6 +499,7 @@ function runSymbolMode() {
     shown: Math.min(candidates.length, limit),
     truncated: candidates.length > limit,
     candidates: publicCandidates.slice(0, limit),
+    meta: metaPayload(discovery),
   };
   if (action === 'locate' || candidates.length === 0) {
     process.stdout.write(JSON.stringify({ ...base, ambiguous: candidates.length > 1 }));
@@ -363,6 +517,7 @@ function runSymbolMode() {
   }
   const selected = candidates[selectedIndex];
   const service = services.get(selected._config) || makeService(selected._config, selected._file).service;
+  const meta = metaPayload(discovery, projectMeta(service, selected._config));
   if (action === 'overview') {
     const definitions = actionResults(service, 'definition', selected._file, selected._position);
     const references = actionResults(service, 'references', selected._file, selected._position);
@@ -370,6 +525,7 @@ function runSymbolMode() {
     const truncate = (items) => ({ total: items.length, shown: Math.min(items.length, limit), truncated: items.length > limit, results: items.slice(0, limit) });
     process.stdout.write(JSON.stringify({
       ...base,
+      meta,
       candidate: selectedIndex + 1,
       candidate_count: candidates.length,
       ambiguous: false,
@@ -387,6 +543,7 @@ function runSymbolMode() {
   const results = actionResults(service, action, selected._file, selected._position);
   process.stdout.write(JSON.stringify({
     ...base,
+    meta,
     candidate: selectedIndex + 1,
     candidate_count: candidates.length,
     ambiguous: false,
@@ -401,5 +558,8 @@ function runSymbolMode() {
   }));
 }
 
+
 if (symbolMode) runSymbolMode();
+else if (argv[0] === 'at') runAtMode();
+else if (argv[0] === 'probe') runProbeMode();
 else runPositionMode();

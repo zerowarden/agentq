@@ -41,7 +41,9 @@ from .recorder import MEASURED_COMMANDS
 from .storage import SCHEMA, load_events, mapping_field
 
 
-def render_storage(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_storage(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     def short_path(value: str) -> str:
         home = str(Path.home())
         return "~" + value[len(home) :] if value.startswith(home + os.sep) else value
@@ -84,20 +86,26 @@ def render_storage(data: dict[str, Any], *, budget: int = 0) -> str:
     return "\n".join(lines)
 
 
-def render_persistence(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_persistence(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     if data.get("action") == "install-persistence":
         return f"archive timer installed: {data['interval']}, {data['active']}, {data['enabled']}"
     return f"archive timer removed: {len(data.get('removed', []))} unit file(s)"
 
 
-def render_reset(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_reset(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     total = int(data.get("hot_removed", 0)) + int(data.get("persistent_removed", 0))
     scope = data.get("scope", "current repository")
     detail = "hot only" if data.get("hot_only") else "hot + persistent"
     return f"telemetry reset: {scope}, {total} events removed, {detail}"
 
 
-def render_archive(data: dict[str, Any], *, budget: int = 0) -> str:
+def render_archive(
+    data: dict[str, Any], *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     return f"telemetry archived: +{data.get('added', 0)}, {data.get('total_archived', 0)} persistent"
 
 
@@ -1351,7 +1359,7 @@ def render_stats(
     *,
     color: str = "auto",
     utc: bool = False,
-    budget: int = 0,
+    budget: int = 0,  # pyright: ignore[reportUnusedParameter]
 ) -> str:
     return (
         render_stats_ansi(data, utc=utc)

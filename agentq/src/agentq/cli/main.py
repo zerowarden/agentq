@@ -19,18 +19,12 @@ from .registry import Outcome, execute
 from .transport import detach_stdout, write_stderr
 
 
-def _resolve_root(args: argparse.Namespace) -> Path:
+def _resolve_root(_args: argparse.Namespace) -> Path:
     return repo_root(".")
 
 
 def _exit_code(outcome: Outcome) -> int:
-    match outcome:
-        case DispatchResult():
-            return outcome.exit_code
-        case int():
-            return outcome
-        case _:
-            raise AgentQError(f"unsupported command outcome: {type(outcome).__name__}")
+    return outcome.exit_code if isinstance(outcome, DispatchResult) else int(outcome)
 
 
 def _record_outcome(

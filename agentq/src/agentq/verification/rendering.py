@@ -7,7 +7,9 @@ import shlex
 from .models import ProviderPlan, VerificationPlan, VerificationRun
 
 
-def render_plan(plan: VerificationPlan, *, budget: int = 0) -> str:
+def render_plan(
+    plan: VerificationPlan, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     lines = _plan_header(plan)
     lines.extend(_provider_lines(plan))
     lines.extend(_package_lines(plan))
@@ -90,7 +92,9 @@ def _joined(values: tuple[str, ...], limit: int) -> str:
     return shown + (" …" if len(values) > limit else "")
 
 
-def render_verification(result: VerificationRun, *, budget: int = 0) -> str:
+def render_verification(
+    result: VerificationRun, *, budget: int = 0
+) -> str:  # pyright: ignore[reportUnusedParameter]
     lines = _verification_header(result)
     if result.dry_run:
         return "\n".join([*lines, *_dry_run_lines(result)])

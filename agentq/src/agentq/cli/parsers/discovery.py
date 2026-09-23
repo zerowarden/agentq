@@ -6,11 +6,7 @@ import argparse
 
 from ..commands.discovery import run_search
 from ..registry import CommandSpec
-from .options import (
-    add_common,
-    add_scope,
-    positive_int,
-)
+from .options import add_common, add_scope
 
 
 def _search_options(p: argparse.ArgumentParser) -> None:
@@ -24,9 +20,6 @@ def _search_options(p: argparse.ArgumentParser) -> None:
         const="regex",
         default="fixed",
         help="regex semantics; fixed-string is the default",
-    )
-    p.add_argument(
-        "--scan-cap", type=positive_int, default=5000, help=argparse.SUPPRESS
     )
 
 

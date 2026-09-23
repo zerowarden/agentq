@@ -73,14 +73,16 @@ def plan_collection(
     requests: list[CollectionRequest] = []
     omissions: list[RequirementOmission] = []
     for requirement in policy.requirements:
-        capability = requirement.capability
-        if capability is None or capability in covered:
+        if not requirement.capabilities:
             continue
-        if not capabilities.available(capability):
+        capability = _choose_capability(requirement, capabilities)
+        if capability is None:
             omissions.append(_omission(requirement, capabilities))
             continue
+        if capability in covered:
+            continue
         target, scope = _evidence_target(
-            requirement, resolution, declaration, evidence_scopes
+            capability, resolution, declaration, evidence_scopes
         )
         requests.append(
             CollectionRequest(
@@ -105,22 +107,38 @@ def plan_collection(
     )
 
 
+def _choose_capability(
+    requirement: EvidenceRequirement, capabilities: CapabilityReport
+) -> Capability | None:
+    """The first capability in the requirement's recipe that can run now."""
+    for capability in requirement.capabilities:
+        if capabilities.available(capability):
+            return capability
+    return None
+
+
 def _omission(
     requirement: EvidenceRequirement, capabilities: CapabilityReport
 ) -> RequirementOmission:
-    capability = requirement.capability
-    if capability is None:
-        raise ValueError("requirement has no capability")
-    gap = capabilities.gap_for(capability)
-    return RequirementOmission(
-        requirement_id=requirement.requirement_id,
-        capability=capability,
-        status=gap.status if gap is not None else AvailabilityStatus.UNAVAILABLE,
-        reason=(
+    """One truthful gap naming every alternative that could not run."""
+    reasons: list[str] = []
+    first_status = AvailabilityStatus.UNAVAILABLE
+    for index, capability in enumerate(requirement.capabilities):
+        gap = capabilities.gap_for(capability)
+        status = gap.status if gap is not None else AvailabilityStatus.UNAVAILABLE
+        reason = (
             gap.reason
             if gap is not None and gap.reason
             else "capability is not available for this request"
-        ),
+        )
+        if index == 0:
+            first_status = status
+        reasons.append(f"{capability.value} ({status.value}: {reason})")
+    return RequirementOmission(
+        requirement_id=requirement.requirement_id,
+        capability=requirement.capabilities[0],
+        status=first_status,
+        reason="; ".join(reasons),
     )
 
 
@@ -131,26 +149,35 @@ def _resolved_capabilities(resolution: ResolutionResult) -> frozenset[Capability
 
 
 def _evidence_target(
-    requirement: EvidenceRequirement,
+    capability: Capability,
     resolution: ResolutionResult,
     declaration: DeclarationCandidate | None,
     evidence_scopes: tuple[str, ...],
 ) -> tuple[InspectionTarget, tuple[str, ...]]:
-    capability = requirement.capability
     if capability in FILE_ANCHORED and declaration is not None:
         return (
             RangeTarget(path=declaration.path, ranges=(declaration.span,)),
             (declaration.path,),
         )
-    if capability is Capability.OUTLINE and isinstance(resolution.target, PathTarget):
-        return resolution.target, (resolution.target.path,)
-    if capability is Capability.READ_SOURCE and isinstance(
-        resolution.target, RangeTarget
-    ):
-        return resolution.target, (resolution.target.path,)
-    if capability is Capability.RESOLVE_LOCATION:
-        return resolution.target, ()
-    return resolution.target, evidence_scopes
+    match capability:
+        case Capability.OUTLINE:
+            return resolution.target, _target_scope(resolution.target, evidence_scopes)
+        case Capability.READ_SOURCE if isinstance(
+            resolution.target, (PathTarget, RangeTarget)
+        ):
+            return resolution.target, (resolution.target.path,)
+        case Capability.RESOLVE_LOCATION:
+            return resolution.target, ()
+        case _:
+            return resolution.target, evidence_scopes
+
+
+def _target_scope(
+    target: InspectionTarget, evidence_scopes: tuple[str, ...]
+) -> tuple[str, ...]:
+    if isinstance(target, PathTarget):
+        return (target.path,)
+    return evidence_scopes
 
 
 def acquire(

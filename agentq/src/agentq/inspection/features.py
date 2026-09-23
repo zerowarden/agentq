@@ -30,6 +30,17 @@ ROLE_BY_KIND: dict[ObservationKind, EvidenceRole] = {
     ObservationKind.OWNING_PACKAGE: EvidenceRole.OWNERSHIP,
 }
 
+# Evidence acquired in the test domain is test evidence first: a binding-
+# resolved reference inside a test file is scored as test evidence, with its
+# kind and binding still observable.
+TEST_DOMAIN_KINDS = frozenset(
+    {
+        ObservationKind.SEMANTIC_REFERENCE,
+        ObservationKind.SYNTACTIC_MENTION,
+        ObservationKind.LEXICAL_MENTION,
+    }
+)
+
 
 def extract_features(pool: EvidencePool) -> tuple[EvidenceFeatures, ...]:
     """Extract one immutable feature record per observation."""
@@ -47,6 +58,9 @@ def _features_for(pool: EvidencePool, observation: Observation) -> EvidenceFeatu
         domain = payload.domain
     elif isinstance(payload, MentionPayload):
         domain = payload.domain
+    role = ROLE_BY_KIND.get(observation.kind)
+    if domain == "test" and observation.kind in TEST_DOMAIN_KINDS:
+        role = EvidenceRole.TEST
     flags = (
         ("unstable",)
         if observation.observation_id in pool.unstable_observation_ids
@@ -54,7 +68,7 @@ def _features_for(pool: EvidencePool, observation: Observation) -> EvidenceFeatu
     )
     return EvidenceFeatures(
         observation_id=observation.observation_id,
-        role=ROLE_BY_KIND.get(observation.kind),
+        role=role,
         observation_kind=observation.kind,
         relation=relation,
         binding=binding,

@@ -1,4 +1,4 @@
-"""Lexicographic ranking and rule-based impact assessment."""
+"""Lexicographic file and search-hit ranking."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import unittest
 
 from agentq.discovery.files import _file_rank
 from agentq.discovery.search import SearchHit, _hit_rank
-from agentq.impact import ImpactSignals, assess_impact
 
 
 def _hit(
@@ -70,43 +69,6 @@ class SearchRankTests(unittest.TestCase):
             _hit_rank(_hit("a.ts", kind="import", line=1), counts),
             _hit_rank(_hit("a.ts", kind="import", line=2), counts),
         )
-
-
-class ImpactAssessmentTests(unittest.TestCase):
-    def _signals(self, **overrides) -> ImpactSignals:
-        base: dict = {
-            "shared_surface": False,
-            "source_fanout": 0,
-            "import_fanout": 0,
-            "has_docs_config": False,
-            "has_tests": False,
-            "has_reference_evidence": False,
-            "scan_capped": False,
-        }
-        base.update(overrides)
-        return ImpactSignals(**base)
-
-    def test_high_requires_broad_surface_and_substantial_fanout(self) -> None:
-        broad_only = assess_impact(self._signals(shared_surface=True))
-        self.assertEqual(broad_only.level, "medium")
-        substantial_only = assess_impact(self._signals(source_fanout=20))
-        self.assertEqual(substantial_only.level, "medium")
-        both = assess_impact(self._signals(shared_surface=True, source_fanout=20))
-        self.assertEqual(both.level, "high")
-        self.assertIn("referenced by at least 20 source files", both.reasons)
-
-    def test_multiple_source_dependents_are_medium(self) -> None:
-        self.assertEqual(assess_impact(self._signals(source_fanout=6)).level, "medium")
-
-    def test_scan_cap_alone_never_claims_high(self) -> None:
-        assessment = assess_impact(self._signals(scan_capped=True))
-        self.assertEqual(assessment.level, "low")
-        self.assertIn("reference discovery reached scan safety cap", assessment.reasons)
-
-    def test_assessment_carries_no_numeric_score(self) -> None:
-        assessment = assess_impact(self._signals(source_fanout=1))
-        self.assertFalse(hasattr(assessment, "score"))
-        self.assertEqual(assessment.level, "low")
 
 
 if __name__ == "__main__":
