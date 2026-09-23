@@ -253,6 +253,28 @@ SYNTAX_ROOT = "agentq.syntax"
 DELIVERY_ROOT = "agentq.delivery"
 VERIFICATION_ROOT = "agentq.verification"
 VERIFICATION_PROVIDERS_ROOT = "agentq.verification.providers"
+INSPECTION_ROOT = "agentq.inspection"
+INSPECTION_ADAPTERS_ROOT = "agentq.inspection.adapters"
+INSPECTION_FORBIDDEN_ROOTS = (
+    CLI_ROOT,
+    "agentq.discovery",
+    "agentq.workspace",
+    "agentq.navigation",
+    "agentq.delivery",
+    "agentq.persistence",
+    "agentq.telemetry",
+    "agentq.execution",
+    "agentq.verification",
+    "agentq.git",
+    "agentq.mutation",
+)
+INSPECTION_ADAPTER_FORBIDDEN_ROOTS = (
+    CLI_ROOT,
+    "agentq.execution",
+    "agentq.persistence",
+    "agentq.telemetry",
+    "agentq.delivery",
+)
 TEXT_HELPERS = frozenset({"compact_line", "strip_ansi", "truncate_line"})
 CONCRETE_PAYLOAD_NAMES = frozenset(
     {
@@ -365,6 +387,70 @@ class WorkspacePolicyTests(unittest.TestCase):
     def test_generic_graph_has_no_node_package_manager_policy(self) -> None:
         source = (PACKAGE_DIR / "workspace/graph.py").read_text().lower()
         for token in ("npm", "pnpm", "yarn", "bun", "package.json"):
+            self.assertNotIn(token, source)
+
+
+class InspectionBoundaryTests(unittest.TestCase):
+    """The inspection domain depends on core and itself, nothing more."""
+
+    def test_inspection_domain_imports_only_core_and_itself(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        checked = 0
+        for module, path, package in _iter_modules():
+            if not _under(module, INSPECTION_ROOT):
+                continue
+            if _under(module, INSPECTION_ADAPTERS_ROOT):
+                continue
+            checked += 1
+            outside = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if not _under(item, CORE_ROOT) and not _under(item, INSPECTION_ROOT)
+            )
+            if outside:
+                offenders[module] = outside
+        self.assertGreaterEqual(checked, 10, "inspection package modules not found")
+        self.assertFalse(
+            offenders, f"inspection domain importing outside its boundary: {offenders}"
+        )
+
+    def test_inspection_adapters_do_not_import_cli_or_execution(self) -> None:
+        offenders: dict[str, list[str]] = {}
+        checked = 0
+        for module, path, package in _iter_modules():
+            if not _under(module, INSPECTION_ADAPTERS_ROOT):
+                continue
+            checked += 1
+            hits = sorted(
+                item
+                for item in _imports_from_source(path.read_text(), package)
+                if any(
+                    _under(item, root) for root in INSPECTION_ADAPTER_FORBIDDEN_ROOTS
+                )
+            )
+            if hits:
+                offenders[module] = hits
+        self.assertGreaterEqual(checked, 1, "inspection adapters package not found")
+        self.assertFalse(
+            offenders, f"inspection adapters importing forbidden roots: {offenders}"
+        )
+
+    def test_service_never_imports_adapters_or_payloads(self) -> None:
+        path = PACKAGE_DIR / "inspection/service.py"
+        imports = _imports_from_source(path.read_text(), INSPECTION_ROOT)
+        offenders = sorted(
+            item
+            for item in imports
+            if _under(item, INSPECTION_ADAPTERS_ROOT)
+            or item.rsplit(".", 1)[-1] in CONCRETE_PAYLOAD_NAMES
+        )
+        self.assertFalse(
+            offenders, f"service importing concrete adapters/payloads: {offenders}"
+        )
+
+    def test_service_does_not_branch_on_language_names(self) -> None:
+        source = (PACKAGE_DIR / "inspection/service.py").read_text().lower()
+        for token in ("typescript", "javascript", "python", "tsx", "jsx"):
             self.assertNotIn(token, source)
 
 

@@ -24,7 +24,9 @@ class _SubParserChoices(Protocol):
     choices: dict[str, argparse.ArgumentParser]
 
 
-_SubParsersActionType = argparse._SubParsersAction  # pyright: ignore[reportPrivateUsage]
+_SubParsersActionType = (
+    argparse._SubParsersAction
+)  # pyright: ignore[reportPrivateUsage]
 
 
 class AgentQArgumentParser(argparse.ArgumentParser):

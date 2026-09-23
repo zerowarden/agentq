@@ -1,0 +1,193 @@
+"""Typed inspection contracts, grouped by concern.
+
+* :mod:`.targets` — intents, coordinates, and typed targets
+* :mod:`.requests` — the semantic request, presentation, and execution context
+* :mod:`.capability` — capability vocabulary, interfaces, and acquisitions
+* :mod:`.evidence` — observations, representations, and the evidence pool
+* :mod:`.resolution` — resolution vocabulary and discriminated results
+* :mod:`.policy` — intent requirements and compiled policy
+* :mod:`.collection` — bounded collection plans
+* :mod:`.evaluation` — features, scores, selection, and assessment
+* :mod:`.bundle` — the final bundle and its rendered projection
+
+Records reuse :mod:`agentq.core` coverage, diagnostics, and source references
+rather than redefining them.
+"""
+
+from __future__ import annotations
+
+from .bundle import INSPECTION_SCHEMA, InspectionBundle, RenderedBundle
+from .capability import (
+    AcquiredEvidence,
+    AcquisitionRecord,
+    AvailabilityStatus,
+    Capability,
+    CapabilityAvailability,
+    CapabilityEntry,
+    CapabilityGap,
+    CapabilityHandler,
+    CapabilityRegistry,
+    CapabilityReport,
+    CapabilityResult,
+    CollectionStatus,
+    EvidenceRequest,
+)
+from .collection import CollectionPlan, CollectionRequest, RequirementOmission
+from .evaluation import (
+    EvidenceFeatures,
+    OmittedEvidence,
+    PolicyAssessment,
+    RequirementAssessment,
+    RequirementStatus,
+    ScoreBreakdown,
+    ScoreContribution,
+    ScoredEvidence,
+    SelectedEvidence,
+    SelectionPlan,
+)
+from .evidence import (
+    Binding,
+    DeclarationPayload,
+    EvidencePool,
+    EvidenceVariant,
+    Fidelity,
+    MentionPayload,
+    Observation,
+    ObservationKind,
+    OutlinePayload,
+    OutlineSymbolRef,
+    PackagePayload,
+    ReferencePayload,
+    RepresentationKind,
+    SourceVersion,
+    SourceWindowPayload,
+    make_observation,
+    make_variant,
+    payload_to_wire,
+)
+from .policy import (
+    EvidencePolicy,
+    EvidenceRequirement,
+    EvidenceRole,
+    RequirementRule,
+    RequirementStrength,
+)
+from .requests import (
+    InspectionContext,
+    InspectionRequest,
+    PresentationOptions,
+    RepositoryIdentity,
+    SourceVersionReader,
+    inspection_request_identity,
+    with_request_id,
+)
+from .resolution import (
+    AmbiguousTarget,
+    DeclarationCandidate,
+    ResolutionResult,
+    ResolvedTarget,
+    SelectionMethod,
+    UnresolvedReason,
+    UnresolvedTarget,
+    declare_candidate_id,
+    has_selected_target,
+    make_declaration_candidate,
+    resolution_to_wire,
+)
+from .targets import (
+    TARGET_TYPES,
+    CandidateTarget,
+    InspectionTarget,
+    Intent,
+    LocationTarget,
+    PathTarget,
+    RangeTarget,
+    SourceSpan,
+    SymbolTarget,
+    TargetKind,
+    describe_target,
+)
+
+__all__ = [
+    "AcquiredEvidence",
+    "AcquisitionRecord",
+    "AmbiguousTarget",
+    "AvailabilityStatus",
+    "Binding",
+    "CandidateTarget",
+    "Capability",
+    "CapabilityAvailability",
+    "CapabilityEntry",
+    "CapabilityGap",
+    "CapabilityHandler",
+    "CapabilityRegistry",
+    "CapabilityReport",
+    "CapabilityResult",
+    "CollectionPlan",
+    "CollectionRequest",
+    "CollectionStatus",
+    "DeclarationCandidate",
+    "DeclarationPayload",
+    "EvidenceFeatures",
+    "EvidencePolicy",
+    "EvidencePool",
+    "EvidenceRequest",
+    "EvidenceRequirement",
+    "EvidenceRole",
+    "EvidenceVariant",
+    "Fidelity",
+    "INSPECTION_SCHEMA",
+    "InspectionBundle",
+    "InspectionContext",
+    "InspectionRequest",
+    "InspectionTarget",
+    "Intent",
+    "LocationTarget",
+    "MentionPayload",
+    "Observation",
+    "ObservationKind",
+    "OmittedEvidence",
+    "OutlinePayload",
+    "OutlineSymbolRef",
+    "PackagePayload",
+    "PathTarget",
+    "PolicyAssessment",
+    "PresentationOptions",
+    "RangeTarget",
+    "ReferencePayload",
+    "RenderedBundle",
+    "RepresentationKind",
+    "RepositoryIdentity",
+    "RequirementAssessment",
+    "RequirementOmission",
+    "RequirementRule",
+    "RequirementStatus",
+    "RequirementStrength",
+    "ResolutionResult",
+    "ResolvedTarget",
+    "ScoreBreakdown",
+    "ScoreContribution",
+    "ScoredEvidence",
+    "SelectedEvidence",
+    "SelectionMethod",
+    "SelectionPlan",
+    "SourceSpan",
+    "SourceVersion",
+    "SourceVersionReader",
+    "SourceWindowPayload",
+    "SymbolTarget",
+    "TARGET_TYPES",
+    "TargetKind",
+    "UnresolvedReason",
+    "UnresolvedTarget",
+    "declare_candidate_id",
+    "describe_target",
+    "has_selected_target",
+    "inspection_request_identity",
+    "make_declaration_candidate",
+    "make_observation",
+    "make_variant",
+    "payload_to_wire",
+    "resolution_to_wire",
+    "with_request_id",
+]
