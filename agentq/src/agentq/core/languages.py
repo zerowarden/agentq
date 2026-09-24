@@ -100,7 +100,6 @@ _MANIFEST_PROFILES: dict[str, EcosystemProfile] = {
 }
 
 MANIFEST_NAMES = frozenset(name for profile in ECOSYSTEMS for name in profile.manifests)
-LOCK_NAMES = frozenset(lock for profile in ECOSYSTEMS for lock in profile.locks)
 MANIFEST_PATTERN = "|".join(re.escape(name) for name in sorted(MANIFEST_NAMES))
 
 

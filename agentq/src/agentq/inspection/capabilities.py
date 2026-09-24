@@ -302,15 +302,7 @@ class CapabilityRegistry:
         request: EvidenceRequest,
         exc: Exception,
     ) -> AcquiredEvidence:
-        acquisition_id = "acq-" + canonical_digest(
-            {
-                "capability": request.capability.value,
-                "provider": handler.name,
-                "request": request.request_id,
-                "outcome": "failed",
-            },
-            length=20,
-        )
+        acquisition_id = _outcome_id(handler, request, "failed")
         record = AcquisitionRecord(
             acquisition_id=acquisition_id,
             capability=request.capability,
@@ -334,15 +326,7 @@ class CapabilityRegistry:
         reason: str,
     ) -> AcquiredEvidence:
         """An acquisition the execution ledger refused before it could run."""
-        acquisition_id = "acq-" + canonical_digest(
-            {
-                "capability": request.capability.value,
-                "provider": handler.name,
-                "request": request.request_id,
-                "outcome": reason,
-            },
-            length=20,
-        )
+        acquisition_id = _outcome_id(handler, request, reason)
         record = AcquisitionRecord(
             acquisition_id=acquisition_id,
             capability=request.capability,
@@ -371,7 +355,7 @@ class CapabilityRegistry:
     ) -> str:
         return "acq-" + canonical_digest(
             {
-                "capability": request.capability.value,
+                **_request_identity(request),
                 "provider": handler.name,
                 "provider_version": result.provider_version,
                 "method": request.capability.value,
@@ -380,11 +364,38 @@ class CapabilityRegistry:
                     if result.effective_scope is not None
                     else request.scope
                 ),
-                "inputs": list(request.observed_inputs()),
                 "limit": request.limit,
             },
             length=20,
         )
+
+
+def _request_identity(request: EvidenceRequest) -> dict[str, object]:
+    """The request fields every acquisition fingerprint shares.
+
+    ``observed_inputs`` names the resolved subject (path, version, span) when
+    one exists, so two same-name declarations never share a fingerprint and a
+    changed subject version changes it.
+    """
+    return {
+        "capability": request.capability.value,
+        "request": request.request_id,
+        "inputs": list(request.observed_inputs()),
+    }
+
+
+def _outcome_id(
+    handler: CapabilityHandler, request: EvidenceRequest, outcome: str
+) -> str:
+    """A failed or limited acquisition under the same identity rules."""
+    return "acq-" + canonical_digest(
+        {
+            **_request_identity(request),
+            "provider": handler.name,
+            "outcome": outcome,
+        },
+        length=20,
+    )
 
 
 def _admitted_result(

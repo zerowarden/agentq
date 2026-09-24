@@ -5,3 +5,5 @@
 *.egg-info/
 
 node_modules/
+/.agentq-eval/
+m*.md

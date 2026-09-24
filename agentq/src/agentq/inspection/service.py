@@ -3,15 +3,17 @@
 The service is a direct composition of independently replaceable stages. It
 selects no evidence itself, branches on no language name, and imports no
 concrete adapter: the capability registry arrives through the context from the
-composition boundary. Enabling debug records a bounded trace and changes
-nothing else.
+composition boundary. Post-acquisition decisions are delegated to
+:func:`agentq.inspection.decision.decide_evidence`, the same function replay
+uses. Enabling debug records a bounded trace and changes nothing else.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
-from agentq.core import ContractError, Diagnostic, merge_typed
+from agentq.core import ContractError, Diagnostic
 
 from .acquisition import acquire, plan_collection
 from .budgeting import DELIVERY_BUDGET_CODE, DELIVERY_TERMINATOR_CHARS
@@ -20,18 +22,14 @@ from .contracts import (
     AmbiguousTarget,
     CapabilityGap,
     CapabilityReport,
-    CollectionPlan,
+    DecisionFailure,
+    DecisionInput,
     DeclarationCandidate,
-    EvidencePolicy,
-    EvidencePool,
     InspectionBundle,
     InspectionContext,
     InspectionRequest,
-    OmittedEvidence,
-    PolicyAssessment,
     ResolutionResult,
     ResolvedTarget,
-    SelectionPlan,
     UnresolvedTarget,
     describe_target,
     has_selected_target,
@@ -39,20 +37,14 @@ from .contracts import (
     with_request_id,
 )
 from .debug import TraceRecorder
+from .decision import DecisionConfig, decide_evidence
 from .execution import ExecutionLedger
-from .features import extract_features
 from .lifecycle import apply_unstable, unstable_observations
 from .policy import compile_policy
-from .rendering import render_bundle
+from .rendering import attach_render, delivery_overflow
 from .resolution import resolve
-from .scoring import DEFAULT_SCORING, ScoringProfile, score_evidence
-from .selection import (
-    DEFAULT_SELECTION,
-    SelectionProfile,
-    assess_selected_evidence,
-    reduce_selection,
-    select_evidence,
-)
+from .scoring import DEFAULT_SCORING, ScoringProfile
+from .selection import DEFAULT_SELECTION, SelectionProfile
 
 
 def inspect(
@@ -61,8 +53,15 @@ def inspect(
     *,
     scoring: ScoringProfile = DEFAULT_SCORING,
     selection: SelectionProfile = DEFAULT_SELECTION,
+    on_prepared: Callable[[DecisionInput], None] | None = None,
 ) -> InspectionBundle:
-    """Run one inspection request end to end."""
+    """Run one inspection request end to end.
+
+    ``on_prepared`` is the explicit, opt-in capture hook at the prepared-input
+    boundary: it receives the complete DecisionInput once acquisition and
+    stability assessment are finished. It is never triggered by ``debug`` and
+    never changes the decision.
+    """
     context = _execution_context(context)
     recorder = context.trace if context.trace is not None else TraceRecorder()
     with recorder.stage("normalize") as span:
@@ -135,112 +134,28 @@ def inspect(
             unstable=list(pool.unstable_observation_ids),
         )
 
-    with recorder.stage("scoring") as span:
-        features = extract_features(pool)
-        scores = score_evidence(features, scoring, intent=normalized.intent)
-        span.note(
-            profile=scoring.profile,
-            scored=len(scores),
-            scores={item.observation_id: item.score.total for item in scores},
-            contributions={
-                item.observation_id: ",".join(
-                    f"{contribution.name}={contribution.value}"
-                    for contribution in item.score.contributions
-                )
-                for item in scores
-                if item.score.contributions
-            },
-        )
-
-    with recorder.stage("selection") as span:
-        selection_plan = select_evidence(
-            pool,
-            scores,
-            policy,
-            context.delivery,
-            output_format=context.presentation.output_format,
-            profile=selection,
-        )
-        assessment = assess_selected_evidence(policy, plan, pool, selection_plan)
-        span.note(
-            profile=selection_plan.profile,
-            acquired=len(pool.observations),
-            selected=len(selection_plan.selected),
-            omitted=_omission_fields(selection_plan.omitted),
-            required_missing=[
-                item.requirement_id
-                for item in assessment.unsatisfied(required_only=True)
-            ],
-            output_chars=selection_plan.measured_cost,
-        )
-
-    with recorder.stage("assessment") as span:
-        span.note(
-            satisfied=sum(
-                1
-                for item in assessment.requirements
-                if item.status.value == "satisfied"
-            ),
-            unsatisfied=len(assessment.unsatisfied()),
-            required_missing=[
-                item.requirement_id
-                for item in assessment.unsatisfied(required_only=True)
-            ],
-        )
-
-    bundle = build_bundle(
-        normalized, resolution, policy, plan, pool, selection_plan, assessment
+    decision_input = DecisionInput(
+        request=normalized,
+        resolution=resolution,
+        policy=policy,
+        collection=plan,
+        pool=pool,
     )
-    with recorder.stage("render") as span:
-        bundle = fit_delivery(bundle, context, policy=policy, plan=plan, pool=pool)
-        span.note(
-            format=context.presentation.output_format,
-            chars=bundle.render.chars if bundle.render is not None else 0,
-            selected=len(bundle.selection.selected) if bundle.selection else 0,
-        )
-    return bundle
-
-
-def fit_delivery(
-    bundle: InspectionBundle,
-    context: InspectionContext,
-    *,
-    policy: EvidencePolicy,
-    plan: CollectionPlan,
-    pool: EvidencePool,
-) -> InspectionBundle:
-    """Reduce the complete rendered bundle until it respects the ceiling.
-
-    Selection bounds evidence text alone; the delivered result also carries
-    request, resolution, policy, collection, assessment, gaps, and compacted
-    omission metadata. The whole serialized projection is measured, and the
-    lowest-priority selected representations are dropped until the response,
-    transport terminator included, fits. A budget that cannot hold even the
-    response envelope is a configuration error, not an oversized delivery.
-    """
-    if bundle.selection is None:
-        raise ContractError("fit_delivery requires a resolved bundle with a selection")
-    output_format = context.presentation.output_format
-    bundle = attach_render(bundle, context)
-    while (overflow := _delivery_overflow(bundle, context)) > 0:
-        assert bundle.selection is not None
-        reduced = reduce_selection(
-            bundle.selection, overflow_chars=overflow, output_format=output_format
-        )
-        if reduced is None:
-            assert bundle.render is not None
-            raise ContractError(
-                "the delivery budget cannot hold the inspection response: "
-                f"{bundle.render.chars + DELIVERY_TERMINATOR_CHARS} characters "
-                f"exceed max_chars={context.delivery.max_chars}"
-            )
-        bundle = replace(
-            bundle,
-            selection=reduced,
-            assessment=assess_selected_evidence(policy, plan, pool, reduced),
-        )
-        bundle = attach_render(bundle, context)
-    return bundle
+    if on_prepared is not None:
+        on_prepared(decision_input)
+    outcome = decide_evidence(
+        decision_input,
+        DecisionConfig(
+            scoring=scoring,
+            selection=selection,
+            delivery=context.delivery,
+            output_format=context.presentation.output_format,
+        ),
+        trace=recorder,
+    )
+    if isinstance(outcome, DecisionFailure):
+        raise ContractError(outcome.detail)
+    return outcome.bundle
 
 
 def fit_resolution_delivery(
@@ -253,8 +168,9 @@ def fit_resolution_delivery(
     lowest-priority candidates are removed; the retained and total counts stay
     truthful and one explicit gap records the reduction.
     """
-    bundle = attach_render(bundle, context)
-    while _delivery_overflow(bundle, context) > 0:
+    output_format = context.presentation.output_format
+    bundle = attach_render(bundle, output_format)
+    while delivery_overflow(bundle, context.delivery) > 0:
         resolution = bundle.resolution
         if not isinstance(resolution, AmbiguousTarget) or not resolution.candidates:
             assert bundle.render is not None
@@ -268,7 +184,7 @@ def fit_resolution_delivery(
             resolution=replace(resolution, candidates=resolution.candidates[:-1]),
             gaps=_candidate_reduction_gaps(bundle.gaps),
         )
-        bundle = attach_render(bundle, context)
+        bundle = attach_render(bundle, output_format)
     return bundle
 
 
@@ -286,13 +202,6 @@ def _candidate_reduction_gaps(gaps: tuple[Diagnostic, ...]) -> tuple[Diagnostic,
             severity="warning",
         ),
     )
-
-
-def _delivery_overflow(bundle: InspectionBundle, context: InspectionContext) -> int:
-    render = bundle.render
-    if render is None:
-        return 0
-    return max(0, render.chars - context.delivery.payload_capacity())
 
 
 def _execution_context(context: InspectionContext) -> InspectionContext:
@@ -342,44 +251,6 @@ def build_resolution_bundle(
     )
 
 
-def build_bundle(
-    request: InspectionRequest,
-    resolution: ResolutionResult,
-    policy: EvidencePolicy,
-    plan: CollectionPlan,
-    pool: EvidencePool,
-    selection_plan: SelectionPlan,
-    assessment: PolicyAssessment,
-) -> InspectionBundle:
-    coverage = merge_typed(resolution.candidate_coverage, pool.coverage)
-    return InspectionBundle(
-        request=request,
-        resolution=resolution,
-        policy=policy,
-        collection=plan,
-        selection=selection_plan,
-        assessment=assessment,
-        gaps=pool.limitations,
-        coverage=coverage,
-    )
-
-
-def attach_render(
-    bundle: InspectionBundle, context: InspectionContext
-) -> InspectionBundle:
-    """Serialize the bundle's current state exactly once.
-
-    The previous render is cleared first so a re-render never embeds stale
-    render metadata of its own: a measured cost is the length of the text that
-    is actually delivered.
-    """
-    rendered = render_bundle(
-        replace(bundle, render=None),
-        output_format=context.presentation.output_format,
-    )
-    return replace(bundle, render=rendered)
-
-
 def _outcome_name(resolution: ResolutionResult) -> str:
     match resolution:
         case ResolvedTarget():
@@ -400,10 +271,3 @@ def _candidate_count(resolution: ResolutionResult) -> int:
 
 def _gap_fields(gaps: tuple[CapabilityGap, ...]) -> dict[str, str]:
     return {gap.capability.value: gap.reason or gap.status.value for gap in gaps}
-
-
-def _omission_fields(items: tuple[OmittedEvidence, ...]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for item in items:
-        counts[item.reason] = counts.get(item.reason, 0) + 1
-    return counts

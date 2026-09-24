@@ -87,8 +87,6 @@ class PythonInspectionAdapter:
     ) -> None:
         self._overview: OverviewRunner = overview
         self._lister: FileLister = lister
-        self._caches: dict[str, SourceCache] = {}
-        self._languages: dict[tuple[str, tuple[str, ...]], frozenset[str] | None] = {}
 
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.FIND_DECLARATIONS, Capability.SYNTACTIC_MENTIONS})
@@ -137,7 +135,7 @@ class PythonInspectionAdapter:
                 code=PARSE_ERROR,
             )
         scopes = target_scopes(request.target)
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         if request.capability is Capability.FIND_DECLARATIONS:
             return self._declarations(request, context, symbol, scopes, cache)
         if request.capability is Capability.SYNTACTIC_MENTIONS:
@@ -276,21 +274,24 @@ class PythonInspectionAdapter:
         scopes = target_scopes(target)
         if not scopes:
             return None
-        key = (str(context.root), scopes)
-        if key not in self._languages:
-            try:
-                self._languages[key] = scoped_languages(
-                    context.root, scopes, lister=self._lister
-                )
-            except (AgentQError, OSError):
-                self._languages[key] = None
-        return self._languages[key]
+        return context.memo.get_or_create(
+            ("languages", self, str(context.root), scopes),
+            lambda: self._scan_languages(context.root, scopes),
+        )
 
-    def _source_cache(self, root: Path) -> SourceCache:
-        key = str(root)
-        if key not in self._caches:
-            self._caches[key] = SourceCache(root=root)
-        return self._caches[key]
+    def _scan_languages(
+        self, root: Path, scopes: tuple[str, ...]
+    ) -> frozenset[str] | None:
+        try:
+            return scoped_languages(root, scopes, lister=self._lister)
+        except (AgentQError, OSError):
+            return None
+
+    def _source_cache(self, context: InspectionContext) -> SourceCache:
+        return context.memo.get_or_create(
+            ("sources", str(context.root)),
+            lambda: SourceCache(root=context.root),
+        )
 
 
 def _declarations_coverage(overview: PythonOverview) -> Coverage:

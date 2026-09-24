@@ -19,8 +19,6 @@ from .contracts import (
     SourceVersionReader,
 )
 
-VERSION_METHOD = "content_sha256"
-
 
 def content_version(content: bytes) -> str:
     """The content version of one file, hashed from its bytes."""

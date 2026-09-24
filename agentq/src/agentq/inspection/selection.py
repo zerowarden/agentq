@@ -227,10 +227,15 @@ class _SelectionState:
         self.selected.append(item)
         self.chosen[item.observation_id] = item.variant
         self.cost += selected_cost(item, self.output_format)
-        if features is not None and features.role is not None:
-            self.represented_roles.add(features.role)
+        role = None if features is None else features.role
+        if role is not None:
+            self.represented_roles.add(role)
         span = item.variant.span
         path = item.variant.source.path
+        if role in PER_FILE_ROLES and path is not None:
+            # Only capped roles consume the per-file quota: required source
+            # and declaration evidence must not spend the optional budget.
+            self.files[path] = self.files.get(path, 0) + 1
         kind = None if features is None else features.observation_kind
         if span is not None and path is not None:
             self.covered.append((kind, path, span.start_line, span.end_line))
@@ -264,11 +269,6 @@ class _SelectionState:
         if path is None:
             return False
         return self.files.get(path, 0) >= limit
-
-    def count_file(self, variant: EvidenceVariant) -> None:
-        path = variant.source.path
-        if path is not None:
-            self.files[path] = self.files.get(path, 0) + 1
 
 
 def _reserve_required(
@@ -306,7 +306,6 @@ def _reserve_requirement(
             continue
         breakdown = scored.get(observation_id)
         state.take(item, None if breakdown is None else breakdown.features)
-        state.count_file(variant)
         return True
     observation_id, variant = candidates[0]
     state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
@@ -331,7 +330,6 @@ def _select_role_representatives(
                 state.represented_roles.add(features.role)
             continue
         state.take(item, features)
-        state.count_file(variant)
 
 
 def _next_role_candidate(
@@ -420,7 +418,6 @@ def _fill_by_score(
             state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
             continue
         state.take(item, observation_features)
-        state.count_file(variant)
 
 
 def reduce_selection(

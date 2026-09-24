@@ -359,6 +359,12 @@ class EvidenceRequest:
 
     def observed_inputs(self) -> tuple[str, ...]:
         inputs = [describe_target(self.target)]
+        if self.subject is not None:
+            span = self.subject.span
+            inputs.append(
+                f"subject={self.subject.path}@{self.subject.source_version}"
+                f":{span.start_line}-{span.end_line}"
+            )
         if self.scope:
             inputs.append(f"scope={','.join(self.scope)}")
         if self.domain:

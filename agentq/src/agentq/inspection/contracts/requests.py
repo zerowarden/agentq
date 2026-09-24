@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
 from agentq.core import (
     ContractError,
@@ -122,6 +123,31 @@ class SourceVersionReader(Protocol):
     def __call__(self, relative_path: str) -> str | None: ...
 
 
+_T = TypeVar("_T")
+_MISSING = object()
+
+
+class InspectionMemo:
+    """Adapter scratch space for exactly one capture.
+
+    Adapters keep provider-local caches (file text and versions, runtime
+    probes, language scopes) here rather than on adapter instances: a registry
+    or adapter reused by a later capture must never serve values cached for an
+    earlier one. Callers create one context per capture, so the memo follows
+    that boundary.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[Hashable, object] = {}
+
+    def get_or_create(self, key: Hashable, create: Callable[[], _T]) -> _T:
+        item = self._items.get(key, _MISSING)
+        if item is _MISSING:
+            item = create()
+            self._items[key] = item
+        return cast("_T", item)
+
+
 @dataclass(frozen=True)
 class InspectionContext:
     """Execution dependencies and internal limits for one inspection."""
@@ -135,6 +161,9 @@ class InspectionContext:
     source_versions: SourceVersionReader | None = None
     trace: TraceRecorder | None = None
     execution: ExecutionLedger | None = None
+    memo: InspectionMemo = field(
+        default_factory=InspectionMemo, compare=False, repr=False
+    )
 
     @property
     def root(self) -> Path:

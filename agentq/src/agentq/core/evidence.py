@@ -37,7 +37,6 @@ SYNTACTIC = "syntactic"
 LEXICAL = "lexical"
 HEURISTIC = "heuristic"
 _PROVENANCE_RANK = {HEURISTIC: 0, LEXICAL: 1, SYNTACTIC: 2, SEMANTIC: 3}
-PROVENANCES = frozenset(_PROVENANCE_RANK)
 
 COMPLETE = "complete"
 SAMPLED = "sampled"

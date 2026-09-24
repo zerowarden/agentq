@@ -1,0 +1,56 @@
+{
+  "delivery": {
+    "envelope_chars": 256,
+    "max_chars": 12000
+  },
+  "output_format": "text",
+  "schema": "agentq.eval.decision-config/v1",
+  "scoring": {
+    "binding_bonus": 2,
+    "intent_priorities": {
+      "edit": {
+        "implementation": 4,
+        "lexical_mention": 2,
+        "ownership": 6,
+        "reference": 6,
+        "test": 8
+      },
+      "impact": {
+        "implementation": 6,
+        "lexical_mention": 4,
+        "ownership": 6,
+        "reference": 8,
+        "test": 6
+      },
+      "refactor": {
+        "implementation": 8,
+        "lexical_mention": 2,
+        "ownership": 6,
+        "reference": 6,
+        "test": 8
+      },
+      "rename": {
+        "implementation": 2,
+        "lexical_mention": 4,
+        "ownership": 4,
+        "reference": 8,
+        "test": 4
+      },
+      "understand": {
+        "implementation": 6,
+        "lexical_mention": 2,
+        "ownership": 4,
+        "reference": 6,
+        "test": 2
+      }
+    },
+    "profile": "scoring-v1"
+  },
+  "selection": {
+    "fill_by_score": true,
+    "per_file_limit": 2,
+    "profile": "selection-v1",
+    "reserve_required": true,
+    "role_diversity": true
+  }
+}

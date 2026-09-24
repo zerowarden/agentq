@@ -11,9 +11,11 @@ for that selection in the requested format.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from agentq.core import ContractError, SourceRef, canonical_json
 
-from .budgeting import DELIVERY_FORMATS
+from .budgeting import DELIVERY_FORMATS, DeliveryBudget
 from .contracts import (
     AmbiguousTarget,
     EvidenceProvenance,
@@ -39,6 +41,25 @@ def render_bundle(
     else:
         text = canonical_json(bundle.to_wire())
     return RenderedBundle(format=output_format, text=text, chars=len(text))
+
+
+def attach_render(bundle: InspectionBundle, output_format: str) -> InspectionBundle:
+    """Serialize the bundle's current state exactly once.
+
+    The previous render is cleared first so a re-render never embeds stale
+    render metadata of its own: a measured cost is the length of the text that
+    is actually delivered.
+    """
+    rendered = render_bundle(replace(bundle, render=None), output_format=output_format)
+    return replace(bundle, render=rendered)
+
+
+def delivery_overflow(bundle: InspectionBundle, delivery: DeliveryBudget) -> int:
+    """Characters by which the current render exceeds the delivery ceiling."""
+    render = bundle.render
+    if render is None:
+        return 0
+    return max(0, render.chars - delivery.payload_capacity())
 
 
 def _render_text(bundle: InspectionBundle) -> str:

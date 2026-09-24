@@ -67,6 +67,8 @@ cache_dir = ".cache/pytest"
 
 [tool.pyright]
 include = ["src/agentq"]
+venvPath = "."
+venv = ".venv"
 strict = [
     "src/agentq/core",
     "src/agentq/requests.py",

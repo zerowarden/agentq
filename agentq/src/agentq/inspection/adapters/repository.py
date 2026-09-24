@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 from agentq.core import (
     COMPLETE,
@@ -73,7 +72,6 @@ from ..contracts import (
 from ._shared import SourceCache, failed_result, status_for
 
 LEXICAL_ROLE = "test"
-OUTLINE_FALLBACK = "outline_fallback"
 
 
 class RepositoryInspectionAdapter:
@@ -95,7 +93,6 @@ class RepositoryInspectionAdapter:
         self._searcher: Callable[[SearchRequest], SearchResult] = searcher
         self._manifest: Callable[..., PackageManifest | None] = manifest
         self._which: Callable[[str], str | None] = which
-        self._caches: dict[str, SourceCache] = {}
 
     def capabilities(self) -> frozenset[Capability]:
         return frozenset(
@@ -327,7 +324,7 @@ class RepositoryInspectionAdapter:
                 roles=(LEXICAL_ROLE,) if domain == "test" else (),
             )
         )
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         observations: list[Observation] = []
         variants: list[EvidenceVariant] = []
         kind = (
@@ -375,7 +372,7 @@ class RepositoryInspectionAdapter:
                 coverage=typed_coverage(COMPLETE),
                 effective_scope=(path,),
             )
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         version = cache.version(manifest.path)
         observation = make_observation(
             kind=ObservationKind.OWNING_PACKAGE,
@@ -407,11 +404,11 @@ class RepositoryInspectionAdapter:
             effective_scope=(path,),
         )
 
-    def _source_cache(self, root: Path) -> SourceCache:
-        key = str(root)
-        if key not in self._caches:
-            self._caches[key] = SourceCache(root=root)
-        return self._caches[key]
+    def _source_cache(self, context: InspectionContext) -> SourceCache:
+        return context.memo.get_or_create(
+            ("sources", str(context.root)),
+            lambda: SourceCache(root=context.root),
+        )
 
 
 # ---------------------------------------------------------------------------

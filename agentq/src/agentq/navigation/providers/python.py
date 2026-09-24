@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from agentq.core import REFERENCE_LIMIT, RESULT_LIMIT, SYNTACTIC
+from agentq.core import REFERENCE_LIMIT, RESULT_LIMIT
 from agentq.discovery import list_repo_files
 from agentq.syntax import (
     MAX_PARSE_ERRORS,
@@ -25,8 +25,6 @@ from agentq.syntax import (
 from agentq.text import compact_line
 
 from ..models import PythonOverview, PythonReference, PythonReferenceSection
-
-_MAX_PARSE_ERRORS = 5
 
 
 def _collect_python_references(
@@ -119,6 +117,3 @@ def python_symbol_overview(
         parse_errors=tuple(parse_errors),
         parse_error_count=parse_error_count,
     )
-
-
-PYTHON_PROVENANCE = SYNTACTIC

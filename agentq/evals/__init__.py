@@ -1,6 +1,7 @@
-"""Evaluation-only fixtures and suites for agentq.
+"""Evaluation-only fixtures, captures, and replay for agentq.
 
-This package is never imported by the installed ``agentq`` runtime. It starts
-with source-level fixture builders, reviewer-authored judgment drafts, and the
-smoke-suite manifest; capture, replay, and metric code arrive later.
+This package is never imported by the installed ``agentq`` runtime. It holds
+the authored fixture builders and judgment drafts, the strict capture codec
+and content-addressed store, the build/replay developer CLI, and (later) the
+judgment compiler, metrics, and experiment comparison.
 """

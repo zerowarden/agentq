@@ -116,9 +116,6 @@ class TypeScriptInspectionAdapter:
         self._batch: Callable[[TypeScriptBatchRequest], TypeScriptBatch] = batch
         self._probe: Callable[[Path, tuple[str, ...]], TypeScriptProbe] = probe
         self._lister: FileLister = lister
-        self._caches: dict[str, SourceCache] = {}
-        self._languages: dict[tuple[str, tuple[str, ...]], frozenset[str] | None] = {}
-        self._probes: dict[tuple[str, tuple[str, ...]], TypeScriptProbe] = {}
 
     def capabilities(self) -> frozenset[Capability]:
         return frozenset(
@@ -154,7 +151,7 @@ class TypeScriptInspectionAdapter:
         subject: DeclarationCandidate | None = None,
     ) -> CapabilityAvailability:
         scopes = (subject.path,) if subject is not None else target_scopes(target)
-        probe = self._probe_for(context.root, scopes)
+        probe = self._probe_for(context, scopes)
         version = probe.meta.runtime.typescript if probe.meta is not None else None
         if not probe.available:
             return CapabilityAvailability(
@@ -219,7 +216,7 @@ class TypeScriptInspectionAdapter:
             return failed_result(
                 "the TypeScript bridge returned an unexpected locate payload"
             )
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         mapped = _map_evidence(nav.candidates, cache, DECLARATION_SHAPE)
         coverage = with_skipped(nav.coverage, mapped.skipped)
         return _result(
@@ -235,7 +232,7 @@ class TypeScriptInspectionAdapter:
         target = request.target
         if not isinstance(target, LocationTarget):
             return failed_result("resolve_location requires a location target")
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         batch = self._batch(
             _batch_request(
                 context.root,
@@ -276,7 +273,7 @@ class TypeScriptInspectionAdapter:
                 )
                 for _ in capabilities
             )
-        cache = self._source_cache(context.root)
+        cache = self._source_cache(context)
         batch = self._batch(
             _batch_request(
                 context.root,
@@ -337,27 +334,32 @@ class TypeScriptInspectionAdapter:
         scopes = target_scopes(target)
         if not scopes:
             return None
-        key = (str(context.root), scopes)
-        if key not in self._languages:
-            try:
-                self._languages[key] = scoped_languages(
-                    context.root, scopes, lister=self._lister
-                )
-            except (AgentQError, OSError):
-                self._languages[key] = None
-        return self._languages[key]
+        return context.memo.get_or_create(
+            ("languages", self, str(context.root), scopes),
+            lambda: self._scan_languages(context.root, scopes),
+        )
 
-    def _probe_for(self, root: Path, scopes: tuple[str, ...]) -> TypeScriptProbe:
-        key = (str(root), scopes)
-        if key not in self._probes:
-            self._probes[key] = self._probe(root, scopes)
-        return self._probes[key]
+    def _scan_languages(
+        self, root: Path, scopes: tuple[str, ...]
+    ) -> frozenset[str] | None:
+        try:
+            return scoped_languages(root, scopes, lister=self._lister)
+        except (AgentQError, OSError):
+            return None
 
-    def _source_cache(self, root: Path) -> SourceCache:
-        key = str(root)
-        if key not in self._caches:
-            self._caches[key] = SourceCache(root=root)
-        return self._caches[key]
+    def _probe_for(
+        self, context: InspectionContext, scopes: tuple[str, ...]
+    ) -> TypeScriptProbe:
+        return context.memo.get_or_create(
+            ("probe", self, str(context.root), scopes),
+            lambda: self._probe(context.root, scopes),
+        )
+
+    def _source_cache(self, context: InspectionContext) -> SourceCache:
+        return context.memo.get_or_create(
+            ("sources", str(context.root)),
+            lambda: SourceCache(root=context.root),
+        )
 
 
 def _result(

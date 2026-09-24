@@ -18,12 +18,24 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
-from agentq.core import COMPLETE, SOURCE_UNSTABLE, Diagnostic, SourceRef, typed_coverage
-from agentq.inspection.budgeting import DeliveryBudget
+from agentq.core import (
+    COMPLETE,
+    SOURCE_UNSTABLE,
+    Diagnostic,
+    SourceRef,
+    canonical_digest,
+    typed_coverage,
+)
+from agentq.inspection.acquisition import plan_collection
+from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.contracts import (
     AcquisitionRecord,
+    AvailabilityStatus,
     Binding,
     Capability,
+    CapabilityEntry,
+    CapabilityReport,
+    CollectionPlan,
     CollectionStatus,
     DeclarationCandidate,
     DeclarationPayload,
@@ -49,6 +61,7 @@ from agentq.inspection.contracts import (
     make_declaration_candidate,
     make_observation,
     make_variant,
+    with_request_id,
 )
 from agentq.inspection.features import extract_features
 from agentq.inspection.policy import compile_policy
@@ -86,7 +99,9 @@ class FixtureBuild:
     request: InspectionRequest
     resolution: ResolvedTarget
     policy: EvidencePolicy
+    collection: CollectionPlan
     pool: EvidencePool
+    capability_report: CapabilityReport
     variant_aliases: Mapping[str, str]
     budget: DeliveryBudget
     audit_note: str
@@ -99,8 +114,17 @@ def _acquisition(
     status: CollectionStatus = CollectionStatus.COMPLETED,
     scope: tuple[str, ...] = (),
 ) -> AcquisitionRecord:
+    acquisition_id = "acq-" + canonical_digest(
+        {
+            "case": case_id,
+            "capability": capability.value,
+            "status": status.value,
+            "scope": list(scope),
+        },
+        length=20,
+    )
     return AcquisitionRecord(
-        acquisition_id=f"acq-{case_id}-{capability.value}",
+        acquisition_id=acquisition_id,
         capability=capability,
         provider=PROVIDER,
         provider_version="fixture-1.0",
@@ -451,6 +475,21 @@ def _budget_from_available(available_chars: int) -> DeliveryBudget:
     return DeliveryBudget(max_chars=available_chars + envelope, envelope_chars=envelope)
 
 
+def _capability_report(case_id: str) -> CapabilityReport:
+    """The authored capability availability: every operation can run."""
+    return CapabilityReport(
+        request_id=f"fixture-{case_id}",
+        entries=tuple(
+            CapabilityEntry(
+                capability=capability,
+                status=AvailabilityStatus.AVAILABLE,
+                provider=PROVIDER,
+            )
+            for capability in Capability
+        ),
+    )
+
+
 def _build(
     case_id: str,
     request: InspectionRequest,
@@ -462,12 +501,27 @@ def _build(
     budget: DeliveryBudget | None = None,
     policy: EvidencePolicy | None = None,
 ) -> FixtureBuild:
+    normalized = with_request_id(request, f"fixture-{case_id}")
+    resolved_policy = (
+        policy if policy is not None else compile_policy(normalized, resolution)
+    )
+    report = _capability_report(case_id)
+    collection = plan_collection(
+        resolved_policy,
+        resolution,
+        report,
+        AcquisitionLimits(),
+        request_id=normalized.request_id,
+        evidence_scopes=normalized.evidence_scopes,
+    )
     return FixtureBuild(
         case_id=case_id,
-        request=request,
+        request=normalized,
         resolution=resolution,
-        policy=policy if policy is not None else compile_policy(request, resolution),
+        policy=resolved_policy,
+        collection=collection,
         pool=pool,
+        capability_report=report,
         variant_aliases=dict(aliases),
         budget=budget if budget is not None else DeliveryBudget(),
         audit_note=audit_note,

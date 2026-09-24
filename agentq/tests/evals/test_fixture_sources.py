@@ -115,7 +115,11 @@ def test_every_builder_produces_a_consistent_source_level_fixture() -> None:
     for case_id, build in builders.BUILDERS.items():
         fixture = build()
         assert fixture.case_id == case_id
-        assert fixture.pool.request_id == f"fixture-{case_id}"
+        assert fixture.request.request_id == f"fixture-{case_id}"
+        assert fixture.pool.request_id == fixture.request.request_id
+        assert fixture.collection.request_id == fixture.request.request_id
+        assert fixture.collection.target == fixture.resolution.target
+        assert fixture.collection.profile
         assert isinstance(fixture.resolution, ResolvedTarget)
         assert fixture.resolution.target == fixture.request.target
         assert fixture.policy.intent is fixture.request.intent

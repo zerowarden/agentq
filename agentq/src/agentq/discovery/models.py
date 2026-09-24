@@ -6,17 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-class FileEntry:
-    """One ranked repository file."""
-
-    path: str
-    role: str
-    language: str
-
-    def to_wire(self) -> dict[str, Any]:
-        return {"path": self.path, "role": self.role, "language": self.language}
-
-
 @dataclass(frozen=True)
 class PackageManifest:
     """The nearest owning package manifest for a repository path."""

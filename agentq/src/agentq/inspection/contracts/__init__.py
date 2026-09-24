@@ -33,6 +33,13 @@ from .capability import (
     EvidenceRequest,
 )
 from .collection import CollectionPlan, CollectionRequest, RequirementOmission
+from .decision import (
+    DecisionDelivered,
+    DecisionFailure,
+    DecisionInput,
+    DecisionOutcome,
+    FittingEvent,
+)
 from .evaluation import (
     EvidenceFeatures,
     EvidenceProvenance,
@@ -78,6 +85,7 @@ from .policy import (
 from .requests import (
     ExecutionLedger,
     InspectionContext,
+    InspectionMemo,
     InspectionRequest,
     PresentationOptions,
     RepositoryIdentity,
@@ -132,6 +140,10 @@ __all__ = [
     "CollectionPlan",
     "CollectionRequest",
     "CollectionStatus",
+    "DecisionDelivered",
+    "DecisionFailure",
+    "DecisionInput",
+    "DecisionOutcome",
     "DeclarationCandidate",
     "DeclarationPayload",
     "EvidenceFeatures",
@@ -144,9 +156,11 @@ __all__ = [
     "EvidenceVariant",
     "ExecutionLedger",
     "Fidelity",
+    "FittingEvent",
     "INSPECTION_SCHEMA",
     "InspectionBundle",
     "InspectionContext",
+    "InspectionMemo",
     "InspectionRequest",
     "InspectionTarget",
     "Intent",
