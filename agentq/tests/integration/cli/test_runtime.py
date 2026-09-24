@@ -30,7 +30,9 @@ class RuntimeCliTests(AgentQIntegrationHarness):
         env = {**self.env, "AGENTQ_SESSION_ID": "concurrent"}
         probes = self.repo / "packages/a/src/concurrent_probes.ts"
         probes.write_text(
-            "".join(f"export const ConcurrentProbe{index} = {index}\n" for index in range(8)),
+            "".join(
+                f"export const ConcurrentProbe{index} = {index}\n" for index in range(8)
+            ),
             encoding="utf-8",
         )
         processes = [

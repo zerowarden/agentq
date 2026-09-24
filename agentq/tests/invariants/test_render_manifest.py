@@ -229,5 +229,6 @@ class BudgetRecoveryTests(ManifestHarness):
             recovery = int(parts[parts.index("--budget") + 1])
             self.assertGreater(recovery, 10)
 
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

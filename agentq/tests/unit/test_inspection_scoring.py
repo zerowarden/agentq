@@ -195,6 +195,25 @@ def test_total_is_the_sum_of_named_contributions() -> None:
     )
 
 
+def test_scores_do_not_depend_on_observation_ids_or_audit_notes() -> None:
+    first = _features(
+        observation_id="obs-a",
+        role=EvidenceRole.REFERENCE,
+        kind=ObservationKind.SEMANTIC_REFERENCE,
+        binding=Binding.RESOLVED,
+    )
+    second = _features(
+        observation_id="obs-b",
+        role=EvidenceRole.REFERENCE,
+        kind=ObservationKind.SEMANTIC_REFERENCE,
+        binding=Binding.RESOLVED,
+    )
+    left = score_evidence((first,), DEFAULT_SCORING, intent=Intent.EDIT)[0]
+    right = score_evidence((second,), DEFAULT_SCORING, intent=Intent.EDIT)[0]
+    assert left.score.total == right.score.total
+    assert left.score.contributions == right.score.contributions
+
+
 def test_test_domain_references_are_test_evidence() -> None:
     pool = EvidencePool(
         request_id="req-1",

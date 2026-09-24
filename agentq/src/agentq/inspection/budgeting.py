@@ -35,6 +35,9 @@ class AcquisitionLimits:
     max_observations: int = 400
     max_source_files: int = 40
     max_source_lines: int = 240
+    # Per-line display width; a wider line is marked truncated and can never
+    # claim exact source fidelity.
+    max_source_line_chars: int = 260
     max_provider_calls: int = 16
     reference_limit: int = 40
     lexical_test_mentions: int = 12
@@ -46,6 +49,7 @@ class AcquisitionLimits:
             "max_observations",
             "max_source_files",
             "max_source_lines",
+            "max_source_line_chars",
             "max_provider_calls",
             "reference_limit",
             "lexical_test_mentions",

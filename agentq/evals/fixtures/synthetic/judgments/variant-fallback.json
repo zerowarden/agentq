@@ -23,6 +23,9 @@
       "witness_sets": [["implementation.exact_only"]]
     }
   ],
+  "expected_outcomes": [
+    {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure; the facet labels carry the quality expectation."}
+  ],
   "witnesses": [
     {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
     {

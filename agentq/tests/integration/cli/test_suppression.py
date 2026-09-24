@@ -193,5 +193,3 @@ class SuppressionCliTests(AgentQIntegrationHarness):
         for marker in ("line_01 = ", "line_20 = "):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
-
-

@@ -17,6 +17,11 @@
       "witness_sets": [["secondary.use"]]
     }
   ],
+  "expected_outcomes": [
+    {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure."},
+    {"kind": "fitting_reduction", "minimum": 1, "audit_note": "Whole-response metadata must force at least one recorded reduction."},
+    {"kind": "requirement_status", "requirement_id": "target_source", "status": "satisfied", "audit_note": "Required source must survive fitting."}
+  ],
   "witnesses": [
     {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
     {

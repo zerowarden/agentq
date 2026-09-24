@@ -165,7 +165,7 @@ def decide_evidence(
         request, decision_input.resolution, policy, plan, pool, initial, assessment
     )
     with stage("render") as span:
-        fitted, events = _fit_delivery(
+        fit = _fit_delivery(
             bundle,
             policy=policy,
             plan=plan,
@@ -173,8 +173,8 @@ def decide_evidence(
             delivery=config.delivery,
             output_format=config.output_format,
         )
-        render = fitted.render
-        if delivery_overflow(fitted, config.delivery) > 0:
+        render = fit.bundle.render
+        if not fit.fits:
             span.note(
                 format=config.output_format,
                 chars=0 if render is None else render.chars,
@@ -183,20 +183,71 @@ def decide_evidence(
             )
             return DecisionFailure(
                 reason=DELIVERY_BUDGET_CODE,
-                detail=_envelope_detail(fitted, config.delivery),
+                detail=_envelope_detail(fit.bundle, config.delivery),
             )
         span.note(
             format=config.output_format,
             chars=0 if render is None else render.chars,
-            selected=len(fitted.selection.selected) if fitted.selection else 0,
+            selected=(
+                len(fit.bundle.selection.selected) if fit.bundle.selection else 0
+            ),
         )
     return DecisionDelivered(
-        bundle=fitted,
+        bundle=fit.bundle,
         features=features,
         scores=scores,
         initial_selection=initial,
-        fitting_events=events,
+        fitting_events=fit.events,
     )
+
+
+def framing_chars(decision_input: DecisionInput, output_format: str = "text") -> int:
+    """Rendered characters of a response that selects no evidence.
+
+    Authored delivery budgets are pinned from this measurement plus the
+    serialized cost of the evidence they intend to deliver, so a budget covers
+    the response framing itself rather than guessing at it.
+    """
+    empty_selection = SelectionPlan(
+        profile="framing",
+        selected=(),
+        omitted=(),
+        reserved=(),
+        measured_cost=0,
+        budget_chars=0,
+    )
+    assessment = assess_selected_evidence(
+        decision_input.policy,
+        decision_input.collection,
+        decision_input.pool,
+        empty_selection,
+    )
+    bundle = _build_bundle(
+        decision_input.request,
+        decision_input.resolution,
+        decision_input.policy,
+        decision_input.collection,
+        decision_input.pool,
+        empty_selection,
+        assessment,
+    )
+    rendered = attach_render(bundle, output_format)
+    if rendered.render is None:
+        raise ContractError("framing render produced no bundle")
+    return rendered.render.chars
+
+
+@dataclass(frozen=True)
+class _FitOutcome:
+    """The fitted bundle, its reductions, and any remaining overflow."""
+
+    bundle: InspectionBundle
+    events: tuple[FittingEvent, ...]
+    overflow: int
+
+    @property
+    def fits(self) -> bool:
+        return self.overflow == 0
 
 
 def _fit_delivery(
@@ -207,7 +258,7 @@ def _fit_delivery(
     pool: EvidencePool,
     delivery: DeliveryBudget,
     output_format: str,
-) -> tuple[InspectionBundle, tuple[FittingEvent, ...]]:
+) -> _FitOutcome:
     """Reduce the complete rendered response until it respects the ceiling.
 
     Selection bounds evidence text alone; the delivered result also carries
@@ -225,7 +276,7 @@ def _fit_delivery(
             bundle.selection, overflow_chars=overflow, output_format=output_format
         )
         if reduced is None:
-            return bundle, tuple(events)
+            return _FitOutcome(bundle, tuple(events), overflow)
         events.append(
             FittingEvent(
                 overflow_chars=overflow,
@@ -238,7 +289,7 @@ def _fit_delivery(
             assessment=assess_selected_evidence(policy, plan, pool, reduced),
         )
         bundle = attach_render(bundle, output_format)
-    return bundle, tuple(events)
+    return _FitOutcome(bundle, tuple(events), 0)
 
 
 def _dropped_variant_ids(

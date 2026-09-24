@@ -67,8 +67,7 @@ def apply_unstable(
         diagnostics.append(
             Diagnostic(
                 message=(
-                    "source changed during inspection for observation "
-                    f"{observation_id}"
+                    f"source changed during inspection for observation {observation_id}"
                 ),
                 code=SOURCE_UNSTABLE,
                 path=observation.source.path if observation is not None else None,

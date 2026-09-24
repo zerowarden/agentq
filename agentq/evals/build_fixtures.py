@@ -10,21 +10,21 @@ captures, never inside them.
 from __future__ import annotations
 
 import importlib
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from agentq.core import ContractError
-from agentq.inspection.budgeting import AcquisitionLimits
+from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.contracts import DecisionInput
-
 from evals.fixtures.synthetic import builders
 from evals.fixtures.synthetic.builders import FixtureBuild
 
 from .capture import make_capture
-from .codec import decision_input_digest
-from .models import FixtureSnapshot, LockedCase, ReplayCapture, SuiteLock
+from .codec import decision_input_digest, read_json_file
+from .judgments import load_draft
+from .locking import SuiteBuilder
+from .models import FixtureSnapshot, ReplayCapture, SuiteLock
 from .store import CaptureStore
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -40,16 +40,13 @@ class BuiltFixture:
     case_id: str
     capture: ReplayCapture
     variant_aliases: Mapping[str, str]
+    budget: DeliveryBudget
+    audit_note: str
 
 
 def load_suite(suite_id: str) -> dict[str, object]:
     path = SUITES_DIR / f"{suite_id}.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ContractError(f"suite manifest is unreadable: {path}") from exc
-    except ValueError as exc:
-        raise ContractError(f"suite manifest is not valid JSON: {path}") from exc
+    value = read_json_file(path, what="suite manifest")
     if not isinstance(value, dict):
         raise ContractError(f"suite manifest must be a JSON object: {path}")
     if value.get("schema") != SUITE_SCHEMA:
@@ -107,19 +104,30 @@ def build_fixture(
         limits=AcquisitionLimits(),
         capability_report=build.capability_report,
     )
-    return BuiltFixture(case_id, capture, dict(build.variant_aliases))
+    return BuiltFixture(
+        case_id,
+        capture,
+        dict(build.variant_aliases),
+        build.budget,
+        build.audit_note,
+    )
 
 
-def build_suite(suite_id: str) -> tuple[BuiltFixture, ...]:
-    """Build every scheduled case in one authored suite manifest."""
-    suite = load_suite(suite_id)
+def _suite_cases(suite: dict[str, object], suite_id: str) -> list[dict[str, object]]:
     cases = suite.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ContractError(f"suite {suite_id!r} schedules no cases")
-    built: list[BuiltFixture] = []
+    parsed: list[dict[str, object]] = []
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             raise ContractError(f"suite {suite_id!r} case {index} is not an object")
+        parsed.append(case)
+    return parsed
+
+
+def _build_cases(suite: dict[str, object], suite_id: str) -> list[BuiltFixture]:
+    built: list[BuiltFixture] = []
+    for index, case in enumerate(_suite_cases(suite, suite_id)):
         case_id = case.get("case_id")
         reference = case.get("builder")
         if not isinstance(case_id, str) or not case_id:
@@ -127,22 +135,54 @@ def build_suite(suite_id: str) -> tuple[BuiltFixture, ...]:
         if not isinstance(reference, str):
             raise ContractError(f"suite case {case_id!r} has no builder reference")
         built.append(build_fixture(case_id, builder=_load_builder(reference)))
-    return tuple(built)
+    return built
+
+
+def _judgment_paths(
+    suite: dict[str, object], suite_id: str
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    for case in _suite_cases(suite, suite_id):
+        case_id = str(case["case_id"])
+        value = case.get("judgment")
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ContractError(f"suite case {case_id!r} judgment must be a path")
+        paths[case_id] = PROJECT / value
+    return paths
+
+
+def judgment_paths(suite_id: str) -> dict[str, Path]:
+    """Case id to authored judgment draft path for one suite."""
+    return _judgment_paths(load_suite(suite_id), suite_id)
+
+
+def build_suite(suite_id: str) -> tuple[BuiltFixture, ...]:
+    """Build every scheduled case in one authored suite manifest."""
+    suite = load_suite(suite_id)
+    return tuple(_build_cases(suite, suite_id))
 
 
 def write_suite(
     store: CaptureStore, suite_id: str
 ) -> tuple[tuple[BuiltFixture, ...], SuiteLock]:
-    """Capture every scheduled case and write the generated capture lock."""
-    built = build_suite(suite_id)
-    locked: list[LockedCase] = []
-    seen: set[str] = set()
+    """Capture every scheduled case, compile its judgments, write the lock."""
+    suite = load_suite(suite_id)
+    built = tuple(_build_cases(suite, suite_id))
+    judgments = _judgment_paths(suite, suite_id)
+    builder = SuiteBuilder(store, suite_id)
     for fixture in built:
-        if fixture.case_id in seen:
-            raise ContractError(f"duplicate case id in suite: {fixture.case_id!r}")
-        seen.add(fixture.case_id)
-        capture_id = store.write_capture(fixture.capture)
-        locked.append(LockedCase(case_id=fixture.case_id, capture_id=capture_id))
-    lock = SuiteLock(suite_id=suite_id, cases=tuple(locked))
-    store.write_lock(lock)
-    return built, lock
+        draft = (
+            load_draft(judgments[fixture.case_id])
+            if fixture.case_id in judgments
+            else None
+        )
+        builder.add(
+            fixture.case_id,
+            fixture.capture,
+            draft=draft,
+            aliases=fixture.variant_aliases if draft is not None else None,
+            delivery=fixture.budget,
+        )
+    return built, builder.write()

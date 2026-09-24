@@ -1,0 +1,18 @@
+{
+  "actual_count": 8,
+  "artifact_relative_path": "imports/contextbench/c2855792b006af41c67202d33883fb9d46362853/sample-81bd88ff4c62f26ed86f2dd56814667de809d7e8684d80f460f700bc3d68f762.jsonl",
+  "dataset_revision": "c2855792b006af41c67202d33883fb9d46362853",
+  "instance_ids": [
+    "SWE-PolyBench__python__maintenance__bugfix__ed58622a",
+    "SWE-PolyBench__typescript__maintenance__bugfix__2f2954b5",
+    "SWE-Bench-Pro__python__maintenance__bugfix__07bb383a",
+    "SWE-Bench-Pro__python__maintenance__bugfix__0bac5789",
+    "SWE-Bench-Verified__python__maintenance__bugfix__1ce4c38e",
+    "SWE-Bench-Verified__python__maintenance__bugfix__1d90db61",
+    "SWE-PolyBench__typescript__evolution__feature__41cd3842",
+    "SWE-PolyBench__typescript__maintenance__bugfix__42165c4e"
+  ],
+  "purpose": "development-authoring-only",
+  "requested_count": 8,
+  "sample_digest": "81bd88ff4c62f26ed86f2dd56814667de809d7e8684d80f460f700bc3d68f762"
+}

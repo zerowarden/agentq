@@ -29,7 +29,7 @@ from agentq.core import (
 from agentq.discovery.files import list_repo_files
 from agentq.execution import run_cmd
 from agentq.redaction import StreamingRedactor
-from agentq.text import compact_line
+from agentq.text import compact_line, line_truncated
 
 
 @dataclass(frozen=True)
@@ -37,11 +37,14 @@ class ReadLine:
     line: int
     text: str
     anchor: bool = False
+    truncated: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         data: dict[str, Any] = {"line": self.line, "text": self.text}
         if self.anchor:
             data["anchor"] = True
+        if self.truncated:
+            data["truncated"] = True
         return data
 
 
@@ -98,6 +101,7 @@ class ReadItem:
                     line=int(item.get("line", 0) or 0),
                     text=str(item.get("text", "")),
                     anchor=bool(item.get("anchor")),
+                    truncated=bool(item.get("truncated")),
                 )
                 for item in list_field(payload, "lines")
             ),
@@ -645,6 +649,18 @@ def _base_items_and_windows(
     return base_items, planned
 
 
+def _read_line(
+    text: str, *, number: int, max_chars: int, anchor: bool
+) -> ReadLine:
+    """One display line; truncation is structural, never marker-inferred."""
+    return ReadLine(
+        line=number,
+        text=compact_line(text, max_chars),
+        anchor=anchor,
+        truncated=line_truncated(text, max_chars),
+    )
+
+
 def _source_item(
     state: _SourceState,
     window_start: int,
@@ -656,9 +672,10 @@ def _source_item(
 ) -> ReadItem:
     lines = (
         tuple(
-            ReadLine(
-                line=number,
-                text=compact_line(state.safe_lines[number - 1], max_chars),
+            _read_line(
+                state.safe_lines[number - 1],
+                number=number,
+                max_chars=max_chars,
                 anchor=number in state.anchor_set,
             )
             for number in range(window_start, window_end + 1)

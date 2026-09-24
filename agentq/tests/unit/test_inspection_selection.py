@@ -8,6 +8,7 @@ from agentq.core import SourceRef, canonical_json, typed_coverage
 from agentq.inspection.budgeting import DeliveryBudget
 from agentq.inspection.contracts import (
     Capability,
+    CollectionPlan,
     DeclarationPayload,
     EvidencePolicy,
     EvidencePool,
@@ -22,6 +23,7 @@ from agentq.inspection.contracts import (
     ReferencePayload,
     RepresentationKind,
     RequirementRule,
+    RequirementStatus,
     RequirementStrength,
     ScoreContribution,
     ScoredEvidence,
@@ -29,6 +31,7 @@ from agentq.inspection.contracts import (
     SelectionPlan,
     SourceSpan,
     SourceWindowPayload,
+    SymbolTarget,
     TargetKind,
     make_observation,
     make_variant,
@@ -41,13 +44,21 @@ from agentq.inspection.selection import (
     DEFAULT_SELECTION,
     OMISSION_BUDGET,
     OMISSION_NO_REPRESENTATION,
+    OMISSION_NO_VALUE,
     OMISSION_OVERLAP,
     OMISSION_SAME_FILE,
     REASON_RELEVANCE,
     REASON_REQUIRED,
     REASON_ROLE,
     SelectionProfile,
+    assess_selected_evidence,
     select_evidence,
+)
+
+CHALLENGER = SelectionProfile(
+    profile="selection-test-challenger",
+    variant_fallback=True,
+    skip_zero_value=True,
 )
 
 SELECTION_SCORING = ScoringProfile(
@@ -525,3 +536,193 @@ def test_budget_without_room_omits_everything_explicitly() -> None:
     assert plan.reserved == ()
     assert plan.measured_cost == 0
     assert any(item.reason == OMISSION_BUDGET for item in plan.omitted)
+
+
+def _two_representations(
+    path: str, start: int, end: int
+) -> tuple[Observation, tuple[EvidenceVariant, ...]]:
+    observation, (exact,) = _source(path, start, end)
+    excerpt = make_variant(
+        observation_id=observation.observation_id,
+        representation=RepresentationKind.EXCERPT,
+        fidelity=Fidelity.BOUNDED,
+        source=observation.source,
+        text="line 1",
+        span=SourceSpan(start_line=start, end_line=end),
+    )
+    return observation, (exact, excerpt)
+
+
+def _collection_plan() -> CollectionPlan:
+    return CollectionPlan(
+        profile="test-plan", request_id="req-1", target=SymbolTarget(name="target")
+    )
+
+
+def test_variant_fallback_uses_a_smaller_representation_that_fits() -> None:
+    implementation = _two_representations("src/service.py", 1, 40)
+    exact, excerpt = implementation[1]
+    pool = _pool(implementation)
+    scores = _scores(pool)
+    budget = DeliveryBudget(
+        max_chars=selected_cost(
+            SelectedEvidence(variant=excerpt, reason=REASON_ROLE, score=0), "text"
+        )
+        + 20,
+        envelope_chars=10,
+    )
+    baseline = _select(pool, scores, _policy(), budget=budget)
+    assert baseline.selected == ()
+    assert any(item.reason == OMISSION_BUDGET for item in baseline.omitted)
+    fallback = _select(pool, scores, _policy(), budget=budget, profile=CHALLENGER)
+    assert [item.variant.variant_id for item in fallback.selected] == [
+        excerpt.variant_id
+    ]
+    assert fallback.measured_cost < selected_cost(
+        SelectedEvidence(variant=exact, reason=REASON_ROLE, score=0), "text"
+    )
+
+
+def test_variant_fallback_never_satisfies_exact_source_with_an_excerpt() -> None:
+    implementation = _two_representations("src/service.py", 1, 40)
+    excerpt = implementation[1][1]
+    pool = _pool(implementation)
+    budget = DeliveryBudget(
+        max_chars=selected_cost(
+            SelectedEvidence(variant=excerpt, reason=REASON_ROLE, score=0), "text"
+        )
+        + 20,
+        envelope_chars=10,
+    )
+    policy = _policy(_exact_source_requirement())
+    plan = _select(pool, _scores(pool), policy, budget=budget, profile=CHALLENGER)
+    assert plan.reserved == ()
+    assert [item.variant.variant_id for item in plan.selected] == [
+        excerpt.variant_id
+    ]
+    assessment = assess_selected_evidence(policy, _collection_plan(), pool, plan)
+    found = assessment.by_id("target_source")
+    assert found is not None
+    assert found.status is RequirementStatus.UNSATISFIED
+
+
+def test_required_upgrade_charges_only_the_serialized_difference() -> None:
+    declaration = _declaration("src/a.py", 1)
+    signature, exact = declaration[1]
+    pool = _pool(declaration)
+    identity = EvidenceRequirement(
+        requirement_id="declaration_identity",
+        role=EvidenceRole.DECLARATION,
+        rule=RequirementRule.MINIMUM_EVIDENCE,
+        strength=RequirementStrength.REQUIRED,
+        capabilities=(Capability.FIND_DECLARATIONS,),
+        acceptable_kinds=(ObservationKind.DECLARATION,),
+        representations=(RepresentationKind.SIGNATURE,),
+    )
+    exact_source = EvidenceRequirement(
+        requirement_id="declaration_source",
+        role=EvidenceRole.DECLARATION,
+        rule=RequirementRule.EXACT_SOURCE,
+        strength=RequirementStrength.REQUIRED,
+        capabilities=(Capability.FIND_DECLARATIONS,),
+        acceptable_kinds=(ObservationKind.DECLARATION,),
+        representations=(RepresentationKind.EXACT_SOURCE,),
+    )
+    signature_cost = selected_cost(
+        SelectedEvidence(variant=signature, reason=REASON_REQUIRED, score=0), "text"
+    )
+    exact_cost = selected_cost(
+        SelectedEvidence(variant=exact, reason=REASON_REQUIRED, score=0), "text"
+    )
+    budget = DeliveryBudget(max_chars=exact_cost + 10, envelope_chars=10)
+    assert exact_cost <= budget.available_chars()
+    assert signature_cost + exact_cost > budget.available_chars()
+    policy = _policy(identity, exact_source)
+    baseline = _select(pool, _scores(pool), policy, budget=budget)
+    assert [item.variant.variant_id for item in baseline.selected] == [
+        signature.variant_id
+    ]
+    assert baseline.reserved == ("declaration_identity",)
+    assert baseline.measured_cost == signature_cost
+    upgraded = _select(pool, _scores(pool), policy, budget=budget, profile=CHALLENGER)
+    assert [item.variant.variant_id for item in upgraded.selected] == [
+        exact.variant_id
+    ]
+    assert upgraded.reserved == ("declaration_identity", "declaration_source")
+    assert upgraded.measured_cost == exact_cost
+    assessment = assess_selected_evidence(policy, _collection_plan(), pool, upgraded)
+    assert assessment.by_id("declaration_source") is not None
+    assert (
+        assessment.by_id("declaration_source").status
+        is RequirementStatus.SATISFIED
+    )
+
+
+def test_zero_value_optional_evidence_is_not_filler() -> None:
+    reference = _reference("src/use.py")
+    pool = _pool(reference)
+    scores = _scored_with(pool, {reference[0].observation_id: 0})
+    profile = replace(
+        CHALLENGER, reserve_required=False, role_diversity=False
+    )
+    baseline = _select(pool, scores, _policy())
+    challenger = _select(pool, scores, _policy(), profile=profile)
+    assert [item.observation_id for item in baseline.selected] == [
+        reference[0].observation_id
+    ]
+    assert challenger.selected == ()
+    assert any(item.reason == OMISSION_NO_VALUE for item in challenger.omitted)
+
+
+def test_overlapping_excerpts_stay_omitted_under_fallback() -> None:
+    first = _source("src/a.py", 1, 10)
+    second = _source("src/a.py", 5, 15)
+    pool = _pool(first, second)
+    plan = _select(pool, _scores(pool), _policy(), profile=CHALLENGER)
+    assert first[0].observation_id in _selected_ids(plan)
+    assert second[0].observation_id not in _selected_ids(plan)
+    assert any(item.reason == OMISSION_OVERLAP for item in plan.omitted)
+
+
+def test_required_source_still_bypasses_the_optional_quota_under_fallback() -> None:
+    source = _source("src/a.py", 1, 3)
+    references = [_reference("src/a.py", line=line) for line in (10, 20, 30)]
+    pool = _pool(source, *references)
+    plan = _select(
+        pool, _scores(pool), _policy(_exact_source_requirement()), profile=CHALLENGER
+    )
+    assert source[0].observation_id in _selected_ids(plan)
+    assert plan.reserved == ("target_source",)
+    assert any(item.reason == OMISSION_SAME_FILE for item in plan.omitted)
+
+
+def test_jointly_infeasible_requirements_stay_explicit() -> None:
+    source = _source("src/a.py", 1, 20)
+    test_mention = _reference("tests/test_orders.py", 4, domain="test")
+    pool = _pool(source, test_mention)
+    test_requirement = EvidenceRequirement(
+        requirement_id="test_search",
+        role=EvidenceRole.TEST,
+        rule=RequirementRule.MINIMUM_EVIDENCE,
+        strength=RequirementStrength.REQUIRED,
+        capabilities=(Capability.LEXICAL_MENTIONS,),
+        acceptable_kinds=(ObservationKind.TEST_MENTION,),
+        domain="test",
+    )
+    source_cost = selected_cost(
+        SelectedEvidence(variant=source[1][0], reason=REASON_REQUIRED, score=0), "text"
+    )
+    budget = DeliveryBudget(max_chars=source_cost + 20, envelope_chars=10)
+    policy = _policy(_exact_source_requirement(), test_requirement)
+    plan = _select(pool, _scores(pool), policy, budget=budget, profile=CHALLENGER)
+    assert plan.reserved == ("target_source",)
+    assert any(
+        item.observation_id == test_mention[0].observation_id
+        and item.reason == OMISSION_BUDGET
+        for item in plan.omitted
+    )
+    assessment = assess_selected_evidence(policy, _collection_plan(), pool, plan)
+    found = assessment.by_id("test_search")
+    assert found is not None
+    assert found.status is RequirementStatus.UNSATISFIED
+    assert found.detail is not None

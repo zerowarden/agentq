@@ -39,6 +39,7 @@ from .decision import (
     DecisionInput,
     DecisionOutcome,
     FittingEvent,
+    PreparedDecision,
 )
 from .evaluation import (
     EvidenceFeatures,
@@ -175,6 +176,7 @@ __all__ = [
     "PathKind",
     "PathTarget",
     "PolicyAssessment",
+    "PreparedDecision",
     "PresentationOptions",
     "RangeTarget",
     "ReferencePayload",

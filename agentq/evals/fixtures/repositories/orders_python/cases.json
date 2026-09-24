@@ -1,0 +1,99 @@
+{
+  "schema": "agentq.eval.case-suite/v1",
+  "suite_id": "orders-python-v1",
+  "cases": [
+    {
+      "schema": "agentq.eval.case/v1",
+      "case_id": "orders-python-understand-path",
+      "source": {
+        "kind": "local_fixture",
+        "root": "evals/fixtures/repositories/orders_python/repository",
+        "fixture_revision": "1"
+      },
+      "request": {
+        "target": {"kind": "path", "path": "orders.py", "path_kind": "file"},
+        "intent": "understand",
+        "evidence_scopes": [],
+        "request_id": ""
+      },
+      "target_origin": "supplied",
+      "judgment_basis": "target_intent",
+      "split_group": "fixture:orders-python-v1",
+      "capture_id": null,
+      "judgment_id": null
+    },
+    {
+      "schema": "agentq.eval.case/v1",
+      "case_id": "orders-python-edit-symbol",
+      "source": {
+        "kind": "local_fixture",
+        "root": "evals/fixtures/repositories/orders_python/repository",
+        "fixture_revision": "1"
+      },
+      "request": {
+        "target": {
+          "kind": "symbol",
+          "name": "report_order_ids",
+          "scopes": ["report.py"]
+        },
+        "intent": "edit",
+        "evidence_scopes": [],
+        "request_id": ""
+      },
+      "target_origin": "supplied",
+      "judgment_basis": "target_intent",
+      "split_group": "fixture:orders-python-v1",
+      "capture_id": null,
+      "judgment_id": null
+    },
+    {
+      "schema": "agentq.eval.case/v1",
+      "case_id": "orders-python-edit-location",
+      "source": {
+        "kind": "local_fixture",
+        "root": "evals/fixtures/repositories/orders_python/repository",
+        "fixture_revision": "1"
+      },
+      "request": {
+        "target": {
+          "kind": "location",
+          "path": "orders.py",
+          "line": 10,
+          "column": 5
+        },
+        "intent": "edit",
+        "evidence_scopes": [],
+        "request_id": ""
+      },
+      "target_origin": "supplied",
+      "judgment_basis": "target_intent",
+      "split_group": "fixture:orders-python-v1",
+      "capture_id": null,
+      "judgment_id": null
+    },
+    {
+      "schema": "agentq.eval.case/v1",
+      "case_id": "orders-python-ambiguous-symbol",
+      "source": {
+        "kind": "local_fixture",
+        "root": "evals/fixtures/repositories/orders_python/repository",
+        "fixture_revision": "1"
+      },
+      "request": {
+        "target": {
+          "kind": "symbol",
+          "name": "list_orders",
+          "scopes": ["orders.py", "legacy.py"]
+        },
+        "intent": "understand",
+        "evidence_scopes": [],
+        "request_id": ""
+      },
+      "target_origin": "supplied",
+      "judgment_basis": "target_intent",
+      "split_group": "fixture:orders-python-v1",
+      "capture_id": null,
+      "judgment_id": null
+    }
+  ]
+}

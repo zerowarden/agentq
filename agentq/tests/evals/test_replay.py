@@ -20,9 +20,7 @@ from evals.build_fixtures import build_suite, write_suite
 from evals.codec import decode_capture, encode_capture
 from evals.replay import decision_id, load_config, replay_capture, replay_suite
 from evals.store import CaptureStore, StoreError
-
-PROJECT = Path(__file__).resolve().parents[2]
-BASELINE_PROFILE = PROJECT / "evals/profiles/baseline.json"
+from tests.evals.support import BASELINE_PROFILE
 
 
 class ReplayTests(unittest.TestCase):
@@ -98,9 +96,7 @@ class ReplayTests(unittest.TestCase):
                 side_effect=AssertionError("reacquisition attempted"),
             ):
                 with self.assertRaises(StoreError):
-                    replay_suite(
-                        store, lock, DecisionConfig(), Path(temp) / "run"
-                    )
+                    replay_suite(store, lock, DecisionConfig(), Path(temp) / "run")
 
     def test_replay_needs_no_source_checkout(self) -> None:
         with TemporaryDirectory() as temp:
@@ -161,6 +157,91 @@ class CliSliceTests(unittest.TestCase):
             self.assertEqual(replay_summary["delivered"], 8)
             self.assertEqual(replay_summary["failed"], 0)
             self.assertEqual(len(replay_summary["cases"]), 8)
+
+    def test_catalog_renders_one_case_in_alias_terms(self) -> None:
+        with TemporaryDirectory() as temp:
+            store_root = Path(temp) / "store"
+            with contextlib.redirect_stdout(io.StringIO()):
+                evals_cli.main(
+                    [
+                        "build-fixtures",
+                        "--suite",
+                        "smoke-v1",
+                        "--store",
+                        str(store_root),
+                    ]
+                )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = evals_cli.main(
+                    [
+                        "catalog",
+                        "--store",
+                        str(store_root),
+                        "--case",
+                        "basic-edit",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            text = stdout.getvalue()
+            self.assertIn("request: location:orders.py:10:5", text)
+            self.assertIn("searched (collection plan):", text)
+            self.assertIn("acquired (", text)
+            self.assertIn("consumer-contract", text)
+            self.assertIn("provenance: capture=", text)
+            self.assertIn("credited:", text)
+            self.assertNotIn("var-", text)
+
+    def test_evaluate_reports_unjudged_cases_as_exclusions(self) -> None:
+        with TemporaryDirectory() as temp:
+            store = CaptureStore(Path(temp) / "store")
+            _, lock = write_suite(store, "smoke-v1")
+            first, *rest = lock.cases
+            altered = replace(
+                lock, cases=(replace(first, judgment_id=None), *rest)
+            )
+            store.write_lock(altered)
+            run = Path(temp) / "run"
+            replay_suite(store, altered, DecisionConfig(), run)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = evals_cli.main(["evaluate", "--run-dir", str(run)])
+            report = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(report["unevaluated_cases"], 1)
+        self.assertEqual(report["evaluated_cases"], 7)
+        self.assertEqual(report["excluded"][0]["case_id"], first.case_id)
+
+    def test_evaluate_rejects_a_run_record_inconsistent_with_its_capture(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            store = CaptureStore(Path(temp) / "store")
+            _, lock = write_suite(store, "smoke-v1")
+            run = Path(temp) / "run"
+            replay_suite(store, lock, DecisionConfig(), run)
+            path = run / "decisions.jsonl"
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            records[0]["decision_id"] = "0" * 64
+            store.write_artifact(
+                path,
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in records
+                ),
+            )
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = evals_cli.main(["evaluate", "--run-dir", str(run)])
+        self.assertEqual(code, 1)
+        self.assertIn("does not match", stderr.getvalue())
 
     def test_cli_reports_a_missing_lock_concise(self) -> None:
         stderr = io.StringIO()

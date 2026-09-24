@@ -242,6 +242,8 @@ CONCRETE_PAYLOAD_NAMES = frozenset(
         "PythonReferenceSection",
     }
 )
+
+
 class DependencyDirectionTests(unittest.TestCase):
     def test_discovery_does_not_import_navigation(self) -> None:
         offenders: dict[str, list[str]] = {}
@@ -408,6 +410,6 @@ class DetectorSanityTests(unittest.TestCase):
 
         with self.subTest(detector="stdout/stderr writes"):
             writes = _write_calls(
-                "print('x')\n" "sys.stdout.write('x')\n" "logger.write('x')\n"
+                "print('x')\nsys.stdout.write('x')\nlogger.write('x')\n"
             )
             self.assertEqual(writes, ["print", "sys.stdout.write"])

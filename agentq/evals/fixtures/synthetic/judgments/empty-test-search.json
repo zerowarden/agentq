@@ -23,6 +23,11 @@
       "witness_sets": [["test.evidence"]]
     }
   ],
+  "expected_outcomes": [
+    {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure."},
+    {"kind": "requirement_status", "requirement_id": "test_search", "status": "satisfied", "audit_note": "The completed empty test search is an explicit collection outcome."},
+    {"kind": "requirement_status", "requirement_id": "target_source", "status": "satisfied", "audit_note": "The requested span must be selected exactly."}
+  ],
   "witnesses": [
     {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
     {

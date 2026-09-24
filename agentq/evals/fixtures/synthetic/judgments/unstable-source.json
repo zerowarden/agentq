@@ -17,6 +17,12 @@
       "witness_sets": [["target.identity"]]
     }
   ],
+  "expected_outcomes": [
+    {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure."},
+    {"kind": "requirement_status", "requirement_id": "declaration_identity", "status": "satisfied", "audit_note": "The stable signature identifies the declaration."},
+    {"kind": "requirement_status", "requirement_id": "target_source", "status": "unsatisfied", "audit_note": "Unstable evidence stays recorded but cannot satisfy the exact-source obligation."},
+    {"kind": "limitation", "code": "source_unstable", "audit_note": "The instability must be recorded as a limitation."}
+  ],
   "witnesses": [
     {
       "witness_id": "target.unstable_source",

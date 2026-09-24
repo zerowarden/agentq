@@ -23,7 +23,6 @@ from .models import (
     ReplayCapture,
     Snapshot,
 )
-from .store import CaptureStore
 
 
 def producers_for(pool: EvidencePool) -> tuple[ProducerFingerprint, ...]:
@@ -59,8 +58,3 @@ def make_capture(
         decision=decision,
         capability_report=capability_report,
     )
-
-
-def save_capture(store: CaptureStore, capture: ReplayCapture) -> str:
-    """Write one capture to its content address; return the capture id."""
-    return store.write_capture(capture)

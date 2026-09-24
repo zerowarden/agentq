@@ -67,8 +67,7 @@ def _file_target(args: argparse.Namespace, root: Path, relative: str):
     ranges = tuple(
         SourceSpan(start_line=line, end_line=line) for line in args.line_anchors
     ) + tuple(
-        SourceSpan(start_line=start, end_line=end)
-        for start, end in args.line_ranges
+        SourceSpan(start_line=start, end_line=end) for start, end in args.line_ranges
     )
     if ranges:
         return RangeTarget(path=relative, ranges=ranges)

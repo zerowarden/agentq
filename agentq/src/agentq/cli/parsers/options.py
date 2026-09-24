@@ -110,6 +110,7 @@ def add_common(
         help="bounded human output or structured JSON",
     )
 
+
 def add_scope(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--path",

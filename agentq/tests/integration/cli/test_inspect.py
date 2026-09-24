@@ -58,7 +58,9 @@ class InspectCliTests(AgentQIntegrationHarness):
         self.assertEqual(payload["resolution"]["outcome"], "resolved")
         selected = payload["selection"]["selected"]
         self.assertTrue(selected)
-        self.assertTrue(any("def list_orders" in item["variant"]["text"] for item in selected))
+        self.assertTrue(
+            any("def list_orders" in item["variant"]["text"] for item in selected)
+        )
         self.assertLessEqual(
             payload["selection"]["measured_cost"], payload["selection"]["budget_chars"]
         )
@@ -67,8 +69,12 @@ class InspectCliTests(AgentQIntegrationHarness):
     def test_ambiguous_symbol_reports_candidates_without_selecting(self) -> None:
         path = self.repo / "packages/a/ambig"
         path.mkdir(parents=True, exist_ok=True)
-        (path / "one.py").write_text("def duplicate():\n    return 1\n", encoding="utf-8")
-        (path / "two.py").write_text("def duplicate():\n    return 2\n", encoding="utf-8")
+        (path / "one.py").write_text(
+            "def duplicate():\n    return 1\n", encoding="utf-8"
+        )
+        (path / "two.py").write_text(
+            "def duplicate():\n    return 2\n", encoding="utf-8"
+        )
         payload = self.data("inspect", "duplicate", "--path", "packages/a/ambig")
         self.assertEqual(payload["resolution"]["outcome"], "ambiguous")
         self.assertEqual(len(payload["resolution"]["candidates"]), 2)
@@ -76,9 +82,7 @@ class InspectCliTests(AgentQIntegrationHarness):
 
     def test_range_target_returns_exact_source(self) -> None:
         self._write_orders()
-        payload = self.data(
-            "inspect", "packages/a/pysrc/orders.py", "--lines", "1:2"
-        )
+        payload = self.data("inspect", "packages/a/pysrc/orders.py", "--lines", "1:2")
         self.assertEqual(payload["resolution"]["outcome"], "resolved")
         text = "\n".join(
             item["variant"]["text"] for item in payload["selection"]["selected"]
@@ -155,7 +159,12 @@ class InspectCliTests(AgentQIntegrationHarness):
     def test_intents_change_requirements_not_resolution(self) -> None:
         self._write_orders()
         understand = self.data(
-            "inspect", "list_orders", "--path", "packages/a/pysrc", "--intent", "understand"
+            "inspect",
+            "list_orders",
+            "--path",
+            "packages/a/pysrc",
+            "--intent",
+            "understand",
         )
         rename = self.data(
             "inspect", "list_orders", "--path", "packages/a/pysrc", "--intent", "rename"

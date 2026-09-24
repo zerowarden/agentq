@@ -37,6 +37,7 @@ from agentq.inspection.contracts import (
     CapabilityReport,
     CollectionPlan,
     CollectionStatus,
+    DecisionInput,
     DeclarationCandidate,
     DeclarationPayload,
     EvidencePolicy,
@@ -63,6 +64,7 @@ from agentq.inspection.contracts import (
     make_variant,
     with_request_id,
 )
+from agentq.inspection.decision import framing_chars
 from agentq.inspection.features import extract_features
 from agentq.inspection.policy import compile_policy
 from agentq.inspection.rendering import selected_cost
@@ -89,6 +91,9 @@ DECLARATION_BODY = """def list_orders(orders: list[Order], limit: int | None = N
     return active if limit is None else active[:limit]"""
 IMPLEMENTATION_EXCERPT = """def apply_discount(orders: list[Order]) -> list[Order]:
     ...  # excerpt: normalization pipeline omitted"""
+# Covers the rendered evidence header and item separators when a pinned budget
+# is derived from measured framing plus measured evidence costs.
+_DELIVERY_MARGIN = 128
 
 
 @dataclass(frozen=True)
@@ -475,6 +480,20 @@ def _budget_from_available(available_chars: int) -> DeliveryBudget:
     return DeliveryBudget(max_chars=available_chars + envelope, envelope_chars=envelope)
 
 
+def _framed_budget(build: FixtureBuild, allowance: int) -> DeliveryBudget:
+    """A budget covering the measured framing plus an evidence allowance."""
+    framing = framing_chars(
+        DecisionInput(
+            request=build.request,
+            resolution=build.resolution,
+            policy=build.policy,
+            collection=build.collection,
+            pool=build.pool,
+        )
+    )
+    return DeliveryBudget(max_chars=framing + allowance, envelope_chars=framing)
+
+
 def _capability_report(case_id: str) -> CapabilityReport:
     """The authored capability availability: every operation can run."""
     return CapabilityReport(
@@ -719,7 +738,7 @@ def build_variant_fallback() -> FixtureBuild:
         "implementation.exact": exact.variant_id,
         "implementation.excerpt": excerpt.variant_id,
     }
-    return _build(
+    build = _build(
         case_id,
         request,
         resolution,
@@ -730,9 +749,12 @@ def build_variant_fallback() -> FixtureBuild:
             "admissible excerpt of the same observation: a fitting alternative "
             "must remain available without earning exact-source credit."
         ),
-        budget=_budget_from_available(available),
         policy=policy,
     )
+    # The envelope covers the measured framing so the smaller representation
+    # fits the whole response; the selection allowance still rejects the large
+    # exact variant.
+    return replace(build, budget=_framed_budget(build, available))
 
 
 def build_required_upgrade() -> FixtureBuild:
@@ -755,14 +777,12 @@ def build_required_upgrade() -> FixtureBuild:
     signature_costs = _selected_costs(
         _without_variant(pool, exact.variant_id), policy, request.intent
     )
-    available = costs[exact.variant_id] + 1
-    assert costs[exact.variant_id] + signature_costs[signature.variant_id] > available
     aliases = {
         "target.signature": signature.variant_id,
         "target.exact": exact.variant_id,
         "test.mention": test_part[1][0].variant_id,
     }
-    return _build(
+    build = _build(
         case_id,
         request,
         resolution,
@@ -773,8 +793,16 @@ def build_required_upgrade() -> FixtureBuild:
             "exact source; two requirements must be satisfied by one upgraded "
             "representation without a double charge or a signature-only claim."
         ),
-        budget=_budget_from_available(available),
         policy=policy,
+    )
+    # The selection allowance is the exact representation plus a margin; the
+    # envelope covers the measured framing, so the full response fits while a
+    # signature-plus-exact double charge still overflows.
+    exact_cost = costs[exact.variant_id]
+    assert signature_costs[signature.variant_id] > _DELIVERY_MARGIN
+    return replace(
+        build,
+        budget=_framed_budget(build, exact_cost + _DELIVERY_MARGIN),
     )
 
 

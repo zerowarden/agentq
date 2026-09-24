@@ -182,9 +182,7 @@ def emit(
     return dispatch
 
 
-def render_context_repeat(
-    data: dict[str, Any], *, budget: int = 0
-) -> str:  # pyright: ignore[reportUnusedParameter]
+def render_context_repeat(data: dict[str, Any], *, budget: int = 0) -> str:  # pyright: ignore[reportUnusedParameter]
     return (
         f"{data['command']}: exact result already returned in this {data['repeat_scope']}; "
         "use --repeat to render it again"
@@ -254,9 +252,7 @@ def emit_rendered(
     encoding = sink_encoding()
     visible = rendered.text
     payload = (visible + "\n").encode(encoding, errors="replace")
-    fragments, rows = (
-        _inspection_fragments(bundle) if bundle is not None else ([], [])
-    )
+    fragments, rows = _inspection_fragments(bundle) if bundle is not None else ([], [])
     write_stdout(visible)
     identity = suppression_identity(root)
     data: dict[str, Any] = {"command": command, "kind": "inspection"}
@@ -271,7 +267,9 @@ def emit_rendered(
             context_id=identity[0] if identity is not None else None,
             consumer_id=(identity[1] or None) if identity is not None else session_id(),
             output_view=output_view(command, data),
-            output_attribution=_inspection_attribution(bundle, visible, rendered.format),
+            output_attribution=_inspection_attribution(
+                bundle, visible, rendered.format
+            ),
             encoding=encoding,
             record_receipt=True,
         ),

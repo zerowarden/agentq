@@ -147,5 +147,3 @@ class ContinuationCliTests(AgentQIntegrationHarness):
         self.assertEqual(rendered.returncode, 0, msg=rendered.stderr)
         self.assertNotIn("agentq continue", rendered.stdout)
         self.assertNotIn("agentq read", rendered.stdout)
-
-

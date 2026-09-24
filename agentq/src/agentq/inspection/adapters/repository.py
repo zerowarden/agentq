@@ -171,7 +171,7 @@ class RepositoryInspectionAdapter:
                 line_ranges=tuple(ranges),
                 context=0,
                 max_lines=max(1, request.limit),
-                max_chars=260,
+                max_chars=context.limits.max_source_line_chars,
                 include_sensitive=False,
                 budget=0,
                 output_format="text",
@@ -445,10 +445,11 @@ def _target_view(target: InspectionTarget) -> _TargetView:
 
 
 def _read_ranges_covered(item: ReadItem, ranges: tuple[tuple[int, int], ...]) -> bool:
-    if not ranges:
-        return not item.truncated
-    if item.truncated:
+    """Full coverage and full fidelity: a compacted line is not exact source."""
+    if item.truncated or any(line.truncated for line in item.lines):
         return False
+    if not ranges:
+        return True
     return all(item.start <= start and item.end >= end for start, end in ranges)
 
 
@@ -529,8 +530,7 @@ def _outline_text(result: OutlineResult, symbols: tuple[OutlineSymbolRef, ...]) 
     if result.lines:
         return "\n".join(result.lines)
     lines = [
-        f"{symbol.kind} {symbol.name} "
-        f"({symbol.span.start_line}-{symbol.span.end_line})"
+        f"{symbol.kind} {symbol.name} ({symbol.span.start_line}-{symbol.span.end_line})"
         for symbol in symbols
     ]
     if result.engine:

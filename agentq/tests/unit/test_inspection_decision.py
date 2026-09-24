@@ -125,9 +125,7 @@ class AuthoredFixtureDecisionTests(unittest.TestCase):
                 self.assertIsNotNone(render)
                 assert render is not None
                 self.assertLessEqual(render.chars + 1, config.delivery.max_chars)
-                self.assertEqual(
-                    len(first.features), len(fixture.pool.observations)
-                )
+                self.assertEqual(len(first.features), len(fixture.pool.observations))
                 self.assertEqual(len(first.scores), len(first.features))
 
     def test_delivery_overhead_records_fitting_loss(self) -> None:
@@ -155,7 +153,9 @@ class AuthoredFixtureDecisionTests(unittest.TestCase):
         self.assertTrue(fixture.pool.unstable_observation_ids)
         self.assertIn(unstable_id, {item.variant_id for item in fixture.pool.variants})
         assert outcome.bundle.selection is not None
-        selected = {item.variant.variant_id for item in outcome.bundle.selection.selected}
+        selected = {
+            item.variant.variant_id for item in outcome.bundle.selection.selected
+        }
         self.assertNotIn(unstable_id, selected)
         assessment = outcome.bundle.assessment
         assert assessment is not None

@@ -345,9 +345,7 @@ class BatchingTests(unittest.TestCase):
                 self._request(
                     Capability.SEMANTIC_REFERENCES, self._candidate("src/a.ts")
                 ),
-                self._request(
-                    Capability.IMPLEMENTATIONS, self._candidate("src/b.ts")
-                ),
+                self._request(Capability.IMPLEMENTATIONS, self._candidate("src/b.ts")),
             ),
             fake_context(handler),
         )
@@ -428,9 +426,7 @@ class RequestIdentityTests(unittest.TestCase):
         self.assertNotEqual(first.acquisition_id, second.acquisition_id)
 
     def test_same_file_subjects_at_distinct_spans_do_not_collide(self) -> None:
-        first = self._record(
-            self._request(self._candidate("src/a.ts", start=1, end=2))
-        )
+        first = self._record(self._request(self._candidate("src/a.ts", start=1, end=2)))
         second = self._record(
             self._request(self._candidate("src/a.ts", start=8, end=9))
         )
@@ -455,12 +451,8 @@ class RequestIdentityTests(unittest.TestCase):
     def test_limited_acquisitions_follow_the_same_identity_rules(self) -> None:
         ledger = ExecutionLedger(AcquisitionLimits(max_provider_calls=1))
         ledger.charge_call()
-        first = self._record(
-            self._request(self._candidate("src/a.ts")), ledger=ledger
-        )
-        second = self._record(
-            self._request(self._candidate("src/b.ts")), ledger=ledger
-        )
+        first = self._record(self._request(self._candidate("src/a.ts")), ledger=ledger)
+        second = self._record(self._request(self._candidate("src/b.ts")), ledger=ledger)
         self.assertIs(first.status, CollectionStatus.UNAVAILABLE)
         self.assertNotEqual(first.acquisition_id, second.acquisition_id)
 
@@ -470,15 +462,17 @@ class ThirdLanguageIndependenceTests(unittest.TestCase):
         python_fake = FakeHandler(
             name="fake-py",
             supported=frozenset({Capability.FIND_DECLARATIONS}),
-            applicable_to=lambda target: isinstance(target, SymbolTarget)
-            and target.name.endswith("Py"),
+            applicable_to=lambda target: (
+                isinstance(target, SymbolTarget) and target.name.endswith("Py")
+            ),
             results={Capability.FIND_DECLARATIONS: declaration_result("thingPy")},
         )
         ts_fake = FakeHandler(
             name="fake-ts",
             supported=frozenset({Capability.FIND_DECLARATIONS}),
-            applicable_to=lambda target: isinstance(target, SymbolTarget)
-            and target.name.endswith("Ts"),
+            applicable_to=lambda target: (
+                isinstance(target, SymbolTarget) and target.name.endswith("Ts")
+            ),
             results={Capability.FIND_DECLARATIONS: declaration_result("thingTs")},
         )
         registry = CapabilityRegistry((python_fake, ts_fake))

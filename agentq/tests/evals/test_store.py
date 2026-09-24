@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,7 +10,7 @@ from unittest import mock
 
 from evals.build_fixtures import build_fixture
 from evals.codec import capture_digest
-from evals.models import LockedCase, SuiteLock
+from evals.models import AttemptOutcome, CaptureAttempt, LockedCase, SuiteLock
 from evals.store import CaptureStore, StoreError
 
 DIGEST = "a" * 64
@@ -26,11 +27,7 @@ class ObjectStoreTests(unittest.TestCase):
             self.assertEqual(store.read_capture(first), capture)
             self.assertEqual(
                 store.object_path(first),
-                Path(temp)
-                / "objects"
-                / "sha256"
-                / first[:2]
-                / f"{first}.json",
+                Path(temp) / "objects" / "sha256" / first[:2] / f"{first}.json",
             )
 
     def test_interrupted_write_leaves_no_object_or_temporary_file(self) -> None:
@@ -121,6 +118,68 @@ class LockAndRunTests(unittest.TestCase):
             store = CaptureStore(Path(temp))
             with self.assertRaises(StoreError):
                 store.read_lock(Path(temp) / "missing.lock.json")
+
+    def test_capture_attempts_round_trip_through_the_store(self) -> None:
+        attempts = (
+            CaptureAttempt(
+                case_id="ambiguous",
+                outcome=AttemptOutcome.AMBIGUOUS,
+                reason="ambiguous_target",
+                candidates=("orders.py:10-15",),
+            ),
+            CaptureAttempt(
+                case_id="captured",
+                outcome=AttemptOutcome.CAPTURED,
+                capture_id=DIGEST,
+            ),
+        )
+        with TemporaryDirectory() as temp:
+            store = CaptureStore(Path(temp))
+            path = store.write_attempts("orders-python-v1", attempts)
+            self.assertEqual(
+                path, store.suites_dir / "orders-python-v1.attempts.json"
+            )
+            self.assertEqual(store.read_attempts("orders-python-v1"), attempts)
+
+    def test_missing_attempts_are_reported(self) -> None:
+        with TemporaryDirectory() as temp:
+            store = CaptureStore(Path(temp))
+            with self.assertRaises(StoreError):
+                store.read_attempts("missing")
+
+
+class StorePrivacyTests(unittest.TestCase):
+    def test_artifacts_and_directories_are_owner_only(self) -> None:
+        capture = build_fixture("basic-edit").capture
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = CaptureStore(root)
+            capture_id = store.write_capture(capture)
+            self.assertEqual(
+                stat.S_IMODE(store.object_path(capture_id).stat().st_mode), 0o600
+            )
+            self.assertEqual(stat.S_IMODE((root / "objects").stat().st_mode), 0o700)
+            lock = SuiteLock(
+                suite_id="smoke-v1",
+                cases=(LockedCase(case_id="basic-edit", capture_id=capture_id),),
+            )
+            self.assertEqual(
+                stat.S_IMODE(store.write_lock(lock).stat().st_mode), 0o600
+            )
+            run = store.prepare_run_dir(root / "runs" / "r")
+            self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
+            artifact = store.write_artifact(run / "decisions.jsonl", "{}\n")
+            self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+
+    def test_rewriting_an_existing_object_tightens_its_permissions(self) -> None:
+        capture = build_fixture("basic-edit").capture
+        with TemporaryDirectory() as temp:
+            store = CaptureStore(Path(temp))
+            capture_id = store.write_capture(capture)
+            path = store.object_path(capture_id)
+            path.chmod(0o644)
+            self.assertEqual(store.write_capture(capture), capture_id)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

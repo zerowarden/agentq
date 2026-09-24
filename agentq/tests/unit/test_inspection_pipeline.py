@@ -244,7 +244,8 @@ class ResolutionOutcomeTests(unittest.TestCase):
         assert isinstance(second.resolution, ResolvedTarget)
         self.assertEqual(second.resolution.method.value, "explicit_candidate")
         self.assertEqual(
-            second.resolution.declaration.candidate_id, candidate_id  # type: ignore[union-attr]
+            second.resolution.declaration.candidate_id,
+            candidate_id,  # type: ignore[union-attr]
         )
 
     def test_unknown_candidate_id_is_stale_not_silently_reselected(self) -> None:
@@ -826,7 +827,9 @@ class RenderFormatTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentq.inspection/v1")
         self.assertEqual(payload["resolution"]["outcome"], "resolved")
         self.assertIn("selection", payload)
-        self.assertEqual(payload["selection"]["measured_cost"], bundle.selection.measured_cost)  # type: ignore[index]
+        self.assertEqual(
+            payload["selection"]["measured_cost"], bundle.selection.measured_cost
+        )  # type: ignore[index]
         selected = payload["selection"]["selected"]
         self.assertTrue(selected)
         self.assertIn("function listOrders", selected[0]["variant"]["text"])

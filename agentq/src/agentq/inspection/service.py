@@ -28,6 +28,7 @@ from .contracts import (
     InspectionBundle,
     InspectionContext,
     InspectionRequest,
+    PreparedDecision,
     ResolutionResult,
     ResolvedTarget,
     UnresolvedTarget,
@@ -53,14 +54,14 @@ def inspect(
     *,
     scoring: ScoringProfile = DEFAULT_SCORING,
     selection: SelectionProfile = DEFAULT_SELECTION,
-    on_prepared: Callable[[DecisionInput], None] | None = None,
+    on_prepared: Callable[[PreparedDecision], None] | None = None,
 ) -> InspectionBundle:
     """Run one inspection request end to end.
 
     ``on_prepared`` is the explicit, opt-in capture hook at the prepared-input
-    boundary: it receives the complete DecisionInput once acquisition and
-    stability assessment are finished. It is never triggered by ``debug`` and
-    never changes the decision.
+    boundary: it receives the complete DecisionInput plus the capability report
+    and limits once acquisition and stability assessment are finished. It is
+    never triggered by ``debug`` and never changes the decision.
     """
     context = _execution_context(context)
     recorder = context.trace if context.trace is not None else TraceRecorder()
@@ -142,7 +143,13 @@ def inspect(
         pool=pool,
     )
     if on_prepared is not None:
-        on_prepared(decision_input)
+        on_prepared(
+            PreparedDecision(
+                decision=decision_input,
+                capabilities=collection_capabilities,
+                limits=context.limits,
+            )
+        )
     outcome = decide_evidence(
         decision_input,
         DecisionConfig(

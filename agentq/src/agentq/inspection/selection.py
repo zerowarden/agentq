@@ -42,7 +42,7 @@ from .contracts import (
     SelectedEvidence,
     SelectionPlan,
 )
-from .rendering import selected_cost
+from .rendering import selected_cost, selection_cost
 
 SELECTION_PROFILE = "selection-v1"
 ASSESSMENT_PROFILE = "assessment-v0"
@@ -52,6 +52,7 @@ REASON_RELEVANCE = "relevance"
 OMISSION_REDUNDANT = "redundant"
 OMISSION_BUDGET = DELIVERY_BUDGET_CODE
 OMISSION_NO_REPRESENTATION = "no_representation"
+OMISSION_NO_VALUE = "no_value"
 OMISSION_OVERLAP = "overlap"
 OMISSION_SAME_FILE = "same_file"
 OMISSION_UNSTABLE = SOURCE_UNSTABLE
@@ -102,6 +103,13 @@ class SelectionProfile:
     role_diversity: bool = True
     per_file_limit: int = 2
     fill_by_score: bool = True
+    # Challenger behavior: try a smaller admissible representation when the
+    # preferred one does not fit, and upgrade a chosen representation in place
+    # when a later requirement needs a better one.
+    variant_fallback: bool = False
+    # Challenger behavior: optional evidence with no score contributes nothing
+    # and is omitted instead of filling the remaining budget.
+    skip_zero_value: bool = False
 
     def __post_init__(self) -> None:
         require_str(self.profile, "selection profile id")
@@ -109,6 +117,8 @@ class SelectionProfile:
         require_bool(self.role_diversity, "selection role_diversity")
         require_int(self.per_file_limit, "selection per_file_limit", minimum=1)
         require_bool(self.fill_by_score, "selection fill_by_score")
+        require_bool(self.variant_fallback, "selection variant_fallback")
+        require_bool(self.skip_zero_value, "selection skip_zero_value")
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -117,6 +127,8 @@ class SelectionProfile:
             "role_diversity": self.role_diversity,
             "per_file_limit": self.per_file_limit,
             "fill_by_score": self.fill_by_score,
+            "variant_fallback": self.variant_fallback,
+            "skip_zero_value": self.skip_zero_value,
         }
 
 
@@ -162,9 +174,9 @@ def select_evidence(
     )
     scored = {item.observation_id: item for item in scores}
     if profile.reserve_required:
-        _reserve_required(state, pool, policy, scored)
+        _reserve_required(state, pool, policy, scored, profile)
     if profile.role_diversity:
-        _select_role_representatives(state, pool, scored)
+        _select_role_representatives(state, pool, scored, profile)
     if profile.fill_by_score:
         _fill_by_score(state, pool, scored, profile)
     _record_redundant(state, pool)
@@ -271,17 +283,95 @@ class _SelectionState:
         return self.files.get(path, 0) >= limit
 
 
+def _admissible_variants(
+    pool: EvidencePool,
+    observation_id: str,
+    requirement: EvidenceRequirement | None,
+) -> tuple[EvidenceVariant, ...]:
+    """Admissible representations, most preferred first."""
+    variants = sorted(pool.variants_for(observation_id), key=_variant_preference)
+    if requirement is None:
+        return tuple(variants)
+    return tuple(
+        variant
+        for variant in variants
+        if _variant_satisfies(pool, variant, requirement)
+    )
+
+
+def _take_fitting(
+    state: _SelectionState,
+    observation_id: str,
+    variants: tuple[EvidenceVariant, ...],
+    features: EvidenceFeatures | None,
+    scored: dict[str, ScoredEvidence],
+    *,
+    reason: str,
+    fallback: bool,
+) -> bool:
+    """Take the first representation that fits; without fallback, only the best."""
+    for variant in variants if fallback else variants[:1]:
+        item = state.build(observation_id, variant, reason, scored)
+        if state.fits(item):
+            state.take(item, features)
+            return True
+    return False
+
+
+def _upgrade_chosen(
+    state: _SelectionState,
+    observation_id: str,
+    variant: EvidenceVariant,
+    requirement: EvidenceRequirement,
+    scored: dict[str, ScoredEvidence],
+) -> bool:
+    """Replace a chosen representation, charging only the serialized difference."""
+    current = next(
+        (item for item in state.selected if item.observation_id == observation_id),
+        None,
+    )
+    if current is None:
+        return False
+    if current.variant.variant_id == variant.variant_id:
+        return True
+    # An upgrade changes representation only; variants of one observation share
+    # their source location, so coverage and file accounting stay valid.
+    assert variant.span == current.variant.span
+    assert variant.source.path == current.variant.source.path
+    upgraded = state.build(
+        observation_id,
+        variant,
+        REASON_REQUIRED,
+        scored,
+        requirement_id=requirement.requirement_id,
+    )
+    delta = selected_cost(upgraded, state.output_format) - selected_cost(
+        current, state.output_format
+    )
+    if state.cost + delta > state.available:
+        return False
+    state.selected[state.selected.index(current)] = upgraded
+    state.chosen[observation_id] = variant
+    state.cost += delta
+    return True
+
+
 def _reserve_required(
     state: _SelectionState,
     pool: EvidencePool,
     policy: EvidencePolicy,
     scored: dict[str, ScoredEvidence],
+    profile: SelectionProfile,
 ) -> None:
     for requirement in policy.required():
-        candidates = _reservation_candidates(pool, scored, requirement, state.chosen)
+        candidates = _reservation_candidates(
+            pool, scored, requirement, state.chosen, profile.variant_fallback
+        )
         if not candidates:
             continue
-        if _reserve_requirement(state, candidates, requirement, scored):
+        if _reserve_requirement(
+            state, candidates, requirement, scored, profile.variant_fallback
+        ):
             state.reserved.append(requirement.requirement_id)
 
 
@@ -290,11 +380,19 @@ def _reserve_requirement(
     candidates: tuple[tuple[str, EvidenceVariant], ...],
     requirement: EvidenceRequirement,
     scored: dict[str, ScoredEvidence],
+    fallback: bool,
 ) -> bool:
     """Take the smallest acceptable representation that fits the budget."""
     for observation_id, variant in candidates:
-        if observation_id in state.chosen:
-            return True
+        existing = state.chosen.get(observation_id)
+        if existing is not None:
+            if existing.variant_id == variant.variant_id:
+                return True
+            if fallback and _upgrade_chosen(
+                state, observation_id, variant, requirement, scored
+            ):
+                return True
+            continue
         item = state.build(
             observation_id,
             variant,
@@ -308,7 +406,8 @@ def _reserve_requirement(
         state.take(item, None if breakdown is None else breakdown.features)
         return True
     observation_id, variant = candidates[0]
-    state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
+    if observation_id not in state.chosen:
+        state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
     return False
 
 
@@ -316,27 +415,34 @@ def _select_role_representatives(
     state: _SelectionState,
     pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
+    profile: SelectionProfile,
 ) -> None:
     """One best candidate per still-unrepresented role, best role first."""
     while True:
         candidate = _next_role_candidate(state, pool, scored)
         if candidate is None:
             return
-        observation_id, variant, features = candidate
-        item = state.build(observation_id, variant, REASON_ROLE, scored)
-        if not state.fits(item):
-            state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
-            if features.role is not None:
-                state.represented_roles.add(features.role)
+        observation_id, variants, features = candidate
+        if _take_fitting(
+            state,
+            observation_id,
+            variants,
+            features,
+            scored,
+            reason=REASON_ROLE,
+            fallback=profile.variant_fallback,
+        ):
             continue
-        state.take(item, features)
+        state.omit(observation_id, variants[0].variant_id, OMISSION_BUDGET)
+        if features.role is not None:
+            state.represented_roles.add(features.role)
 
 
 def _next_role_candidate(
     state: _SelectionState,
     pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
-) -> tuple[str, EvidenceVariant, EvidenceFeatures] | None:
+) -> tuple[str, tuple[EvidenceVariant, ...], EvidenceFeatures] | None:
     for observation in _ordered_observations(pool, scored):
         if observation.observation_id in state.chosen:
             continue
@@ -348,20 +454,44 @@ def _next_role_candidate(
         features = breakdown.features
         if features.role is None or features.role in state.represented_roles:
             continue
-        variants = pool.variants_for(observation.observation_id)
+        variants = _admissible_variants(pool, observation.observation_id, None)
         if not variants:
             continue
-        variant = _best_variant(variants)
-        if state.overlaps(variant, features):
+        if state.overlaps(variants[0], features):
             continue
-        return observation.observation_id, variant, features
+        return observation.observation_id, variants, features
     return None
+
+
+def _priority_variant(
+    state: _SelectionState,
+    observation_id: str,
+    variants: tuple[EvidenceVariant, ...],
+    scored: dict[str, ScoredEvidence],
+    fallback: bool,
+) -> EvidenceVariant | None:
+    """The representation whose serialized cost should rank the observation."""
+    if not variants:
+        return None
+    if not fallback:
+        return variants[0]
+    cheapest = variants[0]
+    cheapest_cost: int | None = None
+    for variant in variants:
+        item = state.build(observation_id, variant, REASON_RELEVANCE, scored)
+        cost = selected_cost(item, state.output_format)
+        if cheapest_cost is None or cost < cheapest_cost:
+            cheapest, cheapest_cost = variant, cost
+        if state.fits(item):
+            return variant
+    return cheapest
 
 
 def _fill_priority(
     state: _SelectionState,
     pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
+    profile: SelectionProfile,
 ) -> tuple[tuple[Observation, EvidenceVariant | None], ...]:
     """Rank observations by relevance per serialized cost.
 
@@ -374,8 +504,10 @@ def _fill_priority(
         observation_id = observation.observation_id
         breakdown = scored.get(observation_id)
         score = 0 if breakdown is None else breakdown.score.total
-        variants = pool.variants_for(observation_id)
-        variant = _best_variant(variants) if variants else None
+        variants = _admissible_variants(pool, observation_id, None)
+        variant = _priority_variant(
+            state, observation_id, variants, scored, profile.variant_fallback
+        )
         if variant is None:
             priority = Fraction(0)
         else:
@@ -393,7 +525,7 @@ def _fill_by_score(
     scored: dict[str, ScoredEvidence],
     profile: SelectionProfile,
 ) -> None:
-    for observation, variant in _fill_priority(state, pool, scored):
+    for observation, variant in _fill_priority(state, pool, scored, profile):
         observation_id = observation.observation_id
         if observation_id in state.chosen:
             continue
@@ -405,7 +537,6 @@ def _fill_by_score(
             continue
         breakdown = scored.get(observation_id)
         observation_features = None if breakdown is None else breakdown.features
-        item = state.build(observation_id, variant, REASON_RELEVANCE, scored)
         if state.overlaps(variant, observation_features):
             state.omit(observation_id, variant.variant_id, OMISSION_OVERLAP)
             continue
@@ -414,10 +545,23 @@ def _fill_by_score(
         ):
             state.omit(observation_id, variant.variant_id, OMISSION_SAME_FILE)
             continue
-        if not state.fits(item):
-            state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
+        if profile.skip_zero_value and (
+            breakdown is None or breakdown.score.total == 0
+        ):
+            state.omit(observation_id, variant.variant_id, OMISSION_NO_VALUE)
             continue
-        state.take(item, observation_features)
+        variants = _admissible_variants(pool, observation_id, None)
+        if _take_fitting(
+            state,
+            observation_id,
+            variants,
+            observation_features,
+            scored,
+            reason=REASON_RELEVANCE,
+            fallback=profile.variant_fallback,
+        ):
+            continue
+        state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
 
 
 def reduce_selection(
@@ -457,7 +601,7 @@ def reduce_selection(
             for requirement_id in selection.reserved
             if any(item.requirement_id == requirement_id for item in kept)
         ),
-        measured_cost=sum(selected_cost(item, output_format) for item in kept),
+        measured_cost=selection_cost(kept, output_format),
         budget_chars=selection.budget_chars,
     )
 
@@ -487,10 +631,6 @@ def _ordered_observations(
     )
 
 
-def _best_variant(variants: tuple[EvidenceVariant, ...]) -> EvidenceVariant:
-    return min(variants, key=_variant_preference)
-
-
 def _variant_preference(variant: EvidenceVariant) -> tuple[int, int, str]:
     return (
         FIDELITY_RANK[variant.fidelity],
@@ -504,6 +644,7 @@ def _reservation_candidates(
     scored: dict[str, ScoredEvidence],
     requirement: EvidenceRequirement,
     chosen: dict[str, EvidenceVariant],
+    fallback: bool,
 ) -> tuple[tuple[str, EvidenceVariant], ...]:
     """Acceptable representations in preference order; best fit wins."""
     candidates: list[tuple[str, EvidenceVariant]] = []
@@ -516,17 +657,14 @@ def _reservation_candidates(
         if existing is not None:
             if _variant_satisfies(pool, existing, requirement):
                 candidates.append((observation.observation_id, existing))
-            continue
-        acceptable = sorted(
-            (
-                variant
-                for variant in pool.variants_for(observation.observation_id)
-                if _variant_satisfies(pool, variant, requirement)
-            ),
-            key=_variant_preference,
-        )
+                continue
+            if not fallback:
+                continue
         candidates.extend(
-            (observation.observation_id, variant) for variant in acceptable
+            (observation.observation_id, variant)
+            for variant in _admissible_variants(
+                pool, observation.observation_id, requirement
+            )
         )
     return tuple(candidates)
 

@@ -55,7 +55,9 @@
       "reserve_required": true,
       "role_diversity": true,
       "per_file_limit": 2,
-      "fill_by_score": true
+      "fill_by_score": true,
+      "variant_fallback": false,
+      "skip_zero_value": false
     },
     "delivery_ceilings_chars": [6000, 12000, 24000],
     "primary_delivery_chars": 12000

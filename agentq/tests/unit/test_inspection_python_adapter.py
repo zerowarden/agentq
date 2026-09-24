@@ -44,9 +44,7 @@ def _context(root: Path) -> InspectionContext:
     )
 
 
-def _capture_context(
-    root: Path, registry: CapabilityRegistry
-) -> InspectionContext:
+def _capture_context(root: Path, registry: CapabilityRegistry) -> InspectionContext:
     return InspectionContext(
         identity=RepositoryIdentity(root=root),
         registry=registry,
@@ -307,7 +305,8 @@ class PythonAdapterTests(unittest.TestCase):
         payload = observation.payload
         self.assertIs(payload.binding, Binding.UNRESOLVED)  # type: ignore[union-attr]
         self.assertEqual(
-            result.variants[0].span.start_column, line.index("target") + 1  # type: ignore[union-attr]
+            result.variants[0].span.start_column,
+            line.index("target") + 1,  # type: ignore[union-attr]
         )
 
     def test_declarations_expose_signature_variants(self) -> None:

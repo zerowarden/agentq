@@ -114,9 +114,7 @@ def _bridge_argv() -> list[str] | None:
     return [node, str(Path(__file__).with_name("ts_nav.mjs"))]
 
 
-def _run_bridge_payload(
-    argv: list[str], root: Path, *, timeout: int
-) -> dict[str, Any]:
+def _run_bridge_payload(argv: list[str], root: Path, *, timeout: int) -> dict[str, Any]:
     """Raw bridge invocation for callers that decode their own payload."""
     result = run_cmd(argv, cwd=root, timeout=timeout)
     try:

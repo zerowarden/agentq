@@ -386,9 +386,7 @@ class InspectionBatchingIntegrationTests(unittest.TestCase):
             )
             self.assertIsInstance(bundle.resolution, ResolvedTarget)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(
-                calls[0].operations, ("references", "implementations")
-            )
+            self.assertEqual(calls[0].operations, ("references", "implementations"))
             assert bundle.assessment is not None
             self.assertEqual(
                 bundle.assessment.by_id("representative_reference").status.value,  # type: ignore[union-attr]
@@ -413,10 +411,7 @@ class MixedLanguageAffinityTests(unittest.TestCase):
                 Path(temp),
                 {
                     "src/orders/service.py": (
-                        "def list_orders():\n"
-                        "    return []\n"
-                        "\n"
-                        "value = list_orders()\n"
+                        "def list_orders():\n    return []\n\nvalue = list_orders()\n"
                     ),
                     "src/web/app.ts": "export const marker = 1;\n",
                 },

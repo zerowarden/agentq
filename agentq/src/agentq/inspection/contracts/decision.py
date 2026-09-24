@@ -17,7 +17,9 @@ from dataclasses import dataclass
 
 from agentq.core import ContractError, is_instance_of, require_int, require_str
 
+from ..budgeting import AcquisitionLimits
 from .bundle import InspectionBundle
+from .capability import CapabilityReport
 from .collection import CollectionPlan
 from .evaluation import EvidenceFeatures, ScoredEvidence, SelectionPlan
 from .evidence import EvidencePool
@@ -52,6 +54,28 @@ class DecisionInput:
             raise ContractError(
                 "decision input resolution must resolve the request target"
             )
+
+
+@dataclass(frozen=True)
+class PreparedDecision:
+    """The prepared-input boundary: decision input plus acquisition provenance.
+
+    Produced once per resolved inspection, after acquisition and stability
+    assessment, for an explicit capture hook. It carries what a capture needs
+    to record provenance and never participates in the decision itself.
+    """
+
+    decision: DecisionInput
+    capabilities: CapabilityReport
+    limits: AcquisitionLimits
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, DecisionInput):
+            raise ContractError("prepared decision requires a DecisionInput")
+        if not isinstance(self.capabilities, CapabilityReport):
+            raise ContractError("prepared decision requires a CapabilityReport")
+        if not isinstance(self.limits, AcquisitionLimits):
+            raise ContractError("prepared decision requires AcquisitionLimits")
 
 
 @dataclass(frozen=True)
@@ -93,8 +117,7 @@ class DecisionDelivered:
                 is_instance_of(item, expected) for item in values
             ):
                 raise ContractError(
-                    f"delivered decision {name} must be a tuple of "
-                    f"{expected.__name__}"
+                    f"delivered decision {name} must be a tuple of {expected.__name__}"
                 )
         if not isinstance(self.initial_selection, SelectionPlan):
             raise ContractError(

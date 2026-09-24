@@ -173,7 +173,9 @@ class TypeScriptDiscovery:
                 config = entry.get("config")
                 message = entry.get("message")
                 prefix = f"{config}: " if isinstance(config, str) and config else ""
-                rendered.append(f"{prefix}{message if isinstance(message, str) else ''}")
+                rendered.append(
+                    f"{prefix}{message if isinstance(message, str) else ''}"
+                )
             else:
                 rendered.append(str(item))
         return cls(
@@ -311,7 +313,9 @@ class TypeScriptOperation:
     @classmethod
     def from_payload(cls, name: str, payload: Any) -> TypeScriptOperation:
         if not isinstance(payload, dict):
-            return cls(name=name, status="failed", error="operation returned no payload")
+            return cls(
+                name=name, status="failed", error="operation returned no payload"
+            )
         mapping = cast("dict[str, Any]", payload)
         return cls(
             name=name,

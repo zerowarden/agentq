@@ -42,5 +42,6 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(manifest.kind, "go")
             self.assertEqual(manifest.path, "go.mod")
 
+
 if __name__ == "__main__":
     unittest.main()

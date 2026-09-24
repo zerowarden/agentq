@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agentq.inspection.adapters.repository import RepositoryInspectionAdapter
+from agentq.inspection.budgeting import AcquisitionLimits
 from agentq.inspection.capabilities import CapabilityRegistry
 from agentq.inspection.contracts import (
     Capability,
@@ -102,6 +103,39 @@ def test_read_limits_downgrade_fidelity_to_bounded(tmp_path: Path) -> None:
     assert result.variants[0].fidelity is Fidelity.BOUNDED
     assert not result.coverage.is_complete()
     assert any(item.code == "line_cap" for item in result.diagnostics)
+
+
+def test_a_line_wider_than_the_limit_cannot_claim_exact_source(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "src/a.py", "x = '" + "a" * 400 + "'\nshort = 1\n")
+    result = RepositoryInspectionAdapter().acquire(
+        _range_request(Capability.READ_SOURCE, "src/a.py", 1, 2),
+        _context(tmp_path),
+    )
+    assert result.observations[0].payload.truncated  # type: ignore[union-attr]
+    assert "[truncated]" in result.variants[0].text
+    assert result.variants[0].fidelity is Fidelity.BOUNDED
+    assert not result.coverage.is_complete()
+    assert any(item.code == "line_cap" for item in result.diagnostics)
+
+
+def test_source_line_width_is_configurable(tmp_path: Path) -> None:
+    _write(tmp_path, "src/a.py", "value = '" + "a" * 400 + "'\n")
+    request = _range_request(Capability.READ_SOURCE, "src/a.py", 1, 1)
+    narrow = RepositoryInspectionAdapter().acquire(request, _context(tmp_path))
+    wide = RepositoryInspectionAdapter().acquire(
+        request,
+        InspectionContext(
+            identity=RepositoryIdentity(root=tmp_path),
+            limits=AcquisitionLimits(max_source_line_chars=500),
+        ),
+    )
+    assert narrow.observations[0].payload.truncated  # type: ignore[union-attr]
+    assert narrow.variants[0].fidelity is Fidelity.BOUNDED
+    assert wide.observations[0].payload.truncated is False  # type: ignore[union-attr]
+    assert wide.variants[0].fidelity is Fidelity.EXACT
+    assert wide.coverage.is_complete()
 
 
 def test_missing_file_is_a_failed_acquisition_through_the_registry(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
-from pathlib import Path
+from typing import cast
 
 from agentq.core import (
     COMPLETE,
@@ -17,7 +17,7 @@ from agentq.core import (
     canonical_json,
     typed_coverage,
 )
-from agentq.inspection.budgeting import DeliveryBudget
+from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.contracts import (
     AcquisitionRecord,
     Binding,
@@ -48,19 +48,25 @@ from agentq.inspection.contracts import (
     make_variant,
 )
 from agentq.inspection.decision import DecisionConfig
+from agentq.inspection.selection import SelectionProfile
 from evals.build_fixtures import build_fixture
 from evals.codec import (
     config_digest,
+    decode_attempts,
     decode_capture,
+    decode_case_suite,
     decode_config,
     decode_json,
+    encode_attempts,
     encode_capture,
+    encode_case_suite,
     encode_config,
 )
-from evals.models import ReplayCapture
+from evals.models import AttemptOutcome, CaptureAttempt, ReplayCapture
+from tests.evals.support import BASELINE_PROFILE, CASES
 
-PROJECT = Path(__file__).resolve().parents[2]
-BASELINE_PROFILE = PROJECT / "evals/profiles/baseline.json"
+SELECTION_CHALLENGER = BASELINE_PROFILE.parent / "selection-challenger.json"
+
 UNICODE_TEXT = "line one\n\tline two  \nemoji 😀 CJK 漢字 trailing  "
 
 
@@ -297,9 +303,7 @@ def _kitchen_sink_pool() -> EvidencePool:
             ),
         ),
         unstable_observation_ids=(mention.observation_id,),
-        coverage=typed_coverage(
-            COMPLETE, domain="repository", scope="path_role:test"
-        ),
+        coverage=typed_coverage(COMPLETE, domain="repository", scope="path_role:test"),
     )
 
 
@@ -319,9 +323,7 @@ def _bytes(value: object) -> bytes:
     return canonical_json(value).encode("utf-8")
 
 
-def _observation_wire(
-    wire: dict[str, object], payload_kind: str
-) -> dict[str, object]:
+def _observation_wire(wire: dict[str, object], payload_kind: str) -> dict[str, object]:
     decision = wire["decision"]
     assert isinstance(decision, dict)
     pool = decision["pool"]
@@ -392,9 +394,7 @@ class RoundTripTests(unittest.TestCase):
             SymbolTarget(name="list_orders", scopes=("src",)),
             PathTarget(path="orders.py", path_kind=PathKind.FILE),
             LocationTarget(path="orders.py", line=10, column=5),
-            RangeTarget(
-                path="orders.py", ranges=(SourceSpan(1, 3), SourceSpan(5, 5))
-            ),
+            RangeTarget(path="orders.py", ranges=(SourceSpan(1, 3), SourceSpan(5, 5))),
             CandidateTarget(
                 candidate_id="cand-1", symbol="list_orders", scopes=("src",)
             ),
@@ -413,6 +413,33 @@ class RoundTripTests(unittest.TestCase):
         capture = _kitchen_sink_capture()
         data = encode_capture(capture)
         self.assertEqual(data, encode_capture(decode_capture(data)))
+
+    def test_the_source_line_width_limit_round_trips(self) -> None:
+        base = build_fixture("basic-edit").capture
+        capture = replace(
+            base, limits=AcquisitionLimits(max_source_line_chars=400)
+        )
+        self.assertEqual(decode_capture(encode_capture(capture)), capture)
+
+    def test_a_capture_predating_the_line_width_limit_decodes_to_the_default(
+        self,
+    ) -> None:
+        base = build_fixture("basic-edit").capture
+        wire = _wire(base)
+        limits = cast("dict[str, object]", wire["limits"])
+        del limits["max_source_line_chars"]
+        decoded = decode_capture(_bytes(wire))
+        self.assertEqual(
+            decoded.limits.max_source_line_chars,
+            AcquisitionLimits().max_source_line_chars,
+        )
+        self.assertEqual(
+            decoded.limits,
+            replace(
+                base.limits,
+                max_source_line_chars=AcquisitionLimits().max_source_line_chars,
+            ),
+        )
 
 
 class StrictDecodeTests(unittest.TestCase):
@@ -501,17 +528,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(decode_config(encode_config(config)), config)
 
     def test_baseline_profile_decodes_to_the_runtime_default(self) -> None:
-        self.assertEqual(
-            decode_config(BASELINE_PROFILE.read_bytes()), DecisionConfig()
-        )
+        self.assertEqual(decode_config(BASELINE_PROFILE.read_bytes()), DecisionConfig())
 
     def test_config_digest_changes_with_content_under_one_name(self) -> None:
         config = DecisionConfig()
         altered = replace(
             config,
-            scoring=replace(config.scoring, binding_bonus=config.scoring.binding_bonus + 1),
+            scoring=replace(
+                config.scoring, binding_bonus=config.scoring.binding_bonus + 1
+            ),
         )
         self.assertNotEqual(config_digest(config), config_digest(altered))
+
+    def test_a_profile_missing_an_intent_is_rejected(self) -> None:
+        wire = json.loads(encode_config(DecisionConfig()).decode("utf-8"))
+        assert isinstance(wire, dict)
+        scoring = wire["scoring"]
+        assert isinstance(scoring, dict)
+        priorities = scoring["intent_priorities"]
+        assert isinstance(priorities, dict)
+        priorities.pop("rename")
+        with self.assertRaises(ContractError):
+            decode_config(_bytes(wire))
 
     def test_unsupported_config_schema_is_rejected(self) -> None:
         wire = json.loads(encode_config(DecisionConfig()).decode("utf-8"))
@@ -522,9 +560,76 @@ class ConfigTests(unittest.TestCase):
 
     def test_delivery_budget_round_trips(self) -> None:
         config = replace(
-            DecisionConfig(), delivery=DeliveryBudget(max_chars=6000, envelope_chars=200)
+            DecisionConfig(),
+            delivery=DeliveryBudget(max_chars=6000, envelope_chars=200),
         )
         self.assertEqual(decode_config(encode_config(config)), config)
+
+    def test_selection_challenger_flags_round_trip(self) -> None:
+        config = replace(
+            DecisionConfig(),
+            selection=SelectionProfile(
+                profile="selection-v2", variant_fallback=True, skip_zero_value=True
+            ),
+        )
+        self.assertEqual(decode_config(encode_config(config)), config)
+
+    def test_older_selection_profiles_decode_to_the_baseline_flags(self) -> None:
+        wire = json.loads(encode_config(DecisionConfig()).decode("utf-8"))
+        assert isinstance(wire, dict)
+        selection = wire["selection"]
+        assert isinstance(selection, dict)
+        selection.pop("variant_fallback")
+        selection.pop("skip_zero_value")
+        decoded = decode_config(_bytes(wire))
+        self.assertEqual(decoded.selection, DecisionConfig().selection)
+
+    def test_selection_challenger_profile_decodes_to_its_flags(self) -> None:
+        challenger = decode_config(SELECTION_CHALLENGER.read_bytes())
+        self.assertTrue(challenger.selection.variant_fallback)
+        self.assertTrue(challenger.selection.skip_zero_value)
+
+
+class CaseAndAttemptCodecTests(unittest.TestCase):
+    def test_case_suite_round_trips(self) -> None:
+        suite = decode_case_suite(CASES.read_bytes())
+        self.assertEqual(suite.suite_id, "orders-python-v1")
+        self.assertEqual(len(suite.cases), 4)
+        self.assertEqual(decode_case_suite(encode_case_suite(suite)), suite)
+
+    def test_single_case_discriminator_is_accepted(self) -> None:
+        raw = json.loads(CASES.read_text(encoding="utf-8"))
+        single = raw["cases"][0]
+        suite = decode_case_suite(canonical_json(single).encode("utf-8"))
+        self.assertEqual(suite.suite_id, single["case_id"])
+        self.assertEqual(len(suite.cases), 1)
+
+    def test_unknown_case_suite_schema_is_rejected(self) -> None:
+        raw = json.loads(CASES.read_text(encoding="utf-8"))
+        raw["schema"] = "agentq.eval.case-suite/v2"
+        with self.assertRaises(ContractError):
+            decode_case_suite(canonical_json(raw).encode("utf-8"))
+
+    def test_capture_attempts_round_trip(self) -> None:
+        attempts = (
+            CaptureAttempt(
+                case_id="case",
+                outcome=AttemptOutcome.AMBIGUOUS,
+                reason="ambiguous_target",
+                detail="2 declaration candidates retained",
+                candidates=("orders.py:10-15", "legacy.py:1-3"),
+                checkout="/tmp/checkout",
+                started_at="2026-09-23T00:00:00+00:00",
+                duration_ms=12.5,
+            ),
+        )
+        self.assertEqual(decode_attempts(encode_attempts(attempts)), attempts)
+
+    def test_captured_attempt_requires_a_capture_id(self) -> None:
+        with self.assertRaises(ContractError):
+            CaptureAttempt(
+                case_id="case", outcome=AttemptOutcome.CAPTURED
+            )
 
 
 if __name__ == "__main__":

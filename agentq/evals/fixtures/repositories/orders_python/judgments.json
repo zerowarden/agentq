@@ -1,0 +1,107 @@
+{
+  "schema": "agentq.eval.judgment-suite/v1",
+  "suite_id": "orders-python-v1",
+  "drafts": [
+    {
+      "schema": "agentq.eval.judgment-draft/v1",
+      "case_id": "orders-python-understand-path",
+      "basis": "target_intent",
+      "review_status": "reviewed",
+      "facets": [
+        {
+          "facet_id": "file-source",
+          "critical": true,
+          "audit_note": "Understanding a file requires its exact source, not an outline alone.",
+          "witness_sets": [["file.exact"]]
+        },
+        {
+          "facet_id": "file-structure",
+          "critical": true,
+          "audit_note": "The declarations in the file must be visible as structure.",
+          "witness_sets": [["file.structure"]]
+        },
+        {
+          "facet_id": "package-ownership",
+          "critical": false,
+          "audit_note": "The owning package places the file in the project.",
+          "witness_sets": [["owner"]]
+        }
+      ],
+      "witnesses": [
+        {
+          "witness_id": "file.exact",
+          "acceptable_aliases": ["orders.py:1-15/source_window/exact_source"]
+        },
+        {
+          "witness_id": "file.structure",
+          "acceptable_aliases": ["orders.py/outline/outline"]
+        },
+        {
+          "witness_id": "owner",
+          "acceptable_aliases": ["pyproject.toml/owning_package/package"]
+        }
+      ],
+      "expected_outcomes": [
+        {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure."},
+        {"kind": "requirement_status", "requirement_id": "target_source", "status": "satisfied", "audit_note": "The file source must be read exactly."},
+        {"kind": "requirement_status", "requirement_id": "target_structure", "status": "satisfied", "audit_note": "The file outline must be represented."}
+      ]
+    },
+    {
+      "schema": "agentq.eval.judgment-draft/v1",
+      "case_id": "orders-python-edit-symbol",
+      "basis": "target_intent",
+      "review_status": "reviewed",
+      "facets": [
+        {
+          "facet_id": "editable-source",
+          "critical": true,
+          "audit_note": "The exact source of the requested declaration must be present before editing it.",
+          "witness_sets": [["target.exact"]]
+        },
+        {
+          "facet_id": "target-identity",
+          "critical": true,
+          "audit_note": "The resolved declaration must be identified, by signature or exact source.",
+          "witness_sets": [["target.identity"]]
+        },
+        {
+          "facet_id": "test-signal",
+          "critical": false,
+          "audit_note": "The consumer test is known useful but lies outside this case's declared scope; the witness stays absent.",
+          "witness_sets": [["test.mention"]]
+        },
+        {
+          "facet_id": "package-ownership",
+          "critical": false,
+          "audit_note": "The owning package places the declaration in the project.",
+          "witness_sets": [["owner"]]
+        }
+      ],
+      "witnesses": [
+        {
+          "witness_id": "target.exact",
+          "acceptable_aliases": ["report.py:4-5/source_window/exact_source"]
+        },
+        {
+          "witness_id": "target.identity",
+          "acceptable_aliases": [
+            "report.py:4-5/declaration/signature",
+            "report.py:4-5/source_window/exact_source"
+          ]
+        },
+        {"witness_id": "test.mention", "acceptable_aliases": []},
+        {
+          "witness_id": "owner",
+          "acceptable_aliases": ["pyproject.toml/owning_package/package"]
+        }
+      ],
+      "expected_outcomes": [
+        {"kind": "delivered", "audit_note": "The bundle must be delivered, not a typed failure."},
+        {"kind": "requirement_status", "requirement_id": "declaration_identity", "status": "satisfied", "audit_note": "The declaration must be identified."},
+        {"kind": "requirement_status", "requirement_id": "target_source", "status": "satisfied", "audit_note": "The declaration source must be read exactly."},
+        {"kind": "requirement_status", "requirement_id": "test_search", "status": "satisfied", "audit_note": "The scoped test search completed with an explicit empty outcome."}
+      ]
+    }
+  ]
+}

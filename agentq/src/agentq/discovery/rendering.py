@@ -174,9 +174,7 @@ def render_read(result: ReadResult, *, budget: int = 0) -> RenderedText:
     return rendered
 
 
-def render_outline(
-    result: OutlineResult, *, budget: int = 0
-) -> str:  # pyright: ignore[reportUnusedParameter]
+def render_outline(result: OutlineResult, *, budget: int = 0) -> str:  # pyright: ignore[reportUnusedParameter]
     status = status_of(result.coverage)
     lines = [
         f"outline engine: {result.engine}",
@@ -197,7 +195,7 @@ def render_outline(
             location = f"{item.file}:{item.line or '?'}"
             scope = f" scope={item.scope}" if item.scope else ""
             lines.append(
-                f"  {location} [{item.kind}] " f"{item.signature or item.name}{scope}"
+                f"  {location} [{item.kind}] {item.signature or item.name}{scope}"
             )
     if result.engine == "stdlib-ast-regex-fallback":
         lines.append(

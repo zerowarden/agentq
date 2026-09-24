@@ -1,0 +1,54 @@
+{
+  "basis": "target_intent",
+  "case_id": "SWE-Bench-Verified__python__maintenance__bugfix__1d90db61",
+  "expected_outcomes": [
+    {
+      "audit_note": "The bundle must be delivered.",
+      "kind": "delivered"
+    },
+    {
+      "audit_note": "The requested range must be read exactly.",
+      "kind": "requirement_status",
+      "requirement_id": "requested_source",
+      "status": "satisfied"
+    }
+  ],
+  "facets": [
+    {
+      "audit_note": "The imported gold span is the task anchor: the delivered bundle must contain its exact source.",
+      "critical": true,
+      "facet_id": "gold-span-source",
+      "witness_sets": [
+        [
+          "target.exact"
+        ]
+      ]
+    },
+    {
+      "audit_note": "Owning-package evidence places the span in the project.",
+      "critical": false,
+      "facet_id": "package-ownership",
+      "witness_sets": [
+        [
+          "owner"
+        ]
+      ]
+    }
+  ],
+  "review_status": "reviewed",
+  "schema": "agentq.eval.judgment-draft/v1",
+  "witnesses": [
+    {
+      "acceptable_aliases": [
+        "astropy/coordinates/sky_coordinate.py:862-868/source_window/exact_source"
+      ],
+      "witness_id": "target.exact"
+    },
+    {
+      "acceptable_aliases": [
+        "pyproject.toml/owning_package/package"
+      ],
+      "witness_id": "owner"
+    }
+  ]
+}

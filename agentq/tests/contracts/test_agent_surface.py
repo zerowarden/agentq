@@ -32,15 +32,13 @@ _ADAPTER_FLAG_RE = re.compile(r'"(--[a-z][a-z0-9-]*)"')
 _OPENCODE_INTENT_RE = re.compile(r"intent:\s*schema\.enum\(\[([^\]]*)\]\)")
 
 
-def _parser_surface() -> (
-    tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser], tuple[str, ...]]
-):
+def _parser_surface() -> tuple[
+    argparse.ArgumentParser, dict[str, argparse.ArgumentParser], tuple[str, ...]
+]:
     parser = build_parser()
     subcommands: dict[str, argparse.ArgumentParser] = {}
     for action in parser._actions:  # pyright: ignore[reportPrivateUsage]
-        if isinstance(
-            action, argparse._SubParsersAction
-        ):  # pyright: ignore[reportPrivateUsage]
+        if isinstance(action, argparse._SubParsersAction):  # pyright: ignore[reportPrivateUsage]
             subcommands = dict(action.choices)
     intents: tuple[str, ...] = ()
     inspect = subcommands.get("inspect")

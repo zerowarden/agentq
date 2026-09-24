@@ -27,10 +27,9 @@ from agentq.inspection.features import extract_features
 from agentq.inspection.scoring import DEFAULT_SCORING, score_evidence
 from agentq.inspection.selection import DEFAULT_SELECTION, select_evidence
 from evals.fixtures.synthetic import builders
+from tests.evals.support import JUDGMENT_DIR, PROJECT
 
-PROJECT = Path(__file__).resolve().parents[2]
 SUITE_PATH = PROJECT / "evals/suites/smoke-v1.json"
-JUDGMENT_DIR = PROJECT / "evals/fixtures/synthetic/judgments"
 SEED_SCRIPT = PROJECT / "scripts/create_m2_seed_repository.py"
 REPOSITORY_FIXTURE = PROJECT / "evals/fixtures/repositories/orders_python/repository"
 BASELINE_COMMIT = "fc80d7a4f1fc14c63e680014bcd2b25b03f813b3"
@@ -130,9 +129,7 @@ def test_every_builder_produces_a_consistent_source_level_fixture() -> None:
         }
         for variant in fixture.pool.variants:
             assert variant.observation_id in observations
-        acquisitions = {
-            record.acquisition_id for record in fixture.pool.acquisitions
-        }
+        acquisitions = {record.acquisition_id for record in fixture.pool.acquisitions}
         for observation in fixture.pool.observations:
             assert observation.acquisition_id in acquisitions
         assert fixture.variant_aliases
@@ -208,9 +205,7 @@ def test_seed_script_generates_the_fixture_and_preserves_it_on_rerun(
     assert first.returncode == 0, first.stderr
     assert "Ran 4 tests" in first.stderr
     assert "OK" in first.stderr
-    fixture = (
-        seeded_project / "evals/fixtures/repositories/orders_python/repository"
-    )
+    fixture = seeded_project / "evals/fixtures/repositories/orders_python/repository"
     workspace = seeded_project.parent / ".agentq-eval/worktrees/orders-python"
     before = (_tree_bytes(fixture), _tree_bytes(workspace))
     second = _run_seed(seeded_project)

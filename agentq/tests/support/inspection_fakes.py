@@ -328,9 +328,7 @@ class FakeHandler:
     def acquire_batch(
         self, requests: Sequence[EvidenceRequest], context: InspectionContext
     ) -> tuple[CapabilityResult, ...]:
-        self.batch_calls.append(
-            tuple(request.capability.value for request in requests)
-        )
+        self.batch_calls.append(tuple(request.capability.value for request in requests))
         return tuple(self.acquire(request, context) for request in requests)
 
     def applicable(

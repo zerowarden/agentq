@@ -103,9 +103,7 @@ class DeliveryHarness(unittest.TestCase):
         )
 
     def data(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
-        result = self.aq(
-            *args, "--format", "json", extra_env=extra_env
-        )
+        result = self.aq(*args, "--format", "json", extra_env=extra_env)
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
         return json.loads(result.stdout)
 
@@ -231,8 +229,7 @@ class EmissionRecordingTests(DeliveryHarness):
             self.assertLessEqual(tight.render.chars + 1, 700)
             self.assertTrue(
                 any(
-                    item.reason == "delivery_budget"
-                    for item in tight.selection.omitted
+                    item.reason == "delivery_budget" for item in tight.selection.omitted
                 )
             )
         direct = self.data("inspect", "pkg/edited.py", "--lines", "1:3")
@@ -369,9 +366,13 @@ class EmissionRecordingTests(DeliveryHarness):
             result = read(ReadRequest(root=self.repo, specs=("pkg/mod.py:1-2",)))
             for failure in (
                 mock.patch.object(
-                    persistence_module, "store_receipt", side_effect=RuntimeError("locked")
+                    persistence_module,
+                    "store_receipt",
+                    side_effect=RuntimeError("locked"),
                 ),
-                mock.patch.object(persistence_module, "store_receipt", return_value=False),
+                mock.patch.object(
+                    persistence_module, "store_receipt", return_value=False
+                ),
             ):
                 with failure:
                     with mock.patch("builtins.print"):

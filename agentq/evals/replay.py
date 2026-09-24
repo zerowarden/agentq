@@ -9,11 +9,12 @@ overwrite an existing run.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agentq.core import canonical_digest, canonical_json
+from agentq.inspection.budgeting import DeliveryBudget
 from agentq.inspection.contracts import (
     DecisionDelivered,
     DecisionFailure,
@@ -26,8 +27,21 @@ from agentq.inspection.decision import (
 )
 
 from .codec import config_digest, decode_config, encode_config, encode_lock
-from .models import ReplayCapture, SuiteLock
+from .models import LockedCase, ReplayCapture, SuiteLock
 from .store import CaptureStore, StoreError
+
+
+def with_delivery(
+    config: DecisionConfig, delivery: DeliveryBudget | None
+) -> DecisionConfig:
+    """The effective configuration for one case: its pinned delivery ceiling wins."""
+    if delivery is None:
+        return config
+    return replace(config, delivery=delivery)
+
+
+def case_config(config: DecisionConfig, case: LockedCase) -> DecisionConfig:
+    return with_delivery(config, case.delivery)
 
 
 def decision_id(capture_id: str, config: DecisionConfig) -> str:
@@ -78,12 +92,13 @@ def replay_suite(
                 f"capture {case.capture_id} belongs to case "
                 f"{capture.case_id!r}, not {case.case_id!r}"
             )
+        effective = case_config(config, case)
         replayed.append(
             ReplayedCase(
                 case_id=case.case_id,
                 capture_id=case.capture_id,
-                decision_id=decision_id(case.capture_id, config),
-                outcome=replay_capture(capture, config),
+                decision_id=decision_id(case.capture_id, effective),
+                outcome=replay_capture(capture, effective),
             )
         )
     _write_run(store, lock, config, tuple(replayed), run_dir)
@@ -154,8 +169,8 @@ def _write_run(
     replayed: tuple[ReplayedCase, ...],
     run_dir: Path,
 ) -> None:
-    (run_dir / "lock.json").write_bytes(encode_lock(lock))
-    (run_dir / "config.json").write_bytes(encode_config(config))
+    store.write_artifact(run_dir / "lock.json", encode_lock(lock))
+    store.write_artifact(run_dir / "config.json", encode_config(config))
     execution = {
         "execution_id": run_dir.name,
         "store": str(store.root),
@@ -169,10 +184,8 @@ def _write_run(
         ),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    (run_dir / "execution.json").write_text(
-        canonical_json(execution) + "\n", encoding="utf-8"
-    )
+    store.write_artifact(run_dir / "execution.json", canonical_json(execution) + "\n")
     lines = "".join(
         canonical_json(_decision_record(item)) + "\n" for item in replayed
     )
-    (run_dir / "decisions.jsonl").write_text(lines, encoding="utf-8")
+    store.write_artifact(run_dir / "decisions.jsonl", lines)

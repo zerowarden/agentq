@@ -25,6 +25,10 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.8",
 ]
+eval = [
+    "datasets>=5.0.1",
+    "huggingface-hub>=1.32.0",
+]
 
 # Static checks cover the production package and the project test suite.
 # The typed boundary surface introduced by W01 remains the pyright scope.

@@ -88,9 +88,9 @@ _BASE_PRIORITIES: dict[EvidenceRole, dict[Intent, int]] = {
 }
 
 
-def _default_intent_priorities() -> (
-    tuple[tuple[Intent, tuple[tuple[EvidenceRole, int], ...]], ...]
-):
+def _default_intent_priorities() -> tuple[
+    tuple[Intent, tuple[tuple[EvidenceRole, int], ...]], ...
+]:
     """The baseline table, ordered by intent and role for determinism."""
     return tuple(
         (

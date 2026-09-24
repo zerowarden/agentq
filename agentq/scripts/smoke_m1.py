@@ -13,11 +13,11 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
-from agentq.inspection.budgeting import DeliveryBudget  # noqa: E402
-from agentq.inspection.contracts import ResolvedTarget  # noqa: E402
-from agentq.inspection.scoring import DEFAULT_SCORING  # noqa: E402
-from agentq.inspection.service import inspect  # noqa: E402
-from tests.support.inspection_fakes import (  # noqa: E402
+from agentq.inspection.budgeting import DeliveryBudget
+from agentq.inspection.contracts import ResolvedTarget
+from agentq.inspection.scoring import DEFAULT_SCORING
+from agentq.inspection.service import inspect
+from tests.support.inspection_fakes import (
     default_symbol_handler,
     fake_context,
     symbol_request,

@@ -11,6 +11,7 @@ for that selection in the requested format.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 
 from agentq.core import ContractError, SourceRef, canonical_json
@@ -112,8 +113,7 @@ def _resolution_line(bundle: InspectionBundle) -> str:
             f"total={total} quality={resolution.count_quality} coverage={coverage}"
         )
     return (
-        f"resolution: unresolved reason={resolution.reason.value} "
-        f"coverage={coverage}"
+        f"resolution: unresolved reason={resolution.reason.value} coverage={coverage}"
     )
 
 
@@ -205,6 +205,11 @@ def selected_cost(item: SelectedEvidence, output_format: str) -> int:
     if output_format == "text":
         return sum(len(line) + 1 for line in evidence_block(item)) + 1
     return len(canonical_json(selected_evidence_to_wire(item))) + 1
+
+
+def selection_cost(items: Iterable[SelectedEvidence], output_format: str) -> int:
+    """Total serialized cost of a selection in one output format."""
+    return sum(selected_cost(item, output_format) for item in items)
 
 
 def _evidence_lines(bundle: InspectionBundle) -> list[str]:
