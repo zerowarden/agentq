@@ -116,7 +116,7 @@ class FakeBridge:
         )
         self.locate_calls: list = []
         self.batch_calls: list = []
-        self.probe_calls: list = []
+        self.probe_calls: list[tuple[Path, tuple[str, ...]]] = []
 
     def locate(self, request):
         self.locate_calls.append(request)
@@ -219,6 +219,20 @@ class CapabilitySurfaceTests(unittest.TestCase):
         self.assertEqual(first.reason, "no tsconfig.json found in the requested scope")
         self.assertFalse(second.available)
         self.assertEqual(len(bridge.probe_calls), 1)
+
+    def test_probe_cache_does_not_cross_captures(self) -> None:
+        bridge = FakeBridge()
+        adapter = _adapter(bridge)
+        target = SymbolTarget(name="x", scopes=("src",))
+        first = adapter.availability(
+            Capability.FIND_DECLARATIONS, target, _context(Path("/repo"))
+        )
+        second = adapter.availability(
+            Capability.FIND_DECLARATIONS, target, _context(Path("/repo"))
+        )
+        self.assertTrue(first.available)
+        self.assertTrue(second.available)
+        self.assertEqual(len(bridge.probe_calls), 2)
 
     def test_availability_reports_typescript_version(self) -> None:
         adapter = _adapter(FakeBridge())

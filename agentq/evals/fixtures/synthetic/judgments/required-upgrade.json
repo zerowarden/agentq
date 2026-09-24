@@ -1,0 +1,27 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "required-upgrade",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present before editing it.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "target-identity",
+      "critical": true,
+      "audit_note": "The resolved declaration must be identified, by signature or exact source; one upgraded representation may serve both.",
+      "witness_sets": [["target.identity"]]
+    }
+  ],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "target.identity",
+      "acceptable_aliases": ["target.signature", "target.exact"]
+    }
+  ]
+}

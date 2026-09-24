@@ -1,0 +1,27 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "delivery-overhead",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must survive final fitting even when metadata forces a reduction.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "secondary-use",
+      "critical": false,
+      "audit_note": "Secondary use sites are useful context but may be dropped when the complete response must fit; the loss must stay recorded.",
+      "witness_sets": [["secondary.use"]]
+    }
+  ],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "secondary.use",
+      "acceptable_aliases": ["secondary.large", "secondary.small"]
+    }
+  ]
+}

@@ -377,6 +377,20 @@ def test_per_file_limit_omits_repeated_use_sites() -> None:
     assert selected_paths.count("src/use.py") == 2
 
 
+def test_required_source_does_not_consume_the_optional_file_quota() -> None:
+    source = _source("src/a.py", 1, 3)
+    references = [_reference("src/a.py", line=line) for line in (10, 20, 30)]
+    pool = _pool(source, *references)
+    plan = _select(pool, _scores(pool), _policy(_exact_source_requirement()))
+    selected_references = {
+        item.observation_id
+        for item in plan.selected
+        if item.variant.representation is RepresentationKind.REFERENCE
+    }
+    assert len(selected_references) == DEFAULT_SELECTION.per_file_limit
+    assert any(item.reason == OMISSION_SAME_FILE for item in plan.omitted)
+
+
 def test_fill_prefers_relevance_per_serialized_cost() -> None:
     """Several small artifacts can beat one large higher-scoring artifact."""
     large = _source("src/large.py", 1, 8)

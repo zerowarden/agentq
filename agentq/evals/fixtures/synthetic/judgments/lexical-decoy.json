@@ -1,0 +1,35 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "lexical-decoy",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present before editing it.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "target-identity",
+      "critical": true,
+      "audit_note": "The resolved declaration must be identified, by signature or exact source.",
+      "witness_sets": [["target.identity"]]
+    },
+    {
+      "facet_id": "resolved-use",
+      "critical": true,
+      "audit_note": "A resolved semantic use of the target is required; a same-name lexical mention is not a reference.",
+      "witness_sets": [["relevant.use"]]
+    }
+  ],
+  "irrelevant_aliases": ["decoy.mention"],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "target.identity",
+      "acceptable_aliases": ["target.signature", "target.exact"]
+    },
+    {"witness_id": "relevant.use", "acceptable_aliases": ["relevant.use"]}
+  ]
+}

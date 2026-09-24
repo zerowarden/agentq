@@ -1,0 +1,139 @@
+{
+  "schema": "agentq.eval.suite/v1",
+  "suite_id": "smoke-v1",
+  "description": "Eight authored synthetic cases; no network, provider, or model calls.",
+  "baseline": {
+    "commit": "fc80d7a4f1fc14c63e680014bcd2b25b03f813b3",
+    "recorded": "2026-09-23",
+    "note": "Repository checkpoint the recorded profiles and sample output were taken from."
+  },
+  "sample_output_command": "uv run --locked python scripts/smoke_m1.py",
+  "decision_config": {
+    "scoring": {
+      "profile": "scoring-v1",
+      "binding_bonus": 2,
+      "intent_priorities": {
+        "understand": {
+          "reference": 6,
+          "implementation": 6,
+          "test": 2,
+          "ownership": 4,
+          "lexical_mention": 2
+        },
+        "edit": {
+          "reference": 6,
+          "implementation": 4,
+          "test": 8,
+          "ownership": 6,
+          "lexical_mention": 2
+        },
+        "rename": {
+          "reference": 8,
+          "implementation": 2,
+          "test": 4,
+          "ownership": 4,
+          "lexical_mention": 4
+        },
+        "refactor": {
+          "reference": 6,
+          "implementation": 8,
+          "test": 8,
+          "ownership": 6,
+          "lexical_mention": 2
+        },
+        "impact": {
+          "reference": 8,
+          "implementation": 6,
+          "test": 6,
+          "ownership": 6,
+          "lexical_mention": 4
+        }
+      }
+    },
+    "selection": {
+      "profile": "selection-v1",
+      "reserve_required": true,
+      "role_diversity": true,
+      "per_file_limit": 2,
+      "fill_by_score": true
+    },
+    "delivery_ceilings_chars": [6000, 12000, 24000],
+    "primary_delivery_chars": 12000
+  },
+  "cases": [
+    {
+      "case_id": "basic-edit",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_basic_edit",
+      "judgment": "evals/fixtures/synthetic/judgments/basic-edit.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "lexical-decoy",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_lexical_decoy",
+      "judgment": "evals/fixtures/synthetic/judgments/lexical-decoy.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "same-file-quota",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_same_file_quota",
+      "judgment": "evals/fixtures/synthetic/judgments/same-file-quota.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "variant-fallback",
+      "kind": "synthetic",
+      "intent": "understand",
+      "builder": "evals.fixtures.synthetic.builders:build_variant_fallback",
+      "judgment": "evals/fixtures/synthetic/judgments/variant-fallback.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "required-upgrade",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_required_upgrade",
+      "judgment": "evals/fixtures/synthetic/judgments/required-upgrade.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "empty-test-search",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_empty_test_search",
+      "judgment": "evals/fixtures/synthetic/judgments/empty-test-search.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "unstable-source",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_unstable_source",
+      "judgment": "evals/fixtures/synthetic/judgments/unstable-source.json",
+      "capture_id": null
+    },
+    {
+      "case_id": "delivery-overhead",
+      "kind": "synthetic",
+      "intent": "edit",
+      "builder": "evals.fixtures.synthetic.builders:build_delivery_overhead",
+      "judgment": "evals/fixtures/synthetic/judgments/delivery-overhead.json",
+      "capture_id": null
+    }
+  ],
+  "repository_fixtures": [
+    {
+      "fixture_id": "orders-python-v1",
+      "source_root": "evals/fixtures/repositories/orders_python/repository",
+      "creation_method": "uv run --locked python scripts/create_m2_seed_repository.py",
+      "isolated_checkout": ".agentq-eval/worktrees/orders-python",
+      "case_file": "evals/fixtures/repositories/orders_python/cases.json",
+      "case_status": "pending"
+    }
+  ]
+}

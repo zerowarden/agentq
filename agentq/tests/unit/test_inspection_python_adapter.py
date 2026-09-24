@@ -44,6 +44,16 @@ def _context(root: Path) -> InspectionContext:
     )
 
 
+def _capture_context(
+    root: Path, registry: CapabilityRegistry
+) -> InspectionContext:
+    return InspectionContext(
+        identity=RepositoryIdentity(root=root),
+        registry=registry,
+        source_versions=FilesystemVersionReader(root),
+    )
+
+
 def _symbol_request(
     symbol: str = "target", scopes: tuple[str, ...] = ("src",)
 ) -> InspectionRequest:
@@ -320,6 +330,29 @@ class PythonAdapterTests(unittest.TestCase):
         self.assertEqual(result.provider_version is not None, True)
         self.assertEqual(result.variants[0].text, "target(value: int) -> int")
         self.assertIs(result.observations[0].kind, ObservationKind.DECLARATION)
+
+
+class CaptureCacheFreshnessTests(unittest.TestCase):
+    def test_successive_captures_do_not_reuse_source_caches(self) -> None:
+        request = EvidenceRequest(
+            request_id="req-decl",
+            capability=Capability.FIND_DECLARATIONS,
+            target=SymbolTarget(name="target", scopes=("src",)),
+            limit=20,
+        )
+        registry = CapabilityRegistry((PythonInspectionAdapter(),))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root, "src/service.py", "def target():\n    return 1\n")
+            first = registry.acquire(request, _capture_context(root, registry))[0]
+            _write(root, "src/service.py", "def target():\n    return 2\n")
+            second = registry.acquire(request, _capture_context(root, registry))[0]
+        self.assertEqual(len(first.observations), 1)
+        self.assertEqual(len(second.observations), 1)
+        self.assertNotEqual(
+            first.observations[0].version_of("src/service.py"),
+            second.observations[0].version_of("src/service.py"),
+        )
 
 
 if __name__ == "__main__":

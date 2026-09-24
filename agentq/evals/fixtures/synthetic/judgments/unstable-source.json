@@ -1,0 +1,27 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "unstable-source",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present; evidence whose file changed during acquisition cannot satisfy this facet.",
+      "witness_sets": [["target.unstable_source"]]
+    },
+    {
+      "facet_id": "target-identity",
+      "critical": true,
+      "audit_note": "The resolved declaration must be identified by its signature when its exact source is inadmissible.",
+      "witness_sets": [["target.identity"]]
+    }
+  ],
+  "witnesses": [
+    {
+      "witness_id": "target.unstable_source",
+      "acceptable_aliases": ["target.unstable_source"]
+    },
+    {"witness_id": "target.identity", "acceptable_aliases": ["target.signature"]}
+  ]
+}

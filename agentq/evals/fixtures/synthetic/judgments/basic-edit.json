@@ -1,0 +1,42 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "basic-edit",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present before editing it.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "target-identity",
+      "critical": true,
+      "audit_note": "The resolved declaration must be identified, by signature or exact source.",
+      "witness_sets": [["target.identity"]]
+    },
+    {
+      "facet_id": "consumer-contract",
+      "critical": true,
+      "audit_note": "Show a consumer's use together with the return contract, or a test that establishes that contract.",
+      "witness_sets": [["caller.use", "target.identity"], ["test.mention"]]
+    },
+    {
+      "facet_id": "ownership",
+      "critical": false,
+      "audit_note": "Owning-package evidence helps place the edit in the project.",
+      "witness_sets": [["owner"]]
+    }
+  ],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "target.identity",
+      "acceptable_aliases": ["target.signature", "target.exact"]
+    },
+    {"witness_id": "caller.use", "acceptable_aliases": ["caller.use"]},
+    {"witness_id": "test.mention", "acceptable_aliases": ["test.mention"]},
+    {"witness_id": "owner", "acceptable_aliases": ["package.owner"]}
+  ]
+}

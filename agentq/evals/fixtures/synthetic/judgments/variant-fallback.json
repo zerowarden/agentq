@@ -1,0 +1,37 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "variant-fallback",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present before changing behavior around it.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "implementation-visible",
+      "critical": true,
+      "audit_note": "The implementation must be represented by its exact body or by an admissible excerpt.",
+      "witness_sets": [["implementation.representation"]]
+    },
+    {
+      "facet_id": "exact-body",
+      "critical": false,
+      "audit_note": "An excerpt does not carry the information content of the full body; exact-body credit requires the exact representation.",
+      "witness_sets": [["implementation.exact_only"]]
+    }
+  ],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "implementation.representation",
+      "acceptable_aliases": ["implementation.excerpt", "implementation.exact"]
+    },
+    {
+      "witness_id": "implementation.exact_only",
+      "acceptable_aliases": ["implementation.exact"]
+    }
+  ]
+}

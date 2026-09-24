@@ -1,0 +1,27 @@
+{
+  "schema": "agentq.eval.judgment-draft/v1",
+  "case_id": "same-file-quota",
+  "basis": "target_intent",
+  "review_status": "reviewed",
+  "facets": [
+    {
+      "facet_id": "editable-source",
+      "critical": true,
+      "audit_note": "The exact source of the requested span must be present before editing it.",
+      "witness_sets": [["target.exact"]]
+    },
+    {
+      "facet_id": "in-file-use",
+      "critical": false,
+      "audit_note": "Any one of the optional use sites in the target file is useful context; they are alternatives, not cumulative.",
+      "witness_sets": [["same_file.use"]]
+    }
+  ],
+  "witnesses": [
+    {"witness_id": "target.exact", "acceptable_aliases": ["target.exact"]},
+    {
+      "witness_id": "same_file.use",
+      "acceptable_aliases": ["same_file.use_1", "same_file.use_2", "same_file.use_3"]
+    }
+  ]
+}

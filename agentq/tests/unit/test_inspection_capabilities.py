@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from agentq.core import PARTIAL, typed_coverage
+from agentq.inspection.budgeting import AcquisitionLimits
 from agentq.inspection.capabilities import CapabilityRegistry
 from agentq.inspection.contracts import (
+    AcquisitionRecord,
     AvailabilityStatus,
     CandidateTarget,
     Capability,
     CapabilityAvailability,
     CapabilityResult,
     CollectionStatus,
+    DeclarationCandidate,
     EvidenceRequest,
     InspectionRequest,
     Intent,
@@ -21,6 +25,7 @@ from agentq.inspection.contracts import (
     SymbolTarget,
     make_declaration_candidate,
 )
+from agentq.inspection.execution import ExecutionLedger
 from tests.support.inspection_fakes import (
     FakeHandler,
     declaration_result,
@@ -371,6 +376,93 @@ class BatchingTests(unittest.TestCase):
             [call[0] for call in handler.calls],
             ["semantic_references", "implementations"],
         )
+
+
+class RequestIdentityTests(unittest.TestCase):
+    def _candidate(
+        self, path: str, *, version: str = "v1", start: int = 1, end: int = 2
+    ) -> DeclarationCandidate:
+        return make_declaration_candidate(
+            provider="fake",
+            path=path,
+            source_version=version,
+            kind="function",
+            span=SourceSpan(start_line=start, end_line=end),
+            signature="function target()",
+        )
+
+    def _request(self, subject: DeclarationCandidate) -> EvidenceRequest:
+        return EvidenceRequest(
+            request_id="req-1",
+            capability=Capability.SEMANTIC_REFERENCES,
+            target=SymbolTarget(name="target"),
+            subject=subject,
+            limit=10,
+        )
+
+    def _handler(self, *, error: Exception | None = None) -> FakeHandler:
+        return FakeHandler(
+            name="fake",
+            supported=frozenset({Capability.SEMANTIC_REFERENCES}),
+            results={Capability.SEMANTIC_REFERENCES: declaration_result()},
+            acquire_error=error,
+        )
+
+    def _record(
+        self,
+        request: EvidenceRequest,
+        *,
+        handler: FakeHandler | None = None,
+        ledger: ExecutionLedger | None = None,
+    ) -> AcquisitionRecord:
+        handler = handler or self._handler()
+        context = fake_context(handler)
+        if ledger is not None:
+            context = replace(context, execution=ledger)
+        acquired = CapabilityRegistry((handler,)).acquire(request, context)
+        return acquired[0].record
+
+    def test_same_name_subjects_at_distinct_paths_do_not_collide(self) -> None:
+        first = self._record(self._request(self._candidate("src/a.ts")))
+        second = self._record(self._request(self._candidate("src/b.ts")))
+        self.assertNotEqual(first.acquisition_id, second.acquisition_id)
+
+    def test_same_file_subjects_at_distinct_spans_do_not_collide(self) -> None:
+        first = self._record(
+            self._request(self._candidate("src/a.ts", start=1, end=2))
+        )
+        second = self._record(
+            self._request(self._candidate("src/a.ts", start=8, end=9))
+        )
+        self.assertNotEqual(first.acquisition_id, second.acquisition_id)
+
+    def test_changed_subject_version_changes_the_fingerprint(self) -> None:
+        first = self._record(self._request(self._candidate("src/a.ts", version="v1")))
+        second = self._record(self._request(self._candidate("src/a.ts", version="v2")))
+        self.assertNotEqual(first.acquisition_id, second.acquisition_id)
+
+    def test_failed_acquisitions_follow_the_same_identity_rules(self) -> None:
+        handler = self._handler(error=RuntimeError("bridge crashed"))
+        first = self._record(
+            self._request(self._candidate("src/a.ts")), handler=handler
+        )
+        second = self._record(
+            self._request(self._candidate("src/b.ts")), handler=handler
+        )
+        self.assertIs(first.status, CollectionStatus.FAILED)
+        self.assertNotEqual(first.acquisition_id, second.acquisition_id)
+
+    def test_limited_acquisitions_follow_the_same_identity_rules(self) -> None:
+        ledger = ExecutionLedger(AcquisitionLimits(max_provider_calls=1))
+        ledger.charge_call()
+        first = self._record(
+            self._request(self._candidate("src/a.ts")), ledger=ledger
+        )
+        second = self._record(
+            self._request(self._candidate("src/b.ts")), ledger=ledger
+        )
+        self.assertIs(first.status, CollectionStatus.UNAVAILABLE)
+        self.assertNotEqual(first.acquisition_id, second.acquisition_id)
 
 
 class ThirdLanguageIndependenceTests(unittest.TestCase):
