@@ -6,10 +6,14 @@
         --run-dir ../.agentq-eval/runs/baseline
     python -m evals evaluate --run-dir ../.agentq-eval/runs/baseline
     python -m evals smoke
+    python -m evals matrix --suite ../.agentq-eval/suites/smoke-v1.lock.json \\
+        --selection evals/profiles/selection-challenger.json --freeze
+    python -m evals holdout --suite ../.agentq-eval/suites/contextbench-sample.lock.json
 
 These commands are developer-only: they never run inside the agent-facing CLI,
 never download data, and never call a model. ``smoke`` exits 2 when a
-correctness gate fails.
+correctness gate fails. ``matrix`` loads development and validation only;
+``holdout`` refuses to run unless the frozen manifest still matches the corpus.
 """
 
 from __future__ import annotations
@@ -68,6 +72,17 @@ from .importer import (
     write_splits,
 )
 from .judgments import JudgmentDraft, load_draft, load_draft_directory
+from .matrix import (
+    PRIMARY_BUDGET,
+    freeze_matrix,
+    holdout_report,
+    load_frozen_manifest,
+    matrix_cells,
+    matrix_report,
+    resolve_matrix_profile,
+    validate_holdout,
+    validate_split_groups,
+)
 from .metrics import CaseEvaluation, MetricConfig, summarize
 from .models import AttemptOutcome, CaseSuite
 from .replay import load_config, replay_suite
@@ -291,6 +306,99 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument(
         "--profile", type=Path, default=None, help="decision config JSON"
     )
+    matrix = subparsers.add_parser(
+        "matrix",
+        help="run the controlled baseline/A/B/C matrix on development and validation",
+    )
+    matrix.add_argument(
+        "--suite",
+        action="append",
+        required=True,
+        type=Path,
+        help="generated suite lock path (repeatable)",
+    )
+    matrix.add_argument(
+        "--splits",
+        type=Path,
+        default=None,
+        help="split assignments JSON; unlisted cases count as development",
+    )
+    matrix.add_argument(
+        "--scoring",
+        type=Path,
+        default=None,
+        help="tuned scoring profile; must keep the baseline selector",
+    )
+    matrix.add_argument(
+        "--selection",
+        type=Path,
+        default=None,
+        help="selection challenger profile; must keep the baseline scorer",
+    )
+    matrix.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="where the full matrix report is written",
+    )
+    matrix.add_argument(
+        "--freeze",
+        action="store_true",
+        help="freeze the chosen configuration and corpus manifest",
+    )
+    matrix.add_argument(
+        "--frozen-profile",
+        type=Path,
+        default=PROJECT / "evals" / "profiles" / "m2-frozen.json",
+        help="where the frozen configuration is written",
+    )
+    matrix.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="freeze manifest path (default: <store>/experiments/frozen-matrix.json)",
+    )
+    matrix.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="artifact store root (default: <repo>/.agentq-eval)",
+    )
+    holdout = subparsers.add_parser(
+        "holdout",
+        help="evaluate the frozen configuration on held-out cases only",
+    )
+    holdout.add_argument(
+        "--suite",
+        action="append",
+        required=True,
+        type=Path,
+        help="generated suite lock path (repeatable)",
+    )
+    holdout.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="frozen matrix manifest (default: <store>/experiments/frozen-matrix.json)",
+    )
+    holdout.add_argument(
+        "--splits",
+        type=Path,
+        default=None,
+        help="split assignments JSON (default: the frozen manifest's path)",
+    )
+    holdout.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="where the full held-out report is written",
+    )
+    holdout.add_argument(
+        "--store",
+        type=Path,
+        default=None,
+        help="artifact store root (default: <repo>/.agentq-eval)",
+    )
     return parser
 
 
@@ -315,6 +423,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _tune_scoring(args)
         if args.command == "compare-selectors":
             return _compare_selectors(args)
+        if args.command == "matrix":
+            return _matrix(args)
+        if args.command == "holdout":
+            return _holdout(args)
         return _smoke(args)
     except (ContractError, RepositoryError, StoreError) as exc:
         print(f"evals: {exc}", file=sys.stderr)
@@ -733,6 +845,128 @@ def _compare_selectors(args: argparse.Namespace) -> int:
     )
     print(_json_text({**report, "report": str(report_path)}))
     return VIOLATION_EXIT if not baseline.eligible() else 0
+
+
+def _matrix(args: argparse.Namespace) -> int:
+    store = _store(args)
+    if args.freeze and args.splits is None:
+        raise ContractError("freezing a matrix requires --splits")
+    base = DecisionConfig()
+    splits = (
+        load_splits(args.splits) if args.splits is not None else SplitAssignments({})
+    )
+    locks = tuple(store.read_lock(path) for path in args.suite)
+    violations = validate_split_groups(store, locks, splits)
+    if violations:
+        raise ContractError("; ".join(item.describe() for item in violations))
+    tuned = (
+        resolve_matrix_profile(base, args.scoring, "scoring")
+        if args.scoring is not None
+        else None
+    )
+    challenger = (
+        resolve_matrix_profile(base, args.selection, "selection")
+        if args.selection is not None
+        else None
+    )
+    cells = matrix_cells(base, tuned, challenger)
+    development = load_tuning_cases(
+        store, tuple(select_split(lock, splits, DEVELOPMENT) for lock in locks)
+    )
+    validation = load_tuning_cases(
+        store, tuple(select_split(lock, splits, VALIDATION) for lock in locks)
+    )
+    if not development:
+        raise ContractError("the matrix has no judged development cases")
+    report = matrix_report(cells, base, development, validation)
+    report_path = _write_report(
+        args.report
+        if args.report is not None
+        else store.root / "experiments" / "matrix.json",
+        report,
+    )
+    frozen: dict[str, str] | None = None
+    if args.freeze:
+        manifest_path = (
+            args.manifest
+            if args.manifest is not None
+            else store.root / "experiments" / "frozen-matrix.json"
+        )
+        freeze_matrix(
+            locks,
+            args.splits,
+            report,
+            frozen_profile_path=args.frozen_profile,
+            manifest_path=manifest_path,
+        )
+        frozen = {
+            "profile": str(args.frozen_profile),
+            "manifest": str(manifest_path),
+        }
+    development_summary = report["development"]["summary"]
+    validation_summary = report["validation"]["summary"]
+    summary = {
+        "report": str(report_path),
+        "budgets": report["budgets"],
+        "primary_budget": report["primary_budget"],
+        "development_cases": report["development"]["cases"],
+        "validation_cases": report["validation"]["cases"],
+        "chosen": report["chosen"],
+        "development_primary": [
+            item for item in development_summary if item["budget"] == PRIMARY_BUDGET
+        ],
+        "validation_primary": [
+            item for item in validation_summary if item["budget"] == PRIMARY_BUDGET
+        ],
+        "failures": report["failures"],
+        "frozen": frozen,
+    }
+    print(_json_text(summary))
+    return 0
+
+
+def _holdout(args: argparse.Namespace) -> int:
+    store = _store(args)
+    manifest_path = (
+        args.manifest
+        if args.manifest is not None
+        else store.root / "experiments" / "frozen-matrix.json"
+    )
+    manifest = load_frozen_manifest(manifest_path)
+    splits_path = (
+        args.splits if args.splits is not None else Path(manifest.splits_path)
+    )
+    splits = load_splits(splits_path)
+    locks = tuple(store.read_lock(path) for path in args.suite)
+    validate_holdout(manifest, locks, splits_path, splits)
+    report = {
+        **holdout_report(manifest, store, locks, splits),
+        "manifest": str(manifest_path),
+    }
+    report_path = _write_report(
+        args.report
+        if args.report is not None
+        else store.root / "experiments" / "holdout.json",
+        report,
+    )
+    summary = {
+        "report": str(report_path),
+        "manifest": str(manifest_path),
+        "chosen": manifest.chosen_label,
+        "budgets": report["budgets"],
+        "primary_budget": report["primary_budget"],
+        "cases": report["cases"],
+        "groups": report["groups"],
+        "summary": [
+            item
+            for item in report["summary"]
+            if item["budget"] == PRIMARY_BUDGET
+        ],
+        "grouped": report["grouped"],
+        "undelivered_facets": report["undelivered_facets"],
+    }
+    print(_json_text(summary))
+    return 0
 
 
 def _smoke(args: argparse.Namespace) -> int:
