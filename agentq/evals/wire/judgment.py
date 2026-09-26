@@ -10,6 +10,7 @@ import hashlib
 
 from agentq.core import ContractError, canonical_json
 
+from ..annotations import labels_from_wire
 from ..models import (
     ATTEMPTS_SCHEMA,
     CASE_SCHEMA,
@@ -51,11 +52,14 @@ def _lock_wire(lock: SuiteLock) -> dict[str, object]:
     return {
         "schema": lock.schema,
         "suite_id": lock.suite_id,
+        **({"track": lock.track} if lock.track != "conformance" else {}),
         "cases": [
             {
                 "case_id": case.case_id,
                 "capture_id": case.capture_id,
                 "judgment_id": case.judgment_id,
+                **({"repository_family": case.repository_family, "original_inst_id": case.original_inst_id}
+                   if case.repository_family or case.original_inst_id else {}),
                 "delivery": (
                     None
                     if case.delivery is None
@@ -149,6 +153,7 @@ def _judgment_wire(judgment: JudgmentSet) -> dict[str, object]:
         "capture_id": judgment.capture_id,
         "basis": judgment.basis,
         "review_status": judgment.review_status,
+        **({"benchmark": judgment.benchmark.to_wire()} if judgment.benchmark is not None else {}),
         "facets": [_facet_wire(item) for item in judgment.facets],
         "witnesses": [_witness_wire(item) for item in judgment.witnesses],
         "irrelevant_variant_ids": list(judgment.irrelevant_variant_ids),
@@ -169,7 +174,8 @@ def _judgment_from_wire(value: object, what: str) -> JudgmentSet:
             "witnesses",
             "irrelevant_variant_ids",
             "expected_outcomes",
-        })
+            "benchmark",
+        }, optional={"benchmark"})
     schema = read_str(mapping["schema"], f"{what}.schema")
     if schema != JUDGMENT_SCHEMA:
         raise ContractError(f"unsupported judgment schema: {schema!r}")
@@ -196,6 +202,7 @@ def _judgment_from_wire(value: object, what: str) -> JudgmentSet:
             )
         ),
         schema=schema,
+        benchmark=labels_from_wire(mapping["benchmark"]) if "benchmark" in mapping else None,
     )
 
 
@@ -264,6 +271,8 @@ def _case_spec_wire(spec: CaseSpec) -> dict[str, object]:
         "split_group": spec.split_group,
         "capture_id": spec.capture_id,
         "judgment_id": spec.judgment_id,
+        **({"repository_family": spec.repository_family, "original_inst_id": spec.original_inst_id, "track": spec.track}
+           if spec.repository_family or spec.original_inst_id or spec.track != "conformance" else {}),
     }
 
 
@@ -278,7 +287,8 @@ def _case_spec_from_wire(value: object, what: str) -> CaseSpec:
             "split_group",
             "capture_id",
             "judgment_id",
-        })
+            "repository_family", "original_inst_id", "track",
+        }, optional={"repository_family", "original_inst_id", "track"})
     schema = read_str(mapping["schema"], f"{what}.schema")
     if schema != CASE_SCHEMA:
         raise ContractError(f"unsupported case schema: {schema!r}")
@@ -293,6 +303,9 @@ def _case_spec_from_wire(value: object, what: str) -> CaseSpec:
         ),
         capture_id=optional_str(mapping["capture_id"], f"{what}.capture_id"),
         judgment_id=optional_str(mapping["judgment_id"], f"{what}.judgment_id"),
+        repository_family=read_str(mapping.get("repository_family", ""), "repository family", allow_empty=True),
+        original_inst_id=read_str(mapping.get("original_inst_id", ""), "original task id", allow_empty=True),
+        track=read_str(mapping.get("track", "conformance"), "evaluation track"),
         schema=schema,
     )
 
@@ -415,7 +428,7 @@ def decode_lock(data: bytes) -> SuiteLock:
     mapping = object_fields(
         decode_json(text, what="suite lock"),
         "suite lock",
-        {"schema", "suite_id", "cases"},
+        {"schema", "suite_id", "cases", "track"}, optional={"track"},
     )
     schema = read_str(mapping["schema"], "suite lock.schema")
     if schema != LOCK_SCHEMA:
@@ -425,8 +438,8 @@ def decode_lock(data: bytes) -> SuiteLock:
         case = object_fields(
             item,
             f"suite lock.cases[{index}]",
-            {"case_id", "capture_id", "judgment_id", "delivery"},
-            optional={"delivery"},
+            {"case_id", "capture_id", "judgment_id", "delivery", "repository_family", "original_inst_id"},
+            optional={"delivery", "repository_family", "original_inst_id"},
         )
         # A lock written before delivery pins existed falls back to the profile.
         delivery = case.get("delivery")
@@ -449,6 +462,8 @@ def decode_lock(data: bytes) -> SuiteLock:
                         delivery, f"suite lock.cases[{index}].delivery"
                     )
                 ),
+                repository_family=read_str(case.get("repository_family", ""), "repository family", allow_empty=True),
+                original_inst_id=read_str(case.get("original_inst_id", ""), "original task id", allow_empty=True),
             )
         )
     reject_duplicates(
@@ -458,4 +473,5 @@ def decode_lock(data: bytes) -> SuiteLock:
         suite_id=read_str(mapping["suite_id"], "suite lock.suite_id"),
         cases=tuple(cases),
         schema=schema,
+        track=read_str(mapping.get("track", "conformance"), "evaluation track"),
     )

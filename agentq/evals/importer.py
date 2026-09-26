@@ -1,4 +1,4 @@
-"""Import pinned external authoring rows into reviewed-able case records.
+"""Import pinned benchmark requests and independent annotations.
 
 This is the only module that reads evaluation-only authoring material
 (problem statements, patches, gold spans). It validates each row strictly,
@@ -14,17 +14,18 @@ The two suites answer different questions and are never scored together:
   so the suite is a source-reading correctness gate, not a scoring corpus.
 - ``context-selection`` anchors the request on the changed symbol named by the
   patch in its original file and collects context from that symbol's package.
-  The pool then holds competing references and mentions, and reviewer-authored
-  judgments witness the row's other gold spans among them. The gold context
-  itself stays in the evaluation-only authoring sample: the reviewer reads it
-  there when authoring the capture-bound draft, and it never enters a case record.
+  Gold spans are preserved in separate evaluation labels, including spans the
+  providers do not acquire. They never determine the request or acquisition.
+  This is task-context transfer: the native target-and-intent input does not
+  include the benchmark's task description.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from agentq.core import ContractError, canonical_json
@@ -36,6 +37,12 @@ from agentq.inspection.contracts import (
     SymbolTarget,
 )
 
+from .annotations import (
+    AnnotatedSpan,
+    BenchmarkLabels,
+    canonical_repository,
+    relative_source_path,
+)
 from .codec import decode_case_suite, decode_json, encode_case_spec
 from .models import CaseSource, CaseSpec
 from .repository import RepositoryError, run_git
@@ -111,6 +118,7 @@ class ImportReport:
     source_conformance: tuple[CaseSpec, ...]
     context_selection: tuple[CaseSpec, ...]
     excluded: tuple[ExcludedRow, ...]
+    labels: Mapping[str, BenchmarkLabels] = field(default_factory=dict)
 
 
 def load_rows(path: Path) -> tuple[Mapping[str, object], ...]:
@@ -147,26 +155,26 @@ def parse_gold_spans(value: object) -> tuple[tuple[GoldSpan, ...], str | None]:
         decoded = value
     if not isinstance(decoded, list) or not decoded:
         return (), "gold_context must be a non-empty JSON array"
-    spans: list[GoldSpan] = []
-    for index, item in enumerate(decoded):
-        if not isinstance(item, dict):
-            return (), f"gold_context[{index}] is not an object"
-        path = next(
-            (
-                item[key]
-                for key in GOLD_CONTEXT_FILE_KEYS
-                if isinstance(item.get(key), str)
-            ),
-            None,
-        )
-        start = item.get("start_line")
-        end = item.get("end_line")
-        if not isinstance(path, str) or not path:
-            return (), f"gold_context[{index}] names no file"
-        if not _is_int(start) or not _is_int(end) or start < 1 or end < start:
-            return (), f"gold_context[{index}] has an invalid span"
-        spans.append(GoldSpan(path=path, start_line=start, end_line=end))
-    return tuple(spans), None
+    try:
+        spans = tuple(_gold_span(item, index) for index, item in enumerate(decoded))
+    except ContractError as exc:
+        return (), str(exc)
+    return spans, None
+
+
+def _gold_span(item: object, index: int) -> GoldSpan:
+    if not isinstance(item, dict):
+        raise ContractError(f"gold_context[{index}] is not an object")
+    path = next(
+        (item[key] for key in GOLD_CONTEXT_FILE_KEYS if isinstance(item.get(key), str)),
+        None,
+    )
+    if not isinstance(path, str) or not path:
+        raise ContractError(f"gold_context[{index}] names no file")
+    start, end = item.get("start_line"), item.get("end_line")
+    if not _is_int(start) or not _is_int(end) or start < 1 or end < start:
+        raise ContractError(f"gold_context[{index}] has an invalid span")
+    return GoldSpan(path=relative_source_path(path), start_line=start, end_line=end)
 
 
 def parse_changed_symbol(patch: object) -> ChangedSymbol | None:
@@ -214,8 +222,8 @@ def package_scope(path: str) -> str:
 
 
 def family_key(repo: str) -> str:
-    """Repo name without owner, so forks stay in one split group."""
-    return repo.rsplit("/", 1)[-1]
+    """Canonical repository identity; fork aliases are supplied at import."""
+    return canonical_repository(repo)
 
 
 def checkout_root(repo: str, commit: str) -> str:
@@ -229,8 +237,8 @@ def checkout_directory(source: CaseSource) -> str:
 
 
 def suite_group(kind: str, repo: str) -> str:
-    """A split group namespaced by suite, so the two suites never share one."""
-    return f"{kind}:{family_key(repo)}"
+    """A task retains its family across evaluation tracks."""
+    return family_key(repo)
 
 
 def repository_source(repo: str, commit: str, repo_url: str) -> CaseSource:
@@ -288,6 +296,7 @@ def context_selection_case(
         ),
         target_origin="derived",
         judgment_basis="context_selection",
+        track="transfer",
         split_group=suite_group(CONTEXT_SELECTION, source.repo),
     )
 
@@ -334,45 +343,106 @@ def adapt_row(row: Mapping[str, object]) -> AdaptedRow:
     )
 
 
-def import_rows(rows: Sequence[Mapping[str, object]]) -> ImportReport:
+def import_rows(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    revision: str = "c2855792b006af41c67202d33883fb9d46362853",
+    families: Mapping[str, str] | None = None,
+) -> ImportReport:
     """Adapt every row; ids are unique within each suite, never across them."""
     accepted: dict[str, list[CaseSpec]] = {kind: [] for kind in SUITE_KINDS}
     excluded: list[ExcludedRow] = []
     seen: dict[str, set[str]] = {kind: set() for kind in SUITE_KINDS}
+    tasks: set[tuple[str, str]] = set()
+    labels: dict[str, BenchmarkLabels] = {}
     for row in rows:
-        adapted = adapt_row(row)
+        try:
+            adapted = adapt_row(row)
+        except ContractError as exc:
+            excluded.append(ExcludedRow(str(row.get("instance_id", "")), str(exc)))
+            continue
         excluded.extend(adapted.excluded)
         cases = {
             SOURCE_CONFORMANCE: adapted.source_conformance,
             CONTEXT_SELECTION: adapted.context_selection,
         }
+        if adapted.source_conformance is None:
+            continue
+        original = row.get("original_inst_id")
+        if not isinstance(original, str) or not original:
+            excluded.append(
+                ExcludedRow(adapted.instance_id, "missing original_inst_id")
+            )
+            continue
+        family = canonical_repository(adapted.source_conformance.source.repo, families)
+        identity = (family, original)
+        if identity in tasks:
+            excluded.append(
+                ExcludedRow(adapted.instance_id, "duplicate original task identity")
+            )
+            continue
+        tasks.add(identity)
+        spans, _ = parse_gold_spans(row["gold_context"])
+        annotations = tuple(
+            AnnotatedSpan(s.path, s.start_line, s.end_line) for s in spans
+        )
         for kind in SUITE_KINDS:
             case = cases[kind]
             if case is None:
                 continue
+            case = replace(
+                case,
+                repository_family=family,
+                original_inst_id=original,
+                split_group=family,
+            )
             if case.case_id in seen[kind]:
                 excluded.append(
-                    ExcludedRow(
-                        case.case_id, f"duplicate case id in {kind} sample"
-                    )
+                    ExcludedRow(case.case_id, f"duplicate case id in {kind} sample")
                 )
                 continue
             seen[kind].add(case.case_id)
             accepted[kind].append(case)
+            if kind == CONTEXT_SELECTION:
+                labels[case.case_id] = BenchmarkLabels(
+                    label_source="Contextbench/ContextBench",
+                    label_revision=revision,
+                    objective="task_context_coverage",
+                    positive_spans=annotations,
+                )
     return ImportReport(
         source_conformance=tuple(accepted[SOURCE_CONFORMANCE]),
         context_selection=tuple(accepted[CONTEXT_SELECTION]),
         excluded=tuple(excluded),
+        labels=labels,
     )
 
 
 def assign_splits(cases: Sequence[CaseSpec]) -> dict[str, str]:
-    """Sorted split groups assigned round-robin; no group ever crosses."""
-    groups = sorted({case.split_group for case in cases})
-    by_group = {
-        group: SPLITS[index % len(SPLITS)] for index, group in enumerate(groups)
+    """Stable family hashing: adding a repository cannot reshuffle old cases."""
+    groups = {case.repository_family or case.split_group for case in cases}
+    by_group = {group: split_for_family(group) for group in groups}
+    return {
+        case.case_id: by_group[case.repository_family or case.split_group]
+        for case in cases
     }
-    return {case.case_id: by_group[case.split_group] for case in cases}
+
+
+def split_for_family(family: str) -> str:
+    if not family:
+        raise ContractError("split assignment requires a repository or fixture family")
+    bucket = (
+        int(
+            hashlib.sha256(("agentq-confirmatory-v1:" + family).encode()).hexdigest()[
+                :8
+            ],
+            16,
+        )
+        % 10
+    )
+    if bucket < 6:
+        return "development"
+    return "validation" if bucket < 8 else "holdout"
 
 
 def splits_document(cases: Sequence[CaseSpec]) -> dict[str, object]:
@@ -383,8 +453,8 @@ def splits_document(cases: Sequence[CaseSpec]) -> dict[str, object]:
     return {
         "schema": SPLIT_SCHEMA,
         "rule": (
-            "split groups sorted and assigned round-robin across "
-            "development, validation, and holdout"
+            "sha256(agentq-confirmatory-v1:family) first 8 hex digits modulo 10; "
+            "0-5 development, 6-7 validation, 8-9 holdout; previously inspected groups excluded from confirmation"
         ),
         "assignments": dict(sorted(assignments.items())),
         "groups": dict(sorted(groups.items())),
@@ -408,6 +478,11 @@ def write_cases(cases: Sequence[CaseSpec], directory: Path) -> tuple[Path, ...]:
         write_new_or_equal(path, encode_case_spec(case))
         written.append(path)
     return tuple(written)
+
+
+def write_labels(labels: Mapping[str, BenchmarkLabels], directory: Path) -> None:
+    for case_id, annotation in sorted(labels.items()):
+        write_new_or_equal(directory / f"{case_id}.json", (canonical_json(annotation.to_wire()) + "\n").encode())
 
 
 def write_splits(cases: Sequence[CaseSpec], path: Path) -> Path:

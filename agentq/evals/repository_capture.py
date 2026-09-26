@@ -32,6 +32,8 @@ from agentq.inspection.contracts import (
 )
 from agentq.inspection.service import inspect
 
+from .annotations import BenchmarkLabels
+from .benchmark_labels import compile_labels
 from .capture import producers_for
 from .codec import capture_digest, decode_case_suite, read_json_file
 from .judgments import JudgmentDraft, load_draft_directory, parse_draft
@@ -255,6 +257,7 @@ def capture_suite_cases(
     *,
     drafts: Mapping[str, JudgmentDraft] | None = None,
     registry: CapabilityRegistry | None = None,
+    labels: Mapping[str, BenchmarkLabels] | None = None,
 ) -> CaptureReport:
     """Capture every scheduled case; compile judgments when drafts exist.
 
@@ -264,7 +267,10 @@ def capture_suite_cases(
     """
     available = drafts or {}
     attempts: list[CaptureAttempt] = []
-    builder = SuiteBuilder(store, suite.suite_id)
+    tracks = {case.track for case in suite.cases}
+    if len(tracks) != 1:
+        raise ContractError("capture suites must contain exactly one evaluation track")
+    builder = SuiteBuilder(store, suite.suite_id, track=tracks.pop())
     for spec in suite.cases:
         resolved: Path | None = None
         try:
@@ -279,6 +285,14 @@ def capture_suite_cases(
             attempts.append(attempt)
             continue
         draft = available.get(spec.case_id)
+        annotation = (labels or {}).get(spec.case_id)
+        try:
+            if labels is not None and annotation is None:
+                raise ContractError(f"missing benchmark labels for {spec.case_id!r}")
+            judgment = None if annotation is None else compile_labels(capture, annotation, checkout=resolved)
+        except (ContractError, UnicodeError, OSError) as exc:
+            attempts.append(_failed_attempt(spec, resolved, exc))
+            continue
         capture_id, _ = builder.add(
             spec.case_id,
             capture,
@@ -288,6 +302,9 @@ def capture_suite_cases(
                 if draft is not None
                 else None
             ),
+            judgment=judgment,
+            repository_family=spec.repository_family,
+            original_inst_id=spec.original_inst_id,
         )
         if capture_id != attempt.capture_id:
             raise ContractError(

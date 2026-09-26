@@ -34,6 +34,8 @@ from agentq.inspection.scoring import (
 )
 from agentq.inspection.selection import DEFAULT_SELECTION, SelectionProfile
 
+from .annotations import AnnotationCoverage, sum_coverage
+from .budgets import effective_config
 from .codec import encode_config
 from .importer import SPLIT_SCHEMA, SPLITS, write_new_or_equal
 from .metrics import CaseEvaluation, facet_supported, judged_variant_ids
@@ -47,9 +49,10 @@ from .models import (
     evaluation_is_clean,
     validate_suite_membership,
 )
-from .replay import replay_capture, with_delivery
+from .replay import replay_capture
 from .runner import evaluate_capture
 from .store import CaptureStore
+from .tokenization import TOKENIZER_ID
 from .wire.json import as_mapping, exact_keys, read_json_file, read_str
 
 DEVELOPMENT, VALIDATION, HOLDOUT = SPLITS
@@ -87,7 +90,7 @@ PARAMETERS = tuple(
 
 @dataclass(frozen=True)
 class SplitAssignments:
-    """Case id to split name; a case absent here counts as development."""
+    """Explicit case membership; omitted assignments are an error."""
 
     assignments: Mapping[str, str]
 
@@ -97,7 +100,9 @@ class SplitAssignments:
                 raise ContractError(f"unknown split {split!r} for case {case_id!r}")
 
     def split_of(self, case_id: str) -> str:
-        return self.assignments.get(case_id, DEVELOPMENT)
+        if case_id not in self.assignments:
+            raise ContractError(f"missing explicit split assignment for {case_id!r}")
+        return self.assignments[case_id]
 
 
 def load_splits(path: Path) -> SplitAssignments:
@@ -139,13 +144,28 @@ class TuningCase:
     capture: ReplayCapture
     judgments: JudgmentSet
     delivery: DeliveryBudget | None = None
+    track: str = "conformance"
+    repository_family: str = ""
+    original_inst_id: str = ""
+    budget_mode: str = "absolute"
 
     def config_for(self, config: DecisionConfig) -> DecisionConfig:
-        return with_delivery(config, self.delivery)
+        return effective_config(config, self.delivery, self.budget_mode)
+
+    @property
+    def objective(self) -> str:
+        return "facet_coverage" if self.judgments.benchmark is None else self.judgments.benchmark.objective
+
+
+def validate_case_objectives(cases: Sequence[TuningCase]) -> None:
+    if len({(case.track, case.objective) for case in cases}) > 1:
+        raise ContractError(
+            "evaluation tracks and objectives must be reported separately"
+        )
 
 
 def load_tuning_cases(
-    store: CaptureStore, locks: Sequence[SuiteLock]
+    store: CaptureStore, locks: Sequence[SuiteLock], *, budget_mode: str = "absolute"
 ) -> tuple[TuningCase, ...]:
     """Judged cases from the given locks; unjudged cases are excluded."""
     validate_suite_membership(locks)
@@ -160,8 +180,13 @@ def load_tuning_cases(
                     capture=store.read_capture(locked.capture_id),
                     judgments=store.read_judgment(locked.judgment_id),
                     delivery=locked.delivery,
+                    track=lock.track,
+                    repository_family=locked.repository_family,
+                    original_inst_id=locked.original_inst_id,
+                    budget_mode=budget_mode,
                 )
             )
+    validate_case_objectives(cases)
     return tuple(cases)
 
 
@@ -240,7 +265,11 @@ class CandidateResult:
     final_output_tokens: int = 0
     baseline_irrelevant_source_chars: int | None = None
     baseline_unjudged_fraction: float | None = None
+    baseline_render_chars: int | None = None
+    baseline_output_tokens: int | None = None
     selection: SelectionProfile = DEFAULT_SELECTION
+    annotation: AnnotationCoverage = AnnotationCoverage()
+    objective_name: str = "facet_coverage"
 
     @property
     def judged_fraction_of_delivery(self) -> float | None:
@@ -266,6 +295,10 @@ class CandidateResult:
             unjudged_fraction=self.unjudged_fraction_of_delivery,
             baseline_irrelevant_chars=self.baseline_irrelevant_source_chars,
             baseline_unjudged_fraction=self.baseline_unjudged_fraction,
+            render_chars=self.render_chars,
+            output_tokens=self.final_output_tokens,
+            baseline_render_chars=self.baseline_render_chars,
+            baseline_output_tokens=self.baseline_output_tokens,
         )
 
     def eligible(self) -> bool:
@@ -279,6 +312,10 @@ class CandidateResult:
 
     def objective(self) -> tuple[int, ...]:
         """Labeled coverage first, then parsimony; cost is a guardrail, not a term."""
+        if self.objective_name == "task_context_coverage":
+            return (self.annotation.lines.delivered, self.annotation.files.delivered, -self.distance)
+        if self.objective_name == "completion_dependency":
+            return (self.annotation.documents.delivered, -self.distance)
         return (
             self.critical_delivered,
             self.all_critical_present,
@@ -288,6 +325,9 @@ class CandidateResult:
 
     def to_wire(self) -> dict[str, object]:
         return {
+            "objective_name": self.objective_name,
+            "annotated_context_coverage": self.annotation.to_wire(),
+            "tokenizer": TOKENIZER_ID,
             "label": self.label,
             "rationale": self.rationale,
             "scoring": self.scoring.to_wire(),
@@ -355,6 +395,8 @@ def evaluate_config(
     baseline: CandidateResult | None = None,
 ) -> CandidateResult:
     """Replay and evaluate one full decision configuration."""
+    validate_case_objectives(cases)
+    annotations = []
     critical_delivered = critical_total = 0
     all_present = with_critical = 0
     noncritical_delivered = noncritical_total = 0
@@ -389,6 +431,7 @@ def evaluate_config(
         judged_chars += evaluation.judged_source_chars_delivered
         delivered_chars += evaluation.delivered_source_chars
         final_output_tokens += evaluation.final_output_tokens or 0
+        annotations.append(evaluation.annotation)
         observation = CaseObservation(
             case_id=case.case_id,
             selected=_selected_variant_ids(outcome),
@@ -418,6 +461,8 @@ def evaluate_config(
         rationale=rationale,
         scoring=config.scoring,
         selection=config.selection,
+        annotation=sum_coverage(annotations),
+        objective_name=cases[0].objective if cases else "facet_coverage",
         critical_delivered=critical_delivered,
         critical_total=critical_total,
         all_critical_present=all_present,
@@ -445,11 +490,17 @@ def evaluate_config(
         baseline_unjudged_fraction=(
             None if baseline is None else baseline.unjudged_fraction_of_delivery
         ),
+        baseline_render_chars=None if baseline is None else baseline.render_chars,
+        baseline_output_tokens=None if baseline is None else baseline.final_output_tokens,
     )
 
 
 def _case_utility(evaluation: CaseEvaluation) -> tuple[int, ...]:
     """The per-case utility the tuning objective aggregates."""
+    if evaluation.objective == "task_context_coverage":
+        return (evaluation.annotation.lines.delivered, evaluation.annotation.files.delivered)
+    if evaluation.objective == "completion_dependency":
+        return (evaluation.annotation.documents.delivered,)
     return (
         evaluation.critical_delivered,
         int(bool(evaluation.all_critical_present)),

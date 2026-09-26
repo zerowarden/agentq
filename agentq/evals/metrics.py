@@ -25,6 +25,8 @@ from agentq.inspection.contracts import (
 )
 from agentq.inspection.decision import DecisionConfig
 
+from .annotations import sum_coverage
+from .benchmark_labels import annotated_chars, annotation_coverage
 from .codec import capture_digest, judgment_digest
 from .fingerprint import metrics_digest
 from .models import (
@@ -37,14 +39,9 @@ from .models import (
     ratio,
 )
 from .replay import decision_id
+from .tokenization import TOKENIZER_ID, count_tokens
 
-METRIC_PROFILE = "metrics-v1"
-
-# No tokenizer is pinned, so output tokens are a deterministic character
-# proxy. The reason travels with the number so it is never mistaken for a
-# model tokenizer count.
-TOKEN_PROXY_CHARS = 4
-TOKEN_PROXY_REASON = "character proxy: ceil(render_chars / 4); no pinned tokenizer"
+METRIC_PROFILE = "metrics-v2"
 
 
 @dataclass(frozen=True)
@@ -54,7 +51,7 @@ class MetricConfig:
     profile: str = METRIC_PROFILE
 
     def to_wire(self) -> dict[str, object]:
-        return {"profile": self.profile}
+        return {"profile": self.profile, "tokenizer": TOKENIZER_ID}
 
 
 DEFAULT_METRIC_CONFIG = MetricConfig()
@@ -250,6 +247,8 @@ def judged_variant_ids(
     relevant: set[str] = set()
     for witness in judgments.witnesses:
         relevant.update(witness.acceptable_variant_ids)
+    if judgments.benchmark is not None:
+        relevant.update(judgments.benchmark.positive_ids)
     return frozenset(relevant), frozenset(judgments.irrelevant_variant_ids)
 
 
@@ -280,14 +279,15 @@ def _delivery_review(
             judged_chars += chars
         elif variant_id in relevant:
             judged_chars += chars
+        elif judgments.benchmark is not None:
+            judged_chars += annotated_chars(variant, judgments.benchmark)
     return delivered_chars, judged_chars, irrelevant_count, irrelevant_chars
 
 
 def _output_tokens(delivered: DecisionDelivered | None) -> tuple[int | None, str]:
     if delivered is None or delivered.bundle.render is None:
         return None, "no rendered output"
-    chars = delivered.bundle.render.chars
-    return (chars + TOKEN_PROXY_CHARS - 1) // TOKEN_PROXY_CHARS, TOKEN_PROXY_REASON
+    return count_tokens(delivered.bundle.render.text), TOKENIZER_ID
 
 
 def evaluate_decision(
@@ -381,6 +381,8 @@ def evaluate_decision(
         judged_source_chars_delivered=judged_chars,
         known_irrelevant_variants_delivered=irrelevant_count,
         known_irrelevant_source_chars_delivered=irrelevant_chars,
+        annotation=annotation_coverage(capture, judgments.benchmark, initial_ids, delivered_ids),
+        objective="facet_coverage" if judgments.benchmark is None else judgments.benchmark.objective,
     )
 
 
@@ -389,10 +391,16 @@ def summarize(
 ) -> dict[str, object]:
     """Aggregate quality metrics with explicit denominators and N/A handling."""
     critical = sum(item.critical_total for item in evaluations)
+    objectives = {item.objective for item in evaluations}
+    if len(objectives) > 1:
+        raise ContractError("evaluation objectives must be reported separately")
     with_critical = [item for item in evaluations if item.critical_total]
     present = [item for item in with_critical if item.all_critical_present]
     return {
         "profile": config.profile,
+        "objective": next(iter(objectives), "facet_coverage"),
+        "annotated_context_coverage": sum_coverage(item.annotation for item in evaluations).to_wire(),
+        "tokenizer": TOKENIZER_ID,
         "cases": len(evaluations),
         "violation_cases": sum(1 for item in evaluations if item.violations),
         "unmet_expectation_cases": sum(

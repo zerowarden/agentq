@@ -37,6 +37,8 @@ from agentq.core import ContractError
 from agentq.inspection.contracts import DecisionDelivered
 from agentq.inspection.decision import DecisionConfig
 
+from .annotations import labels_from_wire
+from .budgets import BUDGET_MODES
 from .build_fixtures import (
     PROJECT,
     SUITES_DIR,
@@ -79,11 +81,11 @@ from .importer import (
     load_case_files,
     load_rows,
     write_cases,
+    write_labels,
     write_splits,
 )
 from .judgments import JudgmentDraft, load_draft, load_draft_directory
 from .matrix import (
-    PRIMARY_BUDGET,
     freeze_matrix,
     holdout_report,
     load_frozen_manifest,
@@ -192,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="artifact store root (default: <repo>/.agentq-eval)",
     )
+    capture.add_argument("--labels-dir", type=Path, help="independent benchmark label sidecars")
     imported = subparsers.add_parser(
         "import-rows",
         help="author case records and splits from pinned external rows",
@@ -211,6 +214,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT / "evals" / "splits",
         help="directory for one generated split assignment file per suite",
     )
+    imported.add_argument("--labels-dir", type=Path, default=None)
+    imported.add_argument("--revision", default="c2855792b006af41c67202d33883fb9d46362853")
+    imported.add_argument("--families", type=Path, help="canonical repository/fork alias map")
     fetch = subparsers.add_parser(
         "fetch-checkouts",
         help="clone pinned external checkouts at their exact commits",
@@ -248,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--splits",
         type=Path,
         default=None,
-        help="split assignments JSON; unlisted cases count as development",
+        help="explicit split assignments JSON; unlisted cases are rejected",
     )
     tune.add_argument(
         "--profile",
@@ -289,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--splits",
         type=Path,
         default=None,
-        help="split assignments JSON; unlisted cases count as development",
+        help="explicit split assignments JSON; unlisted cases are rejected",
     )
     compare.add_argument(
         "--profile",
@@ -336,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--splits",
         type=Path,
         default=None,
-        help="split assignments JSON; unlisted cases count as development",
+        help="explicit split assignments JSON; unlisted cases are rejected",
     )
     matrix.add_argument(
         "--scoring",
@@ -414,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="artifact store root (default: <repo>/.agentq-eval)",
     )
+    for command in (tune, compare, matrix):
+        command.add_argument("--budget-mode", choices=BUDGET_MODES, default="absolute")
     return parser
 
 
@@ -459,10 +467,13 @@ def _suite_inputs(
 ) -> tuple[CaptureStore, tuple[SuiteLock, ...], SplitAssignments]:
     """The store, requested suite locks, and split assignments for one command."""
     store = _store(args)
-    splits = (
-        load_splits(args.splits) if args.splits is not None else SplitAssignments({})
-    )
+    if args.splits is None:
+        raise ContractError("experiments require explicit --splits assignments")
+    splits = load_splits(args.splits)
     locks = tuple(store.read_lock(path) for path in args.suite)
+    violations = validate_split_groups(store, locks, splits)
+    if violations:
+        raise ContractError("; ".join(item.describe() for item in violations))
     return store, locks, splits
 
 
@@ -470,13 +481,14 @@ def _split_cases(
     store: CaptureStore,
     locks: tuple[SuiteLock, ...],
     splits: SplitAssignments,
+    budget_mode: str = "absolute",
 ) -> tuple[tuple[TuningCase, ...], tuple[TuningCase, ...]]:
     """Judged development and validation cases for the given locks."""
     development = load_tuning_cases(
-        store, tuple(select_split(lock, splits, DEVELOPMENT) for lock in locks)
+        store, tuple(select_split(lock, splits, DEVELOPMENT) for lock in locks), budget_mode=budget_mode
     )
     validation = load_tuning_cases(
-        store, tuple(select_split(lock, splits, VALIDATION) for lock in locks)
+        store, tuple(select_split(lock, splits, VALIDATION) for lock in locks), budget_mode=budget_mode
     )
     return development, validation
 
@@ -486,7 +498,7 @@ def _experiment_cases(
 ) -> tuple[CaptureStore, tuple[TuningCase, ...], tuple[TuningCase, ...]]:
     """Judged development and validation cases for the requested suites."""
     store, locks, splits = _suite_inputs(args)
-    development, validation = _split_cases(store, locks, splits)
+    development, validation = _split_cases(store, locks, splits, args.budget_mode)
     return store, development, validation
 
 
@@ -608,6 +620,8 @@ def _catalog(args: argparse.Namespace) -> int:
 
 def _capture(args: argparse.Namespace) -> int:
     store = _store(args)
+    if args.labels_dir is not None and args.judgments_dir is not None:
+        raise ContractError("provide either --labels-dir or --judgments-dir")
     if args.cases_dir is not None:
         if args.case is not None:
             raise ContractError("pass either --case or --cases-dir, not both")
@@ -626,11 +640,15 @@ def _capture(args: argparse.Namespace) -> int:
             )
         drafts = (
             load_draft_directory(judgments_dir)
-            if judgments_dir.is_dir()
+            if args.labels_dir is None and judgments_dir.is_dir()
             else {}
         )
         report = capture_suite_cases(
-            suite, args.checkout, store, drafts=drafts
+            suite, args.checkout, store, drafts=drafts,
+            labels=(None if args.labels_dir is None else {
+                path.stem: labels_from_wire(read_json_file(path, what="benchmark labels"))
+                for path in sorted(args.labels_dir.glob("*.json"))
+            }),
         )
     else:
         if args.case is None:
@@ -674,7 +692,10 @@ def _capture(args: argparse.Namespace) -> int:
 
 def _import_rows(args: argparse.Namespace) -> int:
     rows = load_rows(args.rows)
-    report = import_rows(rows)
+    families = None if args.families is None else read_json_file(args.families, what="repository families")
+    report = import_rows(rows, revision=args.revision, families=families)
+    labels_dir = args.labels_dir or args.cases_dir.parent / "labels" / "context-selection"
+    write_labels(report.labels, labels_dir)
     accepted = {
         SOURCE_CONFORMANCE: report.source_conformance,
         CONTEXT_SELECTION: report.context_selection,
@@ -700,6 +721,7 @@ def _import_rows(args: argparse.Namespace) -> int:
         )
     summary = {
         "rows": len(rows),
+        "labels_dir": str(labels_dir),
         "accepted": {
             kind: len(accepted[kind]) for kind in SUITE_KINDS
         },
@@ -760,6 +782,9 @@ def _evaluate(args: argparse.Namespace) -> int:
 
 
 def _tune_scoring(args: argparse.Namespace) -> int:
+    from .instruments import check_instruments
+
+    instruments = check_instruments()
     store, cases, validation_cases = _experiment_cases(args)
     if not cases:
         raise ContractError("tuning suites carry no judged development cases")
@@ -802,6 +827,7 @@ def _tune_scoring(args: argparse.Namespace) -> int:
         }
     report = {
         "schema": "agentq.eval.scoring-tuning/v1",
+        "instrument_checks": instruments,
         "tuning_split": DEVELOPMENT,
         "suites": [str(path) for path in args.suite],
         "development_cases": [case.case_id for case in cases],
@@ -937,10 +963,10 @@ def _matrix(args: argparse.Namespace) -> int:
         else None
     )
     cells = matrix_cells(base, tuned, challenger)
-    development, validation = _split_cases(store, locks, splits)
+    development, validation = _split_cases(store, locks, splits, args.budget_mode)
     if not development:
         raise ContractError("the matrix has no judged development cases")
-    report = matrix_report(cells, base, development, validation)
+    report = matrix_report(cells, base, development, validation, budget_mode=args.budget_mode)
     report_path = _write_report(
         args.report
         if args.report is not None
@@ -976,10 +1002,10 @@ def _matrix(args: argparse.Namespace) -> int:
         "validation_cases": report["validation"]["cases"],
         "chosen": report["chosen"],
         "development_primary": [
-            item for item in development_summary if item["budget"] == PRIMARY_BUDGET
+            item for item in development_summary if item["budget"] == report["primary_budget"]
         ],
         "validation_primary": [
-            item for item in validation_summary if item["budget"] == PRIMARY_BUDGET
+            item for item in validation_summary if item["budget"] == report["primary_budget"]
         ],
         "failures": report["failures"],
         "frozen": frozen,
@@ -1023,14 +1049,14 @@ def _holdout(args: argparse.Namespace) -> int:
         "summary": [
             item
             for item in report["summary"]
-            if item["budget"] == PRIMARY_BUDGET
+            if item["budget"] == manifest.primary_budget
         ],
         "grouped": report["grouped"],
         "promotion": report["promotion"],
         "undelivered_facets": report["undelivered_facets"],
     }
     _print_json(summary)
-    return 0
+    return 0 if report["promotion"]["promoted"] else VIOLATION_EXIT
 
 
 def _smoke(args: argparse.Namespace) -> int:
@@ -1166,6 +1192,8 @@ def _case_report(evaluation: CaseEvaluation) -> dict[str, object]:
         "judged_fraction_of_delivery": evaluation.judged_fraction_of_delivery,
         "unjudged_fraction_of_delivery": evaluation.unjudged_fraction_of_delivery,
         "final_output_tokens": evaluation.final_output_tokens,
+        "objective": evaluation.objective,
+        "annotated_context_coverage": evaluation.annotation.to_wire(),
         "final_output_token_reason": evaluation.token_reason,
     }
 

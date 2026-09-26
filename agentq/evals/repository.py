@@ -38,12 +38,12 @@ class RepositoryError(RuntimeError):
     """The checkout cannot be read as a Git repository."""
 
 
-def run_git(root: Path, *args: str, timeout: int = 30) -> str:
+def run_git(root: Path, *args: str, timeout: int = 30, env: dict[str, str] | None = None) -> str:
     """Run one git command in a checkout; failure is a typed repository error."""
     if not root.is_dir():
         raise RepositoryError(f"checkout is missing: {root}")
     try:
-        result = run_cmd(["git", *args], cwd=root, timeout=timeout)
+        result = run_cmd(["git", *args], cwd=root, timeout=timeout, env=env)
     except (AgentQError, OSError) as exc:
         raise RepositoryError(f"git could not run in {root}: {exc}") from exc
     if result.returncode != 0:

@@ -201,7 +201,7 @@ class SplitTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 load_splits(path)
 
-    def test_select_split_defaults_unlisted_cases_to_development(self) -> None:
+    def test_select_split_rejects_unlisted_cases(self) -> None:
         lock = SuiteLock(
             suite_id="suite",
             cases=(
@@ -211,6 +211,9 @@ class SplitTests(unittest.TestCase):
             ),
         )
         splits = SplitAssignments({"a": HOLDOUT, "b": VALIDATION})
+        with self.assertRaisesRegex(ContractError, "missing explicit"):
+            select_split(lock, splits, DEVELOPMENT)
+        splits = SplitAssignments({"a": HOLDOUT, "b": VALIDATION, "c": DEVELOPMENT})
         self.assertEqual(
             [case.case_id for case in select_split(lock, splits, DEVELOPMENT).cases],
             ["c"],

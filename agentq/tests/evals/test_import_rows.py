@@ -69,6 +69,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "patch": PATCH_TEXT,
     }
     row.update(overrides)
+    row.setdefault("original_inst_id", row["instance_id"])
     return row
 
 
@@ -130,7 +131,7 @@ class AuthoringTests(unittest.TestCase):
         )
         self.assertEqual(case.target_origin, "supplied")
         self.assertEqual(case.judgment_basis, "target_intent")
-        self.assertEqual(case.split_group, "source-conformance:project")
+        self.assertEqual(case.split_group, "example/project")
         target = case.request.target
         assert isinstance(target, RangeTarget)
         self.assertEqual(target.path, "pkg/mod.py")
@@ -144,7 +145,7 @@ class AuthoringTests(unittest.TestCase):
         )
         self.assertEqual(case.target_origin, "derived")
         self.assertEqual(case.judgment_basis, "context_selection")
-        self.assertEqual(case.split_group, "context-selection:project")
+        self.assertEqual(case.split_group, "example/project")
         self.assertEqual(case.request.intent, Intent.UNDERSTAND)
         target = case.request.target
         assert isinstance(target, SymbolTarget)
@@ -239,7 +240,7 @@ class AuthoringTests(unittest.TestCase):
         self.assertEqual(len(report.source_conformance), 2)
         self.assertEqual(len(report.context_selection), 2)
         reasons = {item.reason for item in report.excluded}
-        self.assertIn("duplicate case id in source-conformance sample", reasons)
+        self.assertIn("duplicate original task identity", reasons)
         self.assertIn("missing or invalid instance_id", reasons)
 
     def test_write_cases_refuses_to_replace_a_changed_record(self) -> None:
@@ -292,17 +293,18 @@ class SplitTests(unittest.TestCase):
             path = write_splits(cases, Path(temp) / "splits.json")
             self.assertTrue(path.is_file())
 
-    def test_the_two_suites_never_share_a_split_group(self) -> None:
+    def test_the_same_task_keeps_its_group_across_tracks(self) -> None:
         adapted = _adapted(_row())
         conformance = adapted.source_conformance
         selection = adapted.context_selection
         assert conformance is not None and selection is not None
-        self.assertNotEqual(conformance.split_group, selection.split_group)
+        self.assertEqual(conformance.split_group, selection.split_group)
+        self.assertNotEqual(conformance.track, selection.track)
         self.assertEqual(
-            conformance.split_group, f"{SOURCE_CONFORMANCE}:project"
+            conformance.split_group, "example/project"
         )
         self.assertEqual(
-            selection.split_group, f"{CONTEXT_SELECTION}:project"
+            selection.split_group, "example/project"
         )
 
     def test_malformed_splits_record_is_reported(self) -> None:

@@ -31,6 +31,8 @@ from agentq.inspection.contracts import (
     RequirementStatus,
 )
 
+from .annotations import TRACKS, AnnotationCoverage, BenchmarkLabels
+
 CAPTURE_SCHEMA = "agentq.eval.capture/v1"
 LOCK_SCHEMA = "agentq.eval.suite-lock/v1"
 CONFIG_SCHEMA = "agentq.eval.decision-config/v1"
@@ -140,10 +142,14 @@ class LockedCase:
     capture_id: str
     judgment_id: str | None = None
     delivery: DeliveryBudget | None = None
+    repository_family: str = ""
+    original_inst_id: str = ""
 
     def __post_init__(self) -> None:
         require_str(self.case_id, "locked case id")
         require_str(self.capture_id, "locked case capture id")
+        require_str(self.repository_family, "repository family", allow_empty=True)
+        require_str(self.original_inst_id, "original task identity", allow_empty=True)
         if self.judgment_id is not None:
             require_str(self.judgment_id, "locked case judgment id")
         if self.delivery is not None and not isinstance(
@@ -159,10 +165,13 @@ class SuiteLock:
     suite_id: str
     cases: tuple[LockedCase, ...]
     schema: str = LOCK_SCHEMA
+    track: str = "conformance"
 
     def __post_init__(self) -> None:
         require_str(self.suite_id, "suite lock id")
         require_str(self.schema, "suite lock schema")
+        if self.track not in TRACKS:
+            raise ContractError(f"unsupported evaluation track: {self.track!r}")
         if not is_instance_of(self.cases, tuple) or not all(
             is_instance_of(item, LockedCase) for item in self.cases
         ):
@@ -184,6 +193,15 @@ def validate_suite_membership(locks: Sequence[SuiteLock]) -> None:
     require_unique_strings(
         tuple(case.case_id for lock in locks for case in lock.cases), "case ids"
     )
+    if len({lock.track for lock in locks}) > 1:
+        raise ContractError("evaluation tracks must be reported separately")
+    identities = [
+        (case.repository_family, case.original_inst_id)
+        for lock in locks for case in lock.cases
+        if case.repository_family and case.original_inst_id
+    ]
+    if len(identities) != len(set(identities)):
+        raise ContractError("duplicate original task identity in experiment")
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +268,15 @@ class CaseSpec:
     capture_id: str | None = None
     judgment_id: str | None = None
     schema: str = CASE_SCHEMA
+    repository_family: str = ""
+    original_inst_id: str = ""
+    track: str = "conformance"
 
     def __post_init__(self) -> None:
         require_str(self.case_id, "case spec id")
         require_str(self.schema, "case spec schema")
+        if self.track not in TRACKS:
+            raise ContractError(f"unsupported evaluation track: {self.track!r}")
         if not isinstance(self.source, CaseSource):
             raise ContractError("case spec requires a CaseSource")
         if not isinstance(self.request, InspectionRequest):
@@ -261,6 +284,8 @@ class CaseSpec:
         require_str(self.target_origin, "case spec target origin")
         require_str(self.judgment_basis, "case spec judgment basis")
         require_str(self.split_group, "case spec split group", allow_empty=True)
+        require_str(self.repository_family, "repository family", allow_empty=True)
+        require_str(self.original_inst_id, "original task identity", allow_empty=True)
         if self.capture_id is not None:
             require_str(self.capture_id, "case spec capture id")
         if self.judgment_id is not None:
@@ -473,8 +498,11 @@ class JudgmentSet:
     irrelevant_variant_ids: tuple[str, ...] = ()
     expected_outcomes: tuple[ExpectedOutcome, ...] = ()
     schema: str = JUDGMENT_SCHEMA
+    benchmark: BenchmarkLabels | None = None
 
     def __post_init__(self) -> None:
+        if self.benchmark is not None and not isinstance(self.benchmark, BenchmarkLabels):
+            raise ContractError("benchmark labels must be typed annotations")
         for name, value in (
             ("case id", self.case_id),
             ("capture id", self.capture_id),
@@ -500,6 +528,10 @@ class JudgmentSet:
             raise ContractError(
                 "judgment set irrelevant variants must be a tuple of strings"
             )
+        self._validate_witnesses()
+
+    def _validate_witnesses(self) -> None:
+        """Facet expressions must refer to distinct, declared witnesses."""
         witness_ids = [item.witness_id for item in self.witnesses]
         if len(set(witness_ids)) != len(witness_ids):
             raise ContractError("judgment set has duplicate witness ids")
@@ -554,8 +586,13 @@ def delivery_guardrail_violations(
     unjudged_fraction: float | None,
     baseline_irrelevant_chars: int | None,
     baseline_unjudged_fraction: float | None,
+    render_chars: int = 0,
+    output_tokens: int = 0,
+    baseline_render_chars: int | None = None,
+    baseline_output_tokens: int | None = None,
+    max_cost_increase_percent: int = 10,
 ) -> tuple[str, ...]:
-    """Known-irrelevant volume and the unjudged share must not exceed baseline."""
+    """Delivery noise cannot grow; actual output cost has a declared margin."""
     violations: list[str] = []
     if (
         baseline_irrelevant_chars is not None
@@ -568,6 +605,14 @@ def delivery_guardrail_violations(
         and unjudged_fraction > baseline_unjudged_fraction
     ):
         violations.append("unjudged_delivery_regressed")
+    for name, value, reference in (
+        ("character_cost_regressed", render_chars, baseline_render_chars),
+        ("token_cost_regressed", output_tokens, baseline_output_tokens),
+    ):
+        if reference is not None and value * 100 > reference * (
+            100 + max_cost_increase_percent
+        ):
+            violations.append(name)
     return tuple(violations)
 
 
@@ -610,6 +655,8 @@ class CaseEvaluation:
     judged_source_chars_delivered: int = 0
     known_irrelevant_variants_delivered: int = 0
     known_irrelevant_source_chars_delivered: int = 0
+    annotation: AnnotationCoverage = AnnotationCoverage()
+    objective: str = "facet_coverage"
 
     def __post_init__(self) -> None:
         for name, value in (

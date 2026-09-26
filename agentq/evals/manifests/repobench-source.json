@@ -1,0 +1,7 @@
+{
+  "dataset": "tianyang/repobench_python_v1.1",
+  "revision": "8a7cf0c8942cc1aa066bf261839650ac55a2ff79",
+  "upstream_split": "cross_file_first",
+  "files": ["data/cross_file_first-00000-of-00002-baebda7f3a6e980a.parquet"],
+  "purpose": "completion-transfer; first packaged shard, sampled independently of selection outcomes"
+}

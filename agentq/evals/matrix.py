@@ -19,6 +19,7 @@ that changes any of them is a separate intervention and is rejected here.
 from __future__ import annotations
 
 import hashlib
+import random
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -31,17 +32,22 @@ from agentq.inspection.decision import DecisionConfig
 from agentq.inspection.scoring import ScoringProfile
 from agentq.inspection.selection import SelectionProfile
 
+from .annotations import OBJECTIVES, TRACKS, AnnotationCoverage, sum_coverage
+from .budgets import BOUNDARY_BUDGET, BUDGET_MODES, effective_config
 from .codec import config_digest, decode_config, encode_config, encode_lock
 from .experiments import (
     HOLDOUT,
     SplitAssignments,
     TuningCase,
+    load_splits,
     load_tuning_cases,
     select_split,
     undelivered_facets,
+    validate_case_objectives,
 )
 from .fingerprint import decision_engine_digest
 from .importer import write_new_or_equal
+from .instruments import check_instruments
 from .metrics import DEFAULT_METRIC_CONFIG, CaseEvaluation, metric_fingerprint
 from .models import (
     FixtureSnapshot,
@@ -53,9 +59,10 @@ from .models import (
     ratio,
     validate_suite_membership,
 )
-from .replay import load_config, with_delivery
+from .replay import load_config
 from .runner import evaluate_capture
 from .store import CaptureStore
+from .tokenization import TOKENIZER_ID
 from .wire.json import (
     as_list,
     as_mapping,
@@ -68,7 +75,7 @@ from .wire.json import (
 
 MATRIX_SCHEMA = "agentq.eval.matrix/v1"
 HOLDOUT_SCHEMA = "agentq.eval.holdout-matrix/v1"
-FROZEN_SCHEMA = "agentq.eval.frozen-matrix/v2"
+FROZEN_SCHEMA = "agentq.eval.frozen-matrix/v3"
 
 BUDGETS = (6000, 12000, 24000)
 PRIMARY_BUDGET = 12000
@@ -88,18 +95,31 @@ class PromotionRule:
     rule: str = "no_regression"
     version: str = "promotion-v1"
     margin: int = 0
+    max_cost_increase_percent: int = 10
+    min_holdout_cases: int = 20
+    min_holdout_groups: int = 3
 
     def __post_init__(self) -> None:
         if self.rule != "no_regression":
             raise ContractError(f"unsupported promotion rule: {self.rule!r}")
         if self.margin < 0:
             raise ContractError("promotion margin must be >= 0")
+        for value in (
+            self.max_cost_increase_percent,
+            self.min_holdout_cases,
+            self.min_holdout_groups,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ContractError("promotion limits must be nonnegative integers")
 
     def to_wire(self) -> dict[str, object]:
         return {
             "rule": self.rule,
             "version": self.version,
             "margin": self.margin,
+            "max_cost_increase_percent": self.max_cost_increase_percent,
+            "min_holdout_cases": self.min_holdout_cases,
+            "min_holdout_groups": self.min_holdout_groups,
         }
 
 
@@ -157,9 +177,14 @@ class MatrixCaseResult:
     unjudged_source_chars_delivered: int = 0
     delivered_source_chars: int = 0
     final_output_tokens: int = 0
+    annotation: AnnotationCoverage = AnnotationCoverage()
+    objective: str = "facet_coverage"
 
     def to_wire(self) -> dict[str, object]:
         return {
+            "objective": self.objective,
+            "annotated_context_coverage": self.annotation.to_wire(),
+            "tokenizer": TOKENIZER_ID,
             "case_id": self.case_id,
             "group": self.group,
             "cell": self.cell,
@@ -246,6 +271,34 @@ class FrozenManifest:
     suites: Mapping[str, Mapping[str, str]]
     development: object
     validation: object
+    budget_mode: str = "absolute"
+    track: str = "conformance"
+    objective: str = "facet_coverage"
+
+    def __post_init__(self) -> None:
+        if (
+            self.budget_mode not in BUDGET_MODES
+            or self.track not in TRACKS
+            or self.objective not in OBJECTIVES
+        ):
+            raise ContractError(
+                "unsupported frozen evaluation track, objective, or budget mode"
+            )
+        if (
+            not self.budgets
+            or len(set(self.budgets)) != len(self.budgets)
+            or self.primary_budget not in self.budgets
+        ):
+            raise ContractError(
+                "frozen budgets must be distinct and include the primary budget"
+            )
+        if self.budget_mode == "boundary":
+            if self.budgets != (BOUNDARY_BUDGET,):
+                raise ContractError(
+                    "boundary experiments have no nominal absolute budget"
+                )
+        elif any(budget <= 0 for budget in self.budgets):
+            raise ContractError("absolute experiment budgets must be positive")
 
 
 def config_document(config: DecisionConfig) -> dict[str, object]:
@@ -339,8 +392,10 @@ def matrix_config(
     )
 
 
-def case_group(capture: ReplayCapture) -> str:
-    """The repository or fixture a case belongs to, for grouped uncertainty."""
+def case_group(capture: ReplayCapture, repository_family: str = "") -> str:
+    """Prefer declared fork lineage; legacy fixtures fall back to snapshot identity."""
+    if repository_family:
+        return repository_family
     snapshot = capture.snapshot
     if isinstance(snapshot, RepositorySnapshot):
         return f"repository:{snapshot.repo_id}"
@@ -357,9 +412,15 @@ def validate_split_groups(
     for lock in locks:
         for case in lock.cases:
             capture = store.read_capture(case.capture_id)
-            by_group[case_group(capture)][splits.split_of(case.case_id)].append(
+            by_group[case_group(capture, case.repository_family)][splits.split_of(case.case_id)].append(
                 case.case_id
             )
+    return _split_violations(by_group)
+
+
+def _split_violations(
+    by_group: Mapping[str, Mapping[str, Sequence[str]]],
+) -> tuple[SplitViolation, ...]:
     violations: list[SplitViolation] = []
     for group in sorted(by_group):
         members = by_group[group]
@@ -386,15 +447,18 @@ def evaluate_matrix(
     budgets: Sequence[int] = BUDGETS,
     *,
     base: DecisionConfig | None = None,
+    budget_mode: str = "absolute",
 ) -> tuple[MatrixCaseResult, ...]:
     """Replay every case under every cell and ceiling on the fixed captures."""
     base_config = DecisionConfig() if base is None else base
+    validate_case_objectives(cases)
+    actual_budgets = (BOUNDARY_BUDGET,) if budget_mode == "boundary" else budgets
     results: list[MatrixCaseResult] = []
     for cell in cells:
-        for budget in budgets:
-            config = matrix_config(base_config, cell, budget)
+        for budget in actual_budgets:
+            config = matrix_config(base_config, cell, budget or base_config.delivery.max_chars)
             for case in cases:
-                effective = with_delivery(config, case.delivery)
+                effective = effective_config(config, case.delivery, budget_mode)
                 outcome, evaluation = evaluate_capture(
                     case.capture, case.judgments, effective
                 )
@@ -415,7 +479,7 @@ def _case_result(
     failed = isinstance(outcome, DecisionFailure)
     return MatrixCaseResult(
         case_id=case.case_id,
-        group=case_group(case.capture),
+        group=case_group(case.capture, case.repository_family),
         cell=cell.label,
         budget=budget,
         capture_id=evaluation.capture_id,
@@ -449,6 +513,8 @@ def _case_result(
         ),
         delivered_source_chars=evaluation.delivered_source_chars,
         final_output_tokens=evaluation.final_output_tokens or 0,
+        annotation=evaluation.annotation,
+        objective=evaluation.objective,
     )
 
 
@@ -478,6 +544,10 @@ def _summary_row(
     failed = [item for item in members if item.outcome == "failed"]
     return {
         "cell": cell,
+        "objective": members[0].objective,
+        "annotated_context_coverage": sum_coverage(item.annotation for item in members).to_wire(),
+        "tokenizer": TOKENIZER_ID,
+        "effective_ceilings": {item.case_id: item.ceiling_chars for item in members},
         "budget": budget,
         "cases": len(members),
         "delivered": len(members) - len(failed),
@@ -535,6 +605,11 @@ def _eligible(row: Mapping[str, object]) -> bool:
 
 
 def _objective(row: Mapping[str, object]) -> tuple[int, ...]:
+    name = row.get("objective", "facet_coverage")
+    if name in ("task_context_coverage", "completion_dependency"):
+        coverage = row["annotated_context_coverage"]
+        units = ("lines", "files") if name == "task_context_coverage" else ("documents",)
+        return tuple(int(coverage[unit]["delivered"]) for unit in units)
     return (
         int(row["critical_delivered"]),
         int(row["all_critical_present_cases"]),
@@ -560,7 +635,9 @@ def _primary_row(
 
 
 def _regresses_on_guardrails(
-    row: Mapping[str, object], baseline: Mapping[str, object] | None
+    row: Mapping[str, object],
+    baseline: Mapping[str, object] | None,
+    max_cost_increase_percent: int = 10,
 ) -> bool:
     """Known-irrelevant delivery and the unjudged share may not grow."""
     if baseline is None:
@@ -581,6 +658,11 @@ def _regresses_on_guardrails(
                 baseline.get("known_irrelevant_source_chars_delivered", 0)
             ),
             baseline_unjudged_fraction=baseline_fraction,
+            render_chars=int(row.get("render_chars_total", 0)),
+            output_tokens=int(row.get("final_output_tokens", 0)),
+            baseline_render_chars=int(baseline.get("render_chars_total", 0)),
+            baseline_output_tokens=int(baseline.get("final_output_tokens", 0)),
+            max_cost_increase_percent=max_cost_increase_percent,
         )
     )
 
@@ -588,10 +670,13 @@ def _regresses_on_guardrails(
 def _regresses_on_any_budget(
     rows: Sequence[Mapping[str, object]],
     baseline: Sequence[Mapping[str, object]],
+    max_cost_increase_percent: int = 10,
 ) -> bool:
     baseline_by_budget = {row["budget"]: row for row in baseline}
     return any(
-        _regresses_on_guardrails(row, baseline_by_budget.get(row["budget"]))
+        _regresses_on_guardrails(
+            row, baseline_by_budget.get(row["budget"]), max_cost_increase_percent
+        )
         for row in rows
     )
 
@@ -600,6 +685,7 @@ def eligible_cells(
     development: Sequence[Mapping[str, object]],
     validation: Sequence[Mapping[str, object]] = (),
     order: Sequence[str] = CELL_ORDER,
+    *, primary_budget: int = PRIMARY_BUDGET,
 ) -> tuple[str, ...]:
     """Cells clean on development and validation at every declared budget.
 
@@ -617,9 +703,9 @@ def eligible_cells(
     for label in order:
         dev_rows = dev.get(label, ())
         val_rows = val.get(label, ())
-        if _primary_row(dev_rows) is None:
+        if _primary_row(dev_rows, primary_budget=primary_budget) is None:
             continue
-        if validation and _primary_row(val_rows) is None:
+        if validation and _primary_row(val_rows, primary_budget=primary_budget) is None:
             continue
         if not all(_eligible(row) for row in (*dev_rows, *val_rows)):
             continue
@@ -637,14 +723,15 @@ def _nomination_key(
     val: Mapping[str, tuple[Mapping[str, object], ...]],
     *,
     with_validation: bool,
+    primary_budget: int = PRIMARY_BUDGET,
 ) -> tuple[int, ...]:
     """Validation first, then the development fit; missing rows never reach here."""
-    dev_primary = _primary_row(dev[label])
+    dev_primary = _primary_row(dev[label], primary_budget=primary_budget)
     assert dev_primary is not None
     key = _objective(dev_primary)
     if not with_validation:
         return key
-    val_primary = _primary_row(val[label])
+    val_primary = _primary_row(val[label], primary_budget=primary_budget)
     assert val_primary is not None
     return _objective(val_primary) + key
 
@@ -653,6 +740,7 @@ def nominate_cell(
     development: Sequence[Mapping[str, object]],
     validation: Sequence[Mapping[str, object]] = (),
     order: Sequence[str] = CELL_ORDER,
+    *, primary_budget: int = PRIMARY_BUDGET,
 ) -> str:
     """Nominate one eligible cell from validation, after fitting on development.
 
@@ -663,14 +751,14 @@ def nominate_cell(
     """
     dev = _rows_by_cell(development)
     val = _rows_by_cell(validation)
-    eligible = eligible_cells(development, validation, order)
+    eligible = eligible_cells(development, validation, order, primary_budget=primary_budget)
     if not eligible:
         raise ContractError("no eligible matrix cell at the declared budgets")
     with_validation = bool(validation)
     best = eligible[0]
-    best_key = _nomination_key(best, dev, val, with_validation=with_validation)
+    best_key = _nomination_key(best, dev, val, with_validation=with_validation, primary_budget=primary_budget)
     for label in eligible[1:]:
-        key = _nomination_key(label, dev, val, with_validation=with_validation)
+        key = _nomination_key(label, dev, val, with_validation=with_validation, primary_budget=primary_budget)
         if key > best_key:
             best, best_key = label, key
     return best
@@ -710,6 +798,10 @@ def paired_deltas(
                 "group": item.group,
                 "budget": item.budget,
                 "capture_id": item.capture_id,
+                "objective": item.objective,
+                "coverage_delta": _coverage_fraction(item) - _coverage_fraction(reference),
+                "baseline_annotation": reference.annotation.to_wire(),
+                "challenger_annotation": item.annotation.to_wire(),
                 "critical_delta": (
                     item.critical_delivered - reference.critical_delivered
                 ),
@@ -729,6 +821,40 @@ def paired_deltas(
     return rows
 
 
+def _coverage_fraction(item: MatrixCaseResult) -> float:
+    if item.objective == "task_context_coverage":
+        coverage = item.annotation.lines
+    elif item.objective == "completion_dependency":
+        coverage = item.annotation.documents
+    else:
+        return ratio(item.critical_delivered, item.critical_total) or 0.0
+    return ratio(coverage.delivered, coverage.total) or 0.0
+
+
+def grouped_uncertainty(
+    rows: Sequence[Mapping[str, object]], primary_budget: int
+) -> dict[str, object]:
+    """Deterministic cluster bootstrap; repository groups are the sampling units."""
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if row["budget"] == primary_budget:
+            grouped[str(row["group"])].append(float(row["coverage_delta"]))
+    means = [sum(grouped[group]) / len(grouped[group]) for group in sorted(grouped)]
+    if not means:
+        return {"groups": 0, "mean": None, "interval_95": None}
+    generator = random.Random(20260926)
+    samples = sorted(
+        sum(generator.choices(means, k=len(means))) / len(means) for _ in range(2000)
+    )
+    return {
+        "groups": len(means),
+        "cases": sum(map(len, grouped.values())),
+        "mean": sum(means) / len(means),
+        "interval_95": None if len(means) < 3 else [samples[50], samples[1949]],
+        "method": "2000 repository-cluster bootstrap samples; equal repository weights; descriptive, not a generalization guarantee",
+    }
+
+
 def _bool_delta(left: bool | None, right: bool | None) -> int | None:
     if left is None or right is None:
         return None
@@ -737,6 +863,7 @@ def _bool_delta(left: bool | None, right: bool | None) -> int | None:
 
 def grouped_deltas(
     rows: Sequence[Mapping[str, object]],
+    *, primary_budget: int = PRIMARY_BUDGET,
 ) -> list[dict[str, object]]:
     """Repository-grouped paired differences; each case counts once."""
     by_group: dict[str, list[Mapping[str, object]]] = defaultdict(list)
@@ -750,9 +877,9 @@ def grouped_deltas(
         for row in members:
             per_case[str(row["case_id"])][row["budget"]] = row
         primary = [
-            per_case[case_id][PRIMARY_BUDGET]
+            per_case[case_id][primary_budget]
             for case_id in case_ids
-            if PRIMARY_BUDGET in per_case[case_id]
+            if primary_budget in per_case[case_id]
         ]
         deltas = [int(row["critical_delta"]) for row in primary]
         improved = sum(1 for row in primary if (row["all_critical_delta"] or 0) > 0)
@@ -771,8 +898,9 @@ def grouped_deltas(
                 "group": group,
                 "cases": len(case_ids),
                 "case_ids": case_ids,
-                "primary_budget": PRIMARY_BUDGET,
+                "primary_budget": primary_budget,
                 "critical_delta_mean": (sum(deltas) / len(deltas) if deltas else None),
+                "coverage_delta_mean": sum(float(row.get("coverage_delta", 0)) for row in primary) / len(primary) if primary else None,
                 "critical_delta_min": min(deltas) if deltas else None,
                 "critical_delta_max": max(deltas) if deltas else None,
                 "all_critical_improved": improved,
@@ -796,16 +924,20 @@ def matrix_report(
     validation: Sequence[TuningCase] = (),
     *,
     budgets: Sequence[int] = BUDGETS,
+    budget_mode: str = "absolute",
 ) -> dict[str, object]:
     """The complete deterministic development/validation matrix record."""
-    development_results = evaluate_matrix(development, cells, budgets, base=base)
+    validate_case_objectives((*development, *validation))
+    primary = BOUNDARY_BUDGET if budget_mode == "boundary" else PRIMARY_BUDGET
+    budgets = (BOUNDARY_BUDGET,) if budget_mode == "boundary" else budgets
+    development_results = evaluate_matrix(development, cells, budgets, base=base, budget_mode=budget_mode)
     validation_results = (
-        evaluate_matrix(validation, cells, budgets, base=base) if validation else ()
+        evaluate_matrix(validation, cells, budgets, base=base, budget_mode=budget_mode) if validation else ()
     )
     development_summary = matrix_summary(development_results, budgets)
     validation_summary = matrix_summary(validation_results, budgets)
     order = [cell.label for cell in cells]
-    chosen = nominate_cell(development_summary, validation_summary, order)
+    chosen = nominate_cell(development_summary, validation_summary, order, primary_budget=primary)
     chosen_cell = next(cell for cell in cells if cell.label == chosen)
     frozen = replace(base, scoring=chosen_cell.scoring, selection=chosen_cell.selection)
     development_paired = {
@@ -820,22 +952,29 @@ def matrix_report(
     }
     return {
         "schema": MATRIX_SCHEMA,
+        "engine_digest": decision_engine_digest(),
+        "metric_fingerprint": metric_fingerprint(),
+        "base_config": config_document(base),
+        "instrument_checks": check_instruments(),
+        "budget_mode": budget_mode,
+        "track": development[0].track,
+        "objective": development[0].objective,
         "budgets": list(budgets),
-        "primary_budget": PRIMARY_BUDGET,
+        "primary_budget": primary,
         "fixed": {
             "captures": "suite locks",
             "acquisition": "captured post-stability pools",
             "renderer": base.output_format,
-            "pinned_budgets": "boundary cases keep their locked ceiling",
+            "pinned_budgets": "rejected" if budget_mode == "absolute" else "explicit per-case boundary ceilings",
         },
         "cells": [cell.to_wire() for cell in cells],
         "development": {
             "cases": [case.case_id for case in development],
-            "groups": sorted({case_group(case.capture) for case in development}),
+            "groups": sorted({case_group(case.capture, case.repository_family) for case in development}),
             "summary": development_summary,
             "paired": development_paired,
             "grouped": {
-                label: grouped_deltas(rows)
+                label: grouped_deltas(rows, primary_budget=primary)
                 for label, rows in development_paired.items()
             },
             "undelivered_facets": [
@@ -844,7 +983,7 @@ def matrix_report(
                     "facets": [
                         item.to_wire()
                         for item in undelivered_facets(
-                            development, matrix_config(base, cell, PRIMARY_BUDGET)
+                            tuple(replace(case, budget_mode=budget_mode) for case in development), matrix_config(base, cell, primary or base.delivery.max_chars)
                         )
                     ],
                 }
@@ -853,7 +992,7 @@ def matrix_report(
         },
         "validation": {
             "cases": [case.case_id for case in validation],
-            "groups": sorted({case_group(case.capture) for case in validation}),
+            "groups": sorted({case_group(case.capture, case.repository_family) for case in validation}),
             "summary": validation_summary,
             "paired": validation_paired,
         },
@@ -861,7 +1000,7 @@ def matrix_report(
             "label": chosen,
             "retained_baseline": chosen == "baseline",
             "eligible": list(
-                eligible_cells(development_summary, validation_summary, order)
+                eligible_cells(development_summary, validation_summary, order, primary_budget=primary)
             ),
             "config": config_document(frozen),
             "config_digest": config_digest(frozen),
@@ -908,6 +1047,59 @@ def _report_baseline(report: Mapping[str, object]) -> Mapping[str, object]:
     raise ContractError("matrix report carries no baseline cell")
 
 
+def _validate_freeze_membership(
+    locks: Sequence[SuiteLock], splits: SplitAssignments, report: Mapping[str, object]
+) -> None:
+    """Only a fully judged, explicitly partitioned corpus may be frozen."""
+    validate_suite_membership(locks)
+    by_group: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    members: dict[str, set[str]] = defaultdict(set)
+    for lock in locks:
+        if not lock.is_evaluated():
+            raise ContractError("frozen suites require labels for every case")
+        for case in lock.cases:
+            split = splits.split_of(case.case_id)
+            if not case.repository_family or not case.original_inst_id:
+                raise ContractError(
+                    "frozen cases require canonical family and original task identity"
+                )
+            by_group[case.repository_family][split].append(case.case_id)
+            members[split].add(case.case_id)
+    violations = _split_violations(by_group)
+    if violations:
+        raise ContractError("; ".join(item.describe() for item in violations))
+    if not members[HOLDOUT]:
+        raise ContractError("freezing requires declared held-out cases")
+    if {lock.track for lock in locks} != {report["track"]}:
+        raise ContractError("report track differs from its suites")
+    for split in ("development", "validation"):
+        actual = as_list(as_mapping(report[split], split)["cases"], f"{split} cases")
+        if (
+            not members[split]
+            or set(actual) != members[split]
+            or len(actual) != len(set(actual))
+        ):
+            raise ContractError(
+                f"{split} report membership differs from the declared splits"
+            )
+
+
+def _validate_report_identity(
+    report: Mapping[str, object], baseline: DecisionConfig
+) -> None:
+    if (
+        report.get("engine_digest") != decision_engine_digest()
+        or report.get("metric_fingerprint") != metric_fingerprint()
+    ):
+        raise ContractError(
+            "matrix implementations changed before freezing; rerun the matrix"
+        )
+    if config_from_document(report.get("base_config")) != baseline:
+        raise ContractError("matrix baseline configuration changed before freezing")
+    if not _summary_list(report, "validation"):
+        raise ContractError("freezing requires judged validation results")
+
+
 def freeze_matrix(
     locks: Sequence[SuiteLock],
     splits_path: Path,
@@ -924,7 +1116,9 @@ def freeze_matrix(
     manifest is written once and never replaced, so a changed baseline, engine,
     metric, promotion rule, or corpus requires a new manifest path.
     """
-    validate_suite_membership(locks)
+    _validate_report_identity(report, baseline)
+    splits = load_splits(splits_path)
+    _validate_freeze_membership(locks, splits, report)
     chosen = as_mapping(report.get("chosen"), "matrix report.chosen")
     config = config_from_document(chosen.get("config"))
     if config_digest(config) != read_str(chosen.get("config_digest"), "config digest"):
@@ -940,6 +1134,9 @@ def freeze_matrix(
     write_new_or_equal(frozen_profile_path, encode_config(config))
     manifest = {
         "schema": FROZEN_SCHEMA,
+        "budget_mode": report["budget_mode"],
+        "track": report["track"],
+        "objective": report["objective"],
         "chosen_label": read_str(chosen.get("label"), "chosen label"),
         "config": config_document(config),
         "config_digest": config_digest(config),
@@ -994,6 +1191,7 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
             "suites",
             "development",
             "validation",
+            "budget_mode", "track", "objective",
         },
         "frozen matrix manifest",
     )
@@ -1027,11 +1225,11 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
     )
     exact_keys(
         promotion,
-        {"rule", "version", "margin"},
+        {"rule", "version", "margin", "max_cost_increase_percent", "min_holdout_cases", "min_holdout_groups"},
         "frozen matrix manifest promotion",
     )
     budgets = tuple(
-        read_int(item, f"frozen budget {index}", minimum=1)
+        read_int(item, f"frozen budget {index}", minimum=0)
         for index, item in enumerate(
             as_list(mapping.get("budgets"), "frozen matrix manifest budgets")
         )
@@ -1082,12 +1280,15 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
             rule=read_str(promotion.get("rule"), "promotion rule"),
             version=read_str(promotion.get("version"), "promotion version"),
             margin=read_int(promotion.get("margin"), "promotion margin", minimum=0),
+            max_cost_increase_percent=read_int(promotion.get("max_cost_increase_percent"), "cost margin", minimum=0),
+            min_holdout_cases=read_int(promotion.get("min_holdout_cases"), "holdout cases", minimum=0),
+            min_holdout_groups=read_int(promotion.get("min_holdout_groups"), "holdout groups", minimum=0),
         ),
         budgets=budgets,
         primary_budget=read_int(
             mapping.get("primary_budget"),
             "frozen matrix manifest primary budget",
-            minimum=1,
+            minimum=0,
         ),
         splits_path=read_str(splits.get("path"), "frozen matrix manifest splits path"),
         splits_digest=read_str(
@@ -1097,6 +1298,9 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
         suites=suites,
         development=mapping.get("development"),
         validation=mapping.get("validation"),
+        budget_mode=read_str(mapping["budget_mode"], "budget mode"),
+        track=read_str(mapping["track"], "track"),
+        objective=read_str(mapping["objective"], "objective"),
     )
 
 
@@ -1165,6 +1369,8 @@ def validate_holdout(
     _validate_frozen_suites(manifest, locks)
     if splits_digest(splits_path) != manifest.splits_digest:
         raise ContractError("split assignments changed since the matrix was frozen")
+    if load_splits(splits_path) != splits:
+        raise ContractError("supplied split assignments differ from the frozen split file")
     if not any(
         splits.split_of(case.case_id) == HOLDOUT
         for lock in locks
@@ -1192,11 +1398,15 @@ def evaluate_promotion(
             reasons.append(f"{label} has no primary-budget held-out summary")
         if not all(_eligible(row) for row in rows):
             reasons.append(f"{label} is not clean on held-out cases")
-    if _regresses_on_any_budget(nominee, baseline):
+    if _regresses_on_any_budget(nominee, baseline, rule.max_cost_increase_percent):
         reasons.append("nominee delivery guardrails regressed on held-out cases")
     if reasons:
         return False, tuple(reasons)
     assert baseline_primary is not None and nominee_primary is not None
+    if baseline_primary.get("objective", "facet_coverage") != "facet_coverage":
+        if any(value < reference - rule.margin for value, reference in zip(_objective(nominee_primary), _objective(baseline_primary), strict=True)):
+            reasons.append("nominee annotated coverage regressed beyond the margin")
+        return not reasons, tuple(reasons)
     if int(nominee_primary["critical_delivered"]) < int(
         baseline_primary["critical_delivered"]
     ) - rule.margin:
@@ -1232,6 +1442,7 @@ def holdout_report(
     holdout = load_tuning_cases(
         store,
         tuple(select_split(lock, splits, HOLDOUT) for lock in locks),
+        budget_mode=manifest.budget_mode,
     )
     if not holdout:
         raise ContractError("the frozen suites carry no judged held-out cases")
@@ -1251,7 +1462,7 @@ def holdout_report(
         manifest.config.selection,
     )
     results = evaluate_matrix(
-        holdout, (baseline_cell, frozen_cell), manifest.budgets, base=manifest.config
+        holdout, (baseline_cell, frozen_cell), manifest.budgets, base=manifest.config, budget_mode=manifest.budget_mode
     )
     paired = paired_deltas(results, frozen_label)
     summary = matrix_summary(results, manifest.budgets)
@@ -1262,17 +1473,25 @@ def holdout_report(
         rows_by_cell.get(frozen_label, ()),
         primary_budget=manifest.primary_budget,
     )
+    groups = sorted({case_group(case.capture, case.repository_family) for case in holdout})
+    if len(holdout) < manifest.promotion.min_holdout_cases or len(groups) < manifest.promotion.min_holdout_groups:
+        promoted = False
+        promotion_reasons += ("insufficient held-out cases or independent repository groups",)
     return {
         "schema": HOLDOUT_SCHEMA,
+        "budget_mode": manifest.budget_mode,
+        "track": manifest.track,
+        "objective": manifest.objective,
         "chosen_label": manifest.chosen_label,
         "frozen_label": frozen_label,
         "budgets": list(manifest.budgets),
         "primary_budget": manifest.primary_budget,
         "cases": [case.case_id for case in holdout],
-        "groups": sorted({case_group(case.capture) for case in holdout}),
+        "groups": groups,
         "summary": summary,
         "paired": paired,
-        "grouped": grouped_deltas(paired),
+        "grouped": grouped_deltas(paired, primary_budget=manifest.primary_budget),
+        "uncertainty": grouped_uncertainty(paired, manifest.primary_budget),
         "promotion": {
             "rule": manifest.promotion.to_wire(),
             "promoted": promoted,
@@ -1285,7 +1504,7 @@ def holdout_report(
                     item.to_wire()
                     for item in undelivered_facets(
                         holdout,
-                        matrix_config(manifest.config, cell, manifest.primary_budget),
+                        matrix_config(manifest.config, cell, manifest.primary_budget or manifest.config.delivery.max_chars),
                     )
                 ],
             }

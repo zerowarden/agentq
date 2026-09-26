@@ -1,0 +1,41 @@
+{
+  "experiment": "repobench-completion-transfer-v3",
+  "track": "transfer",
+  "objective": "completion_dependency",
+  "source_manifest": "repobench-source.json",
+  "sampling": {
+    "order": "sha256 of input task identity, seed repobench-cohort-v1",
+    "limit": 240,
+    "maximum_cases_per_declared_family": 2,
+    "maximum_preceding_code_chars": 2500,
+    "minimum_candidates": 3,
+    "exclude_previously_inspected_families": true,
+    "fork_lineage": "full owner/repository plus explicitly supplied alias map; unknown lineage is not certified independent"
+  },
+  "splits": "stable sha256 family assignment; 60% development, 20% validation, 20% holdout",
+  "fitting": "declared scoring candidates and coordinate search on development only",
+  "nomination": "eligible validation dependency coverage; development tie-break; retain baseline on ties",
+  "budget_mode": "absolute",
+  "budgets_chars": [6000, 12000, 24000],
+  "primary_budget_chars": 12000,
+  "guardrails_at_every_budget": {
+    "unexpected_failures": 0,
+    "correctness_violations": 0,
+    "unmet_expectations": 0,
+    "known_negative_character_increase": 0,
+    "unjudged_fraction_increase": 0,
+    "maximum_character_cost_increase_percent": 10,
+    "maximum_token_cost_increase_percent": 10
+  },
+  "promotion": {
+    "rule": "no_regression",
+    "primary_coverage_regression_margin": 0,
+    "minimum_cases": 20,
+    "minimum_declared_groups": 3
+  },
+  "subgroups": "report every declared repository group; no post-hoc exclusions or subgroup retuning",
+  "uncertainty": "equal-weight repository mean coverage delta; 2000 bootstrap samples; seed 20260926; descriptive 95% interval",
+  "tokenizer": "tiktoken==0.12.0/cl100k_base",
+  "holdout": "freeze exact cases, labels, splits, baseline, nominee, implementations, and promotion rule before evaluating any held-out outcome",
+  "scope": "supplied-corpus completion transfer; no claim about all native intents or downstream coding success"
+}

@@ -50,17 +50,25 @@ from tests.evals.support import (
     BASELINE_PROFILE,
     PROJECT,
     compiled,
-    tuning_case,
+)
+from tests.evals.support import (
+    tuning_case as pinned_case,
 )
 
 CHALLENGER_PROFILE = PROJECT / "evals" / "profiles" / "selection-challenger.json"
+
+
+def tuning_case(case_id: str) -> TuningCase:
+    """Matrix tests use actual absolute ceilings; boundary mode has its own tests."""
+    return replace(pinned_case(case_id), delivery=None, budget_mode="absolute")
 
 
 def _store_case(store: CaptureStore, case_id: str) -> tuple[TuningCase, LockedCase]:
     case = tuning_case(case_id)
     capture_id = store.write_capture(case.capture)
     judgment_id = store.write_judgment(case.judgments)
-    locked = LockedCase(case_id, capture_id, judgment_id, case.delivery)
+    locked = LockedCase(case_id, capture_id, judgment_id, case.delivery,
+                        repository_family=case.capture.snapshot.fixture_id, original_inst_id=case_id)
     return case, locked
 
 
@@ -532,6 +540,7 @@ class FreezeTests(unittest.TestCase):
             manifest = replace(
                 manifest,
                 chosen_label="b",
+                promotion=replace(manifest.promotion, min_holdout_cases=1, min_holdout_groups=1),
                 config=config,
                 config_digest=config_digest(config),
             )
@@ -551,12 +560,13 @@ class FreezeTests(unittest.TestCase):
         base = DecisionConfig()
         development, development_lock = _store_case(store, "basic-edit")
         held, held_lock = _store_case(store, "lexical-decoy")
-        locks = (SuiteLock("suite", (development_lock, held_lock)),)
+        validation, validation_lock = _store_case(store, "empty-test-search")
+        locks = (SuiteLock("suite", (development_lock, held_lock, validation_lock)),)
         splits_path = root / "splits.json"
         _write_splits(
-            splits_path, {"basic-edit": DEVELOPMENT, "lexical-decoy": HOLDOUT}
+            splits_path, {"basic-edit": DEVELOPMENT, "lexical-decoy": HOLDOUT, "empty-test-search": VALIDATION}
         )
-        report = matrix_report(matrix_cells(base), base, (development,), (held,))
+        report = matrix_report(matrix_cells(base), base, (development,), (validation,))
         profile_path = root / "m2-frozen.json"
         manifest_path = root / "frozen-matrix.json"
         freeze_matrix(
@@ -643,9 +653,43 @@ class FreezeTests(unittest.TestCase):
             self.assertEqual(manifest.baseline, baseline)
             self.assertEqual(manifest.baseline_digest, config_digest(baseline))
             self.assertEqual(manifest.engine_digest, decision_engine_digest())
-            self.assertEqual(manifest.metric_profile, "metrics-v1")
+            self.assertEqual(manifest.metric_profile, "metrics-v2")
             self.assertEqual(manifest.metric_fingerprint, metric_fingerprint())
             self.assertEqual(manifest.promotion, PromotionRule())
+
+    def test_freeze_rejects_changed_implementation_and_split_membership(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            _store, locks, splits_path, _profile, _manifest, report = self._freeze(root)
+            for key in ("engine_digest", "metric_fingerprint"):
+                changed = {**report, key: "changed"}
+                with self.subTest(key=key), self.assertRaisesRegex(ContractError, "implementations changed"):
+                    freeze_matrix(locks, splits_path, changed, baseline=DecisionConfig(),
+                                  frozen_profile_path=root / "new-profile.json", manifest_path=root / "new.json")
+            changed = {**report, "validation": {**report["validation"], "cases": ["lexical-decoy"]}}
+            with self.assertRaisesRegex(ContractError, "report membership"):
+                freeze_matrix(locks, splits_path, changed, baseline=DecisionConfig(),
+                              frozen_profile_path=root / "new-profile.json", manifest_path=root / "new.json")
+
+    def test_freeze_rejects_family_leakage_and_missing_original_identity(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            _store, locks, splits_path, _profile, _manifest, report = self._freeze(root)
+            original = locks[0]
+            for field, value, message in (("repository_family", "one-family", "crosses splits"),
+                                          ("original_inst_id", "", "original task identity")):
+                changed = replace(original, cases=tuple(replace(case, **{field: value}) for case in original.cases))
+                with self.subTest(field=field), self.assertRaisesRegex(ContractError, message):
+                    freeze_matrix((changed,), splits_path, report, baseline=DecisionConfig(),
+                                  frozen_profile_path=root / "new-profile.json", manifest_path=root / "new.json")
+
+    def test_frozen_budget_mode_cannot_mislabel_case_boundaries(self) -> None:
+        with TemporaryDirectory() as temp:
+            _store, _locks, _path, manifest, _splits = self._frozen(Path(temp))
+            with self.assertRaisesRegex(ContractError, "boundary experiments"):
+                replace(manifest, budget_mode="boundary")
+            with self.assertRaisesRegex(ContractError, "include the primary"):
+                replace(manifest, budgets=(6000,))
 
     def test_freeze_rejects_a_report_with_a_different_baseline(self) -> None:
         with TemporaryDirectory() as temp:
@@ -735,11 +779,11 @@ class FreezeTests(unittest.TestCase):
                 splits_path,
                 {
                     "basic-edit": DEVELOPMENT,
-                    "lexical-decoy": HOLDOUT,
+                    "lexical-decoy": VALIDATION,
                     "variant-fallback": HOLDOUT,
                 },
             )
-            report = matrix_report(matrix_cells(base), base, (development, extra), (held,))
+            report = matrix_report(matrix_cells(base), base, (development,), (held,))
             manifest_path = root / "frozen-matrix.json"
             freeze_matrix(
                 locks,

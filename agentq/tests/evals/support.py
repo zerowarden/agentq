@@ -36,7 +36,7 @@ def compiled(case_id: str) -> tuple[FixtureBuild, JudgmentSet]:
 def tuning_case(case_id: str) -> TuningCase:
     """One compiled fixture as a tuning case with its pinned budget."""
     fixture, judgment = compiled(case_id)
-    return TuningCase(case_id, fixture.capture, judgment, fixture.budget)
+    return TuningCase(case_id, fixture.capture, judgment, fixture.budget, budget_mode="boundary")
 
 
 def run_cli(*args: str) -> tuple[int, str]:
