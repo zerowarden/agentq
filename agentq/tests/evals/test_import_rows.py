@@ -108,7 +108,9 @@ class AuthoringTests(unittest.TestCase):
                 symbol = parse_changed_symbol(patch)
                 self.assertIsNotNone(symbol)
                 self.assertEqual(symbol.path, "pkg/original.py")
-                self.assertEqual(_selection(_row(patch=patch)).request.target.scopes, ("pkg",))
+                request = _selection(_row(patch=patch)).request
+                self.assertEqual(request.target.scopes, ("pkg/original.py",))
+                self.assertEqual(request.evidence_scopes, ("pkg",))
 
     def test_new_file_headers_cannot_reuse_the_previous_patch_path(self) -> None:
         patch = (
@@ -147,7 +149,8 @@ class AuthoringTests(unittest.TestCase):
         target = case.request.target
         assert isinstance(target, SymbolTarget)
         self.assertEqual(target.name, "target")
-        self.assertEqual(target.scopes, ("pkg",))
+        self.assertEqual(target.scopes, ("pkg/mod.py",))
+        self.assertEqual(case.request.evidence_scopes, ("pkg",))
 
     def test_a_row_without_a_changed_symbol_stays_out_of_selection(self) -> None:
         rows = (
@@ -309,6 +312,39 @@ class SplitTests(unittest.TestCase):
 
 
 class CheckoutTests(unittest.TestCase):
+
+    def test_selection_disambiguates_methods_and_collects_package_context(self) -> None:
+        with TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / "pkg").mkdir()
+            (repo / "pkg/mod.py").write_text(
+                "class Changed:\n    def target(self):\n        return 1\n",
+                encoding="utf-8",
+            )
+            (repo / "pkg/other.py").write_text(
+                "class Other:\n    def target(self):\n        return 2\n",
+                encoding="utf-8",
+            )
+            use = "from pkg.mod import Changed\nChanged().target()\n"
+            (repo / "pkg/use.py").write_text(use, encoding="utf-8")
+            (repo / "outside.py").write_text(use, encoding="utf-8")
+            commit = commit_all(repo)
+            case = _selection(_row(base_commit=commit, repo_url=str(repo)))
+
+            capture, attempt = capture_case(case, checkout=repo)
+
+            self.assertEqual(attempt.outcome.value, "captured", attempt.detail)
+            assert capture is not None
+            self.assertEqual(
+                capture.decision.resolution.declaration.path, "pkg/mod.py"
+            )
+            mention_paths = {
+                observation.source.path
+                for observation in capture.decision.pool.observations
+                if observation.kind is ObservationKind.SYNTACTIC_MENTION
+            }
+            self.assertIn("pkg/use.py", mention_paths)
+            self.assertNotIn("outside.py", mention_paths)
 
     def test_capture_defaults_keep_both_corpus_locks(self) -> None:
         with TemporaryDirectory() as temp:

@@ -139,7 +139,9 @@ class PythonInspectionAdapter:
         if request.capability is Capability.FIND_DECLARATIONS:
             return self._declarations(request, context, symbol, scopes, cache)
         if request.capability is Capability.SYNTACTIC_MENTIONS:
-            return self._mentions(request, context, symbol, scopes, cache)
+            return self._mentions(
+                request, context, symbol, request.scope or scopes, cache
+            )
         return failed_result(
             f"unsupported capability: {request.capability.value}",
             code=PARSE_ERROR,

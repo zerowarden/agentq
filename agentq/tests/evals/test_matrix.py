@@ -23,6 +23,7 @@ from evals.experiments import (
 )
 from evals.fingerprint import decision_engine_digest
 from evals.matrix import (
+    BUDGETS,
     FrozenManifest,
     MatrixCaseResult,
     PromotionRule,
@@ -153,6 +154,20 @@ def _guardrail_row(
         "unjudged_source_chars_delivered": unjudged,
         "delivered_source_chars_total": delivered,
     }
+
+
+def _holdout_results() -> tuple[MatrixCaseResult, ...]:
+    """Clean paired results at every operating budget."""
+    return tuple(
+        replace(
+            _result(cell, "lexical-decoy", budget, critical=1, present=True),
+            known_irrelevant_source_chars_delivered=18,
+            unjudged_source_chars_delivered=10,
+            delivered_source_chars=1000,
+        )
+        for cell in ("baseline", "b")
+        for budget in BUDGETS
+    )
 
 
 class MatrixCellTests(unittest.TestCase):
@@ -505,6 +520,25 @@ class SplitValidationTests(unittest.TestCase):
 
 
 class FreezeTests(unittest.TestCase):
+    def _promotion_for(
+        self, results: tuple[MatrixCaseResult, ...]
+    ) -> dict[str, object]:
+        with TemporaryDirectory() as temp:
+            store, locks, _path, manifest, splits = self._frozen(Path(temp))
+            config = replace(
+                manifest.config,
+                selection=replace(manifest.config.selection, variant_fallback=True),
+            )
+            manifest = replace(
+                manifest,
+                chosen_label="b",
+                config=config,
+                config_digest=config_digest(config),
+            )
+            # Exercise aggregation and promotion with controlled replay outcomes.
+            with patch("evals.matrix.evaluate_matrix", return_value=results):
+                return holdout_report(manifest, store, locks, splits)["promotion"]
+
     def _freeze(self, root: Path) -> tuple[
         CaptureStore,
         tuple[SuiteLock, ...],
@@ -733,6 +767,64 @@ class FreezeTests(unittest.TestCase):
             )
             with self.assertRaises(ContractError):
                 holdout_report(manifest, store, locks, splits, base=changed)
+
+    def test_holdout_promotion_rejects_unclean_results_at_any_budget(self) -> None:
+        defects = (
+            {"outcome": "failed"},
+            {"violations": ("invalid_delivery",)},
+            {"unmet": ("target_source",)},
+        )
+        for cell in ("baseline", "b"):
+            for budget in (6000, 24000):
+                for defect in defects:
+                    with self.subTest(cell=cell, budget=budget, defect=defect):
+                        results = tuple(
+                            replace(item, **defect)
+                            if item.cell == cell and item.budget == budget
+                            else item
+                            for item in _holdout_results()
+                        )
+                        promotion = self._promotion_for(results)
+                        self.assertFalse(promotion["promoted"])
+                        label = "baseline" if cell == "baseline" else "nominee"
+                        self.assertIn(
+                            f"{label} is not clean on held-out cases",
+                            promotion["reasons"],
+                        )
+
+    def test_holdout_promotion_rejects_guardrail_regressions_at_any_budget(self) -> None:
+        for budget in BUDGETS:
+            for field, value in (
+                ("known_irrelevant_source_chars_delivered", 500),
+                ("unjudged_source_chars_delivered", 20),
+            ):
+                with self.subTest(budget=budget, field=field):
+                    results = tuple(
+                        replace(item, **{field: value})
+                        if item.cell == "b" and item.budget == budget
+                        else item
+                        for item in _holdout_results()
+                    )
+                    promotion = self._promotion_for(results)
+                    self.assertFalse(promotion["promoted"])
+                    self.assertIn(
+                        "nominee delivery guardrails regressed on held-out cases",
+                        promotion["reasons"],
+                    )
+
+    def test_holdout_promotion_keeps_the_primary_budget_coverage_rule(self) -> None:
+        clean = self._promotion_for(_holdout_results())
+        self.assertTrue(clean["promoted"])
+        self.assertEqual(clean["reasons"], [])
+        for budget, expected in ((6000, True), (12000, False)):
+            with self.subTest(budget=budget):
+                results = tuple(
+                    replace(item, critical_delivered=0, all_critical_present=False)
+                    if item.cell == "b" and item.budget == budget
+                    else item
+                    for item in _holdout_results()
+                )
+                self.assertEqual(self._promotion_for(results)["promoted"], expected)
 
     def test_holdout_report_uses_only_held_out_cases(self) -> None:
         with TemporaryDirectory() as temp:

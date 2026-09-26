@@ -13,11 +13,11 @@ The two suites answer different questions and are never scored together:
   the annotator recorded it. The range policy then reserves that exact source,
   so the suite is a source-reading correctness gate, not a scoring corpus.
 - ``context-selection`` anchors the request on the changed symbol named by the
-  patch and scopes it to that symbol's package. The pool then holds competing
-  declarations, references, and mentions, and reviewer-authored judgments
-  witness the row's other gold spans among them. The gold context itself stays
-  in the evaluation-only authoring sample: the reviewer reads it there when
-  authoring the capture-bound draft, and it never enters a case record.
+  patch in its original file and collects context from that symbol's package.
+  The pool then holds competing references and mentions, and reviewer-authored
+  judgments witness the row's other gold spans among them. The gold context
+  itself stays in the evaluation-only authoring sample: the reviewer reads it
+  there when authoring the capture-bound draft, and it never enters a case record.
 """
 
 from __future__ import annotations
@@ -282,10 +282,9 @@ def context_selection_case(
         case_id=f"{instance_id}__selection",
         source=source,
         request=InspectionRequest(
-            target=SymbolTarget(
-                name=symbol.name, scopes=(package_scope(symbol.path),)
-            ),
+            target=SymbolTarget(name=symbol.name, scopes=(symbol.path,)),
             intent=Intent.UNDERSTAND,
+            evidence_scopes=(package_scope(symbol.path),),
         ),
         target_origin="derived",
         judgment_basis="context_selection",

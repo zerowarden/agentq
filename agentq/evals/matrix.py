@@ -79,10 +79,10 @@ CELL_ORDER = ("baseline", "a", "b", "c")
 class PromotionRule:
     """The declared held-out acceptance rule frozen with one experiment.
 
-    ``no_regression`` promotes the nominee only when the held-out run is clean
-    and its primary-budget coverage does not fall below the baseline's by more
-    than ``margin``. Promotion is evaluated after the fact and reported; it
-    never feeds back into nomination.
+    ``no_regression`` requires clean held-out results and no delivery guardrail
+    regression at any operating budget. The nominee's primary-budget coverage
+    must not fall below the baseline's by more than ``margin``. Promotion is
+    evaluated after the fact and reported; it never feeds back into nomination.
     """
 
     rule: str = "no_regression"
@@ -553,8 +553,10 @@ def _rows_by_cell(
 
 def _primary_row(
     rows: Sequence[Mapping[str, object]],
+    *,
+    primary_budget: int = PRIMARY_BUDGET,
 ) -> Mapping[str, object] | None:
-    return next((row for row in rows if row["budget"] == PRIMARY_BUDGET), None)
+    return next((row for row in rows if row["budget"] == primary_budget), None)
 
 
 def _regresses_on_guardrails(
@@ -1171,41 +1173,36 @@ def validate_holdout(
         raise ContractError("the frozen suites carry no held-out cases")
 
 
-def _primary_summary(
-    summary: Sequence[Mapping[str, object]], cell: str
-) -> Mapping[str, object] | None:
-    return next(
-        (
-            row
-            for row in summary
-            if row["cell"] == cell and row["budget"] == PRIMARY_BUDGET
-        ),
-        None,
-    )
-
-
 def evaluate_promotion(
     rule: PromotionRule,
-    baseline: Mapping[str, object] | None,
-    nominee: Mapping[str, object] | None,
+    baseline: Sequence[Mapping[str, object]],
+    nominee: Sequence[Mapping[str, object]],
+    *,
+    primary_budget: int = PRIMARY_BUDGET,
 ) -> tuple[bool, tuple[str, ...]]:
-    """Whether the held-out nominee is promoted under the frozen rule."""
+    """Gate all held-out budgets before comparing primary-budget coverage."""
     reasons: list[str] = []
-    for label, row in (("baseline", baseline), ("nominee", nominee)):
-        if row is None:
+    baseline_primary = _primary_row(baseline, primary_budget=primary_budget)
+    nominee_primary = _primary_row(nominee, primary_budget=primary_budget)
+    for label, rows, primary in (
+        ("baseline", baseline, baseline_primary),
+        ("nominee", nominee, nominee_primary),
+    ):
+        if primary is None:
             reasons.append(f"{label} has no primary-budget held-out summary")
-            continue
-        if not _eligible(row):
+        if not all(_eligible(row) for row in rows):
             reasons.append(f"{label} is not clean on held-out cases")
+    if _regresses_on_any_budget(nominee, baseline):
+        reasons.append("nominee delivery guardrails regressed on held-out cases")
     if reasons:
         return False, tuple(reasons)
-    assert baseline is not None and nominee is not None
-    if int(nominee["critical_delivered"]) < int(
-        baseline["critical_delivered"]
+    assert baseline_primary is not None and nominee_primary is not None
+    if int(nominee_primary["critical_delivered"]) < int(
+        baseline_primary["critical_delivered"]
     ) - rule.margin:
         reasons.append("nominee critical coverage regressed beyond the margin")
-    if int(nominee["all_critical_present_cases"]) < int(
-        baseline["all_critical_present_cases"]
+    if int(nominee_primary["all_critical_present_cases"]) < int(
+        baseline_primary["all_critical_present_cases"]
     ) - rule.margin:
         reasons.append("nominee all-critical-present count regressed beyond the margin")
     return not reasons, tuple(reasons)
@@ -1258,10 +1255,12 @@ def holdout_report(
     )
     paired = paired_deltas(results, frozen_label)
     summary = matrix_summary(results, manifest.budgets)
+    rows_by_cell = _rows_by_cell(summary)
     promoted, promotion_reasons = evaluate_promotion(
         manifest.promotion,
-        _primary_summary(summary, "baseline"),
-        _primary_summary(summary, frozen_label),
+        rows_by_cell.get("baseline", ()),
+        rows_by_cell.get(frozen_label, ()),
+        primary_budget=manifest.primary_budget,
     )
     return {
         "schema": HOLDOUT_SCHEMA,
