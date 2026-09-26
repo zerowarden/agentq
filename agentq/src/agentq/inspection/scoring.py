@@ -166,6 +166,23 @@ class ScoringProfile:
 DEFAULT_SCORING = ScoringProfile()
 
 
+def scoring_inputs(item: EvidenceFeatures) -> tuple[object, ...]:
+    """The effective inputs this scorer reads, as an equivalence key.
+
+    Two observations with the same key receive the same score under every
+    coefficient configuration, so no weight change can separate them. A role
+    that never contributes collapses to the single unscored class.
+    """
+    role = item.role
+    if role is None or role not in ROLE_CONTRIBUTION_NAMES:
+        return ("unscored",)
+    return (
+        "scored",
+        role.value,
+        role in RELATIONSHIP_ROLES and item.binding is Binding.RESOLVED,
+    )
+
+
 def score_evidence(
     features: tuple[EvidenceFeatures, ...],
     profile: ScoringProfile = DEFAULT_SCORING,

@@ -25,6 +25,7 @@ from agentq.inspection.contracts import (
     SymbolTarget,
     make_declaration_candidate,
 )
+from tests.support.inspection_fixtures import bare_context, write_source_file
 
 REPOSITORY_CAPABILITIES = frozenset(
     {
@@ -34,16 +35,6 @@ REPOSITORY_CAPABILITIES = frozenset(
         Capability.OWNING_PACKAGE,
     }
 )
-
-
-def _write(root: Path, relative: str, text: str) -> None:
-    target = root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-
-
-def _context(root: Path) -> InspectionContext:
-    return InspectionContext(identity=RepositoryIdentity(root=root))
 
 
 def _request(
@@ -77,10 +68,10 @@ def _range_request(
 
 
 def test_requested_range_is_read_exactly(tmp_path: Path) -> None:
-    _write(tmp_path, "src/a.py", "line one\nline two\nline three\n")
+    write_source_file(tmp_path, "src/a.py", "line one\nline two\nline three\n")
     result = RepositoryInspectionAdapter().acquire(
         _range_request(Capability.READ_SOURCE, "src/a.py", 1, 2),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
     observation = result.observations[0]
@@ -95,10 +86,10 @@ def test_requested_range_is_read_exactly(tmp_path: Path) -> None:
 
 
 def test_read_limits_downgrade_fidelity_to_bounded(tmp_path: Path) -> None:
-    _write(tmp_path, "src/a.py", "one\ntwo\nthree\nfour\n")
+    write_source_file(tmp_path, "src/a.py", "one\ntwo\nthree\nfour\n")
     result = RepositoryInspectionAdapter().acquire(
         _range_request(Capability.READ_SOURCE, "src/a.py", 1, 4, limit=2),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.variants[0].fidelity is Fidelity.BOUNDED
     assert not result.coverage.is_complete()
@@ -108,10 +99,10 @@ def test_read_limits_downgrade_fidelity_to_bounded(tmp_path: Path) -> None:
 def test_a_line_wider_than_the_limit_cannot_claim_exact_source(
     tmp_path: Path,
 ) -> None:
-    _write(tmp_path, "src/a.py", "x = '" + "a" * 400 + "'\nshort = 1\n")
+    write_source_file(tmp_path, "src/a.py", "x = '" + "a" * 400 + "'\nshort = 1\n")
     result = RepositoryInspectionAdapter().acquire(
         _range_request(Capability.READ_SOURCE, "src/a.py", 1, 2),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.observations[0].payload.truncated  # type: ignore[union-attr]
     assert "[truncated]" in result.variants[0].text
@@ -121,9 +112,9 @@ def test_a_line_wider_than_the_limit_cannot_claim_exact_source(
 
 
 def test_source_line_width_is_configurable(tmp_path: Path) -> None:
-    _write(tmp_path, "src/a.py", "value = '" + "a" * 400 + "'\n")
+    write_source_file(tmp_path, "src/a.py", "value = '" + "a" * 400 + "'\n")
     request = _range_request(Capability.READ_SOURCE, "src/a.py", 1, 1)
-    narrow = RepositoryInspectionAdapter().acquire(request, _context(tmp_path))
+    narrow = RepositoryInspectionAdapter().acquire(request, bare_context(tmp_path))
     wide = RepositoryInspectionAdapter().acquire(
         request,
         InspectionContext(
@@ -144,7 +135,7 @@ def test_missing_file_is_a_failed_acquisition_through_the_registry(
     registry = CapabilityRegistry((RepositoryInspectionAdapter(),))
     results = registry.acquire(
         _range_request(Capability.READ_SOURCE, "src/missing.py", 1, 1),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert len(results) == 1
     assert results[0].record.status is CollectionStatus.FAILED
@@ -153,14 +144,14 @@ def test_missing_file_is_a_failed_acquisition_through_the_registry(
 
 
 def test_outline_reports_file_structure(tmp_path: Path) -> None:
-    _write(tmp_path, "src/a.py", "def alpha():\n    return 1\n")
-    _write(tmp_path, "src/b.py", "class Beta:\n    pass\n")
+    write_source_file(tmp_path, "src/a.py", "def alpha():\n    return 1\n")
+    write_source_file(tmp_path, "src/b.py", "class Beta:\n    pass\n")
     result = RepositoryInspectionAdapter().acquire(
         _request(
             Capability.OUTLINE,
             PathTarget(path="src", path_kind=PathKind.DIRECTORY),
         ),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
     observation = result.observations[0]
@@ -172,13 +163,13 @@ def test_outline_reports_file_structure(tmp_path: Path) -> None:
 
 
 def test_empty_file_outline_is_completed_explicit_evidence(tmp_path: Path) -> None:
-    _write(tmp_path, "src/empty.py", "")
+    write_source_file(tmp_path, "src/empty.py", "")
     result = RepositoryInspectionAdapter().acquire(
         _request(
             Capability.OUTLINE,
             PathTarget(path="src/empty.py", path_kind=PathKind.FILE),
         ),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
     assert len(result.observations) == 1
@@ -195,7 +186,7 @@ def test_empty_directory_outline_is_completed_explicit_evidence(
             Capability.OUTLINE,
             PathTarget(path="empty", path_kind=PathKind.DIRECTORY),
         ),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
     assert len(result.observations) == 1
@@ -204,10 +195,10 @@ def test_empty_directory_outline_is_completed_explicit_evidence(
 
 
 def test_mentions_are_labeled_by_domain(tmp_path: Path) -> None:
-    _write(tmp_path, "src/app.py", "value = list_orders()\n")
-    _write(tmp_path, "tests/test_app.py", "def test_it():\n    list_orders()\n")
+    write_source_file(tmp_path, "src/app.py", "value = list_orders()\n")
+    write_source_file(tmp_path, "tests/test_app.py", "def test_it():\n    list_orders()\n")
     adapter = RepositoryInspectionAdapter()
-    context = _context(tmp_path)
+    context = bare_context(tmp_path)
     all_mentions = adapter.acquire(
         _request(
             Capability.LEXICAL_MENTIONS,
@@ -248,12 +239,12 @@ def test_mentions_are_labeled_by_domain(tmp_path: Path) -> None:
 def test_owning_package_is_found_from_the_declaration_path(
     tmp_path: Path,
 ) -> None:
-    _write(
+    write_source_file(
         tmp_path,
         "pyproject.toml",
         '[project]\nname = "orders"\nversion = "0.1.0"\n',
     )
-    _write(tmp_path, "src/service.py", "def list_orders():\n    return 1\n")
+    write_source_file(tmp_path, "src/service.py", "def list_orders():\n    return 1\n")
     subject = make_declaration_candidate(
         provider="python",
         path="src/service.py",
@@ -268,7 +259,7 @@ def test_owning_package_is_found_from_the_declaration_path(
             SymbolTarget(name="list_orders"),
             subject=subject,
         ),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.COMPLETED
     payload = result.observations[0].payload
@@ -277,13 +268,13 @@ def test_owning_package_is_found_from_the_declaration_path(
 
 
 def test_missing_manifest_is_a_complete_empty_outcome(tmp_path: Path) -> None:
-    _write(tmp_path, "src/service.py", "def list_orders():\n    return 1\n")
+    write_source_file(tmp_path, "src/service.py", "def list_orders():\n    return 1\n")
     result = RepositoryInspectionAdapter().acquire(
         _request(
             Capability.OWNING_PACKAGE,
             PathTarget(path="src/service.py", path_kind=PathKind.FILE),
         ),
-        _context(tmp_path),
+        bare_context(tmp_path),
     )
     assert result.status is CollectionStatus.EMPTY
     assert result.coverage.is_complete()
@@ -301,7 +292,7 @@ def test_missing_manifest_is_a_complete_empty_outcome(tmp_path: Path) -> None:
 def test_availability_without_ripgrep(capability, available) -> None:
     adapter = RepositoryInspectionAdapter(which=lambda name: None)
     result = adapter.availability(
-        capability, SymbolTarget(name="x"), _context(Path("/repo"))
+        capability, SymbolTarget(name="x"), bare_context(Path("/repo"))
     )
     assert result.available is available
     if not available:
@@ -323,5 +314,5 @@ def test_availability_without_ripgrep(capability, available) -> None:
 )
 def test_repository_adapter_applies_to_every_target(target) -> None:
     adapter = RepositoryInspectionAdapter()
-    assert adapter.applicable(target, _context(Path("/repo")))
+    assert adapter.applicable(target, bare_context(Path("/repo")))
     assert adapter.capabilities() == REPOSITORY_CAPABILITIES

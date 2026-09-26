@@ -1,12 +1,21 @@
-"""Evaluation-only exact reference for tiny selection problems.
+"""Evaluation-only exact references for tiny selection problems.
 
-The reference enumerates at most one variant per observation, keeps the
-selections that satisfy every required policy requirement and fit the
-selection budget, and reports the highest declared utility: the sum of the
-scores of the distinct observations selected, so duplicates cannot multiply
-it. It models the selection stage only; overlap, per-file quotas, and
-whole-delivery fitting are production heuristics outside the model. Optimality
-is claimed only for this model and only for tiny pools.
+Two references share one enumeration but answer different questions:
+
+- :func:`reference_selection` is the surrogate-objective reference. Its utility
+  is the sum of the scores the evaluated scorer assigns, so it measures how
+  well a selection serves that scorer, not how well it serves the reviewer. It
+  also models the selection stage only.
+- :func:`judged_selection` is the independent-utility oracle. Its utility is
+  the reviewed facets a selection satisfies, optional evidence the reviewer
+  marked irrelevant is inadmissible, and its cost model is declared explicitly
+  (:data:`DELIVERY_COST_MODEL`).
+
+Both enumerate at most one variant per observation and keep only selections
+that satisfy every required policy requirement and fit their cost model.
+Overlap, per-file quotas, and whole-delivery fitting remain production
+heuristics outside both models, and optimality is claimed only for these models
+and only for tiny pools.
 """
 
 from __future__ import annotations
@@ -30,11 +39,20 @@ from agentq.inspection.scoring import score_evidence
 from agentq.inspection.selection import (
     REASON_RELEVANCE,
     assess_selected_evidence,
+    observation_matches,
     select_evidence,
 )
 
+from .metrics import facet_supported, judged_variant_ids
+from .models import JudgmentSet
+
 REFERENCE_PROFILE = "reference-exact-v1"
+JUDGED_PROFILE = "judged-exact-v1"
 MAX_REFERENCE_CHOICES = 4096
+DELIVERY_COST_MODEL = (
+    "selection_cost(selected, output_format) + delivery.envelope_chars "
+    "<= delivery.max_chars"
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +103,55 @@ def _plan(
     )
 
 
+def _variant_groups(
+    pool: EvidencePool,
+) -> tuple[tuple[EvidenceVariant, ...], ...]:
+    """Every observation's admissible variants, in pool order."""
+    return tuple(
+        variants
+        for observation in pool.observations
+        if observation.observation_id not in pool.unstable_observation_ids
+        if (variants := pool.variants_for(observation.observation_id))
+    )
+
+
+def _choices_bound(
+    groups: tuple[tuple[EvidenceVariant, ...], ...], what: str
+) -> int:
+    choices = 1
+    for variants in groups:
+        choices *= len(variants) + 1
+    if choices > MAX_REFERENCE_CHOICES:
+        raise ContractError(
+            f"{what} enumeration is bounded to tiny pools: "
+            f"{choices} choices exceed {MAX_REFERENCE_CHOICES}"
+        )
+    return choices
+
+
+def _selection_cost_within(
+    selected: tuple[SelectedEvidence, ...], config: DecisionConfig
+) -> int | None:
+    """The selection cost under the declared delivery model, or ``None``."""
+    cost = selection_cost(selected, config.output_format)
+    if cost + config.delivery.envelope_chars > config.delivery.max_chars:
+        return None
+    return cost
+
+
+def _required_satisfied(
+    selected: tuple[SelectedEvidence, ...],
+    cost: int,
+    policy: EvidencePolicy,
+    collection: CollectionPlan,
+    pool: EvidencePool,
+    config: DecisionConfig,
+) -> bool:
+    plan = _plan(selected, cost, config.delivery.available_chars())
+    assessment = assess_selected_evidence(policy, collection, pool, plan)
+    return not assessment.unsatisfied(required_only=True)
+
+
 def reference_selection(
     pool: EvidencePool,
     policy: EvidencePolicy,
@@ -99,19 +166,8 @@ def reference_selection(
     contributions_by_observation = {
         item.observation_id: item.score.contributions for item in scores
     }
-    groups: tuple[tuple[EvidenceVariant, ...], ...] = tuple(
-        variants
-        for observation in pool.observations
-        if (variants := pool.variants_for(observation.observation_id))
-    )
-    choices = 1
-    for variants in groups:
-        choices *= len(variants) + 1
-    if choices > MAX_REFERENCE_CHOICES:
-        raise ContractError(
-            "reference enumeration is bounded to tiny pools: "
-            f"{choices} choices exceed {MAX_REFERENCE_CHOICES}"
-        )
+    groups = _variant_groups(pool)
+    choices = _choices_bound(groups, "reference")
     available = config.delivery.available_chars()
     feasible: list[tuple[int, int, tuple[str, ...]]] = []
     for combo in product(*(tuple(variants) + (None,) for variants in groups)):
@@ -127,16 +183,16 @@ def reference_selection(
             for variant in combo
             if variant is not None
         )
-        measured = selection_cost(selected, config.output_format)
-        if measured > available:
+        measured = _selection_cost_within(selected, config)
+        if measured is None:
             continue
-        plan = _plan(selected, measured, available)
-        assessment = assess_selected_evidence(policy, collection, pool, plan)
-        if assessment.unsatisfied(required_only=True):
+        if not _required_satisfied(
+            selected, measured, policy, collection, pool, config
+        ):
             continue
         variant_ids = tuple(sorted(item.variant.variant_id for item in selected))
         feasible.append(
-            (_utility(variant_ids, pool, score_by_observation), plan.measured_cost, variant_ids)
+            (_utility(variant_ids, pool, score_by_observation), measured, variant_ids)
         )
     if feasible:
         utility, measured_cost, variant_ids = min(
@@ -170,4 +226,113 @@ def reference_selection(
         heuristic_utility=_utility(heuristic_ids, pool, score_by_observation),
         heuristic_variant_ids=heuristic_ids,
         heuristic_feasible=heuristic_feasible,
+    )
+
+
+@dataclass(frozen=True)
+class JudgedOutcome:
+    """The judged-utility optimum for one tiny pool under independent labels."""
+
+    critical_facets: int
+    noncritical_facets: int
+    variant_ids: tuple[str, ...]
+    delivered_cost: int
+    choices: int
+
+    @property
+    def utility(self) -> tuple[int, int]:
+        return (self.critical_facets, self.noncritical_facets)
+
+
+def _required_observations(
+    policy: EvidencePolicy, pool: EvidencePool
+) -> frozenset[str]:
+    """Observations the required policy can draw on; they are never inadmissible."""
+    requirements = policy.required()
+    return frozenset(
+        observation.observation_id
+        for observation in pool.observations
+        if any(
+            observation_matches(requirement, observation)
+            for requirement in requirements
+        )
+    )
+
+
+def _judged_utility(
+    judgments: JudgmentSet, selected_ids: frozenset[str]
+) -> tuple[int, int]:
+    """Reviewed facets the selection satisfies, critical first."""
+    critical = sum(
+        1
+        for facet in judgments.facets
+        if facet.critical and facet_supported(facet, judgments, selected_ids)
+    )
+    noncritical = sum(
+        1
+        for facet in judgments.facets
+        if not facet.critical and facet_supported(facet, judgments, selected_ids)
+    )
+    return critical, noncritical
+
+
+def judged_selection(
+    pool: EvidencePool,
+    policy: EvidencePolicy,
+    collection: CollectionPlan,
+    config: DecisionConfig,
+    judgments: JudgmentSet,
+) -> JudgedOutcome:
+    """Enumerate every tiny selection under independent reviewer judgments.
+
+    Unlike :func:`reference_selection`, utility is not the evaluated scorer's
+    own sum: it counts the reviewed facets the selection satisfies. Optional
+    evidence the reviewer marked irrelevant is inadmissible (required evidence
+    is exempt), and cost uses the declared delivery model rather than the
+    selection-stage estimate alone.
+    """
+    groups = _variant_groups(pool)
+    choices = _choices_bound(groups, "judged")
+    required_observations = _required_observations(policy, pool)
+    _, irrelevant = judged_variant_ids(judgments)
+    variant_observation = {
+        variant.variant_id: variant.observation_id for variant in pool.variants
+    }
+    feasible: list[tuple[tuple[int, int], int, tuple[str, ...]]] = []
+    for combo in product(*(tuple(variants) + (None,) for variants in groups)):
+        selected = tuple(
+            SelectedEvidence(variant=variant, reason=REASON_RELEVANCE, score=0)
+            for variant in combo
+            if variant is not None
+        )
+        cost = _selection_cost_within(selected, config)
+        if cost is None:
+            continue
+        if not _required_satisfied(
+            selected, cost, policy, collection, pool, config
+        ):
+            continue
+        delivered = {item.variant.variant_id for item in selected}
+        if any(
+            variant_id in irrelevant
+            and variant_observation.get(variant_id) not in required_observations
+            for variant_id in delivered
+        ):
+            continue
+        utility = _judged_utility(judgments, frozenset(delivered))
+        feasible.append((utility, cost, tuple(sorted(delivered))))
+    if feasible:
+        (critical, noncritical), cost, variant_ids = min(
+            feasible,
+            key=lambda item: (-item[0][0], -item[0][1], item[1], item[2]),
+        )
+    else:
+        critical = noncritical = cost = 0
+        variant_ids = ()
+    return JudgedOutcome(
+        critical_facets=critical,
+        noncritical_facets=noncritical,
+        variant_ids=variant_ids,
+        delivered_cost=cost,
+        choices=choices,
     )

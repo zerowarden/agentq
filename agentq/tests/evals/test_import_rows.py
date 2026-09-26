@@ -3,25 +3,30 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
-
 from agentq.core import ContractError
-from agentq.inspection.contracts import ObservationKind, RangeTarget
+from agentq.inspection.contracts import (
+    Intent,
+    ObservationKind,
+    RangeTarget,
+    SymbolTarget,
+)
 from evals.codec import encode_case_spec
 from evals.importer import (
-    ExcludedRow,
+    CONTEXT_SELECTION,
+    SOURCE_CONFORMANCE,
+    AdaptedRow,
     adapt_row,
     assign_splits,
     ensure_checkout,
     import_rows,
     load_case_files,
+    package_scope,
+    parse_changed_symbol,
     splits_document,
     write_cases,
     write_splits,
@@ -30,9 +35,16 @@ from evals.models import CaseSpec
 from evals.repository import RepositoryError
 from evals.repository_capture import capture_case, capture_suite
 from evals.store import CaptureStore
+from tests.evals.support import run_cli
+from tests.support.git_fixture import commit_all
 
 PROBLEM_TEXT = "SECRET TASK TEXT"
-PATCH_TEXT = "diff --git a/pkg/mod.py b/pkg/mod.py"
+PATCH_TEXT = (
+    "diff --git a/pkg/mod.py b/pkg/mod.py\n"
+    "--- a/pkg/mod.py\n"
+    "+++ b/pkg/mod.py\n"
+    "@@ -1,3 +1,4 @@ def target():\n"
+)
 COMMIT = "a" * 40
 
 
@@ -60,50 +72,51 @@ def _row(**overrides: object) -> dict[str, object]:
     return row
 
 
-def _case(row: dict[str, object]) -> CaseSpec:
+def _adapted(row: dict[str, object]) -> AdaptedRow:
     adapted = adapt_row(row)
-    assert isinstance(adapted, CaseSpec)
+    assert not adapted.excluded, adapted.excluded
+    assert adapted.source_conformance is not None
     return adapted
 
 
+def _case(row: dict[str, object]) -> CaseSpec:
+    return _adapted(row).source_conformance  # type: ignore[return-value]
+
+
+def _selection(row: dict[str, object]) -> CaseSpec:
+    selection = _adapted(row).context_selection
+    assert selection is not None
+    return selection
+
+
 def _git_repo(root: Path) -> str:
-    if shutil.which("git") is None:
-        pytest.skip("git is required to build a checkout")
     (root / "pkg").mkdir(parents=True)
     (root / "pkg/mod.py").write_text("def target():\n    return 1\n", encoding="utf-8")
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_DATE": "2026-09-23T00:00:00+00:00",
-        "GIT_COMMITTER_DATE": "2026-09-23T00:00:00+00:00",
-    }
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=root, check=True, capture_output=True, env=env
-        )
-
-    git("init", "--quiet", ".")
-    git("add", "--", ".")
-    git(
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "commit",
-        "--quiet",
-        "-m",
-        "seed",
-    )
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True
-    ).strip()
+    return commit_all(root)
 
 
 class AuthoringTests(unittest.TestCase):
+    def test_changed_symbol_uses_the_path_in_the_pinned_base_commit(self) -> None:
+        for destination in ("b/other/renamed.py", "/dev/null"):
+            with self.subTest(destination=destination):
+                patch = (
+                    "diff --git a/pkg/original.py b/other/renamed.py\n"
+                    "--- a/pkg/original.py\n"
+                    f"+++ {destination}\n"
+                    "@@ -1,3 +1,4 @@ def target():\n"
+                )
+                symbol = parse_changed_symbol(patch)
+                self.assertIsNotNone(symbol)
+                self.assertEqual(symbol.path, "pkg/original.py")
+                self.assertEqual(_selection(_row(patch=patch)).request.target.scopes, ("pkg",))
+
+    def test_new_file_headers_cannot_reuse_the_previous_patch_path(self) -> None:
+        patch = (
+            "--- a/pkg/old.py\n+++ b/pkg/old.py\n@@ -1 +1 @@\n"
+            "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,3 @@ def new():\n"
+        )
+        self.assertIsNone(parse_changed_symbol(patch))
+
     def test_a_valid_row_authors_a_pinned_repository_case(self) -> None:
         case = _case(_row())
         self.assertEqual(case.case_id, "Bench__python__maintenance__bugfix__abc123")
@@ -115,12 +128,58 @@ class AuthoringTests(unittest.TestCase):
         )
         self.assertEqual(case.target_origin, "supplied")
         self.assertEqual(case.judgment_basis, "target_intent")
-        self.assertEqual(case.split_group, "family:project")
+        self.assertEqual(case.split_group, "source-conformance:project")
         target = case.request.target
         assert isinstance(target, RangeTarget)
         self.assertEqual(target.path, "pkg/mod.py")
         self.assertEqual(target.ranges[0].start_line, 1)
         self.assertEqual(target.ranges[0].end_line, 3)
+
+    def test_a_valid_row_authors_a_symbol_anchored_selection_case(self) -> None:
+        case = _selection(_row())
+        self.assertEqual(
+            case.case_id, "Bench__python__maintenance__bugfix__abc123__selection"
+        )
+        self.assertEqual(case.target_origin, "derived")
+        self.assertEqual(case.judgment_basis, "context_selection")
+        self.assertEqual(case.split_group, "context-selection:project")
+        self.assertEqual(case.request.intent, Intent.UNDERSTAND)
+        target = case.request.target
+        assert isinstance(target, SymbolTarget)
+        self.assertEqual(target.name, "target")
+        self.assertEqual(target.scopes, ("pkg",))
+
+    def test_a_row_without_a_changed_symbol_stays_out_of_selection(self) -> None:
+        rows = (
+            _row(patch=None),
+            _row(patch="diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n"),
+            _row(patch="+++ b/x.py\n@@ -1,2 +1,3 @@ import os\n"),
+        )
+        for row in rows:
+            with self.subTest(row=row):
+                adapted = adapt_row(row)
+                self.assertIsNotNone(adapted.source_conformance)
+                self.assertIsNone(adapted.context_selection)
+                reasons = {item.reason for item in adapted.excluded}
+                self.assertIn(
+                    "patch names no changed symbol for context selection", reasons
+                )
+
+    def test_patch_headers_name_declarations_only(self) -> None:
+        patch = (
+            "diff --git a/pkg/mod.py b/pkg/mod.py\n"
+            "--- a/pkg/mod.py\n"
+            "+++ b/pkg/mod.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "@@ -10,6 +10,7 @@ class Example:\n"
+        )
+        symbol = parse_changed_symbol(patch)
+        assert symbol is not None
+        self.assertEqual(symbol.path, "pkg/mod.py")
+        self.assertEqual(symbol.name, "Example")
+        self.assertEqual(package_scope(symbol.path), "pkg")
+        self.assertEqual(package_scope("setup.py"), "setup.py")
+        self.assertIsNone(parse_changed_symbol(None))
 
     def test_base_commit_language_and_repo_url_are_mandatory(self) -> None:
         cases = (
@@ -133,7 +192,9 @@ class AuthoringTests(unittest.TestCase):
         for row in cases:
             with self.subTest(row=row):
                 adapted = adapt_row(row)
-                self.assertIsInstance(adapted, ExcludedRow)
+                self.assertIsNone(adapted.source_conformance)
+                self.assertIsNone(adapted.context_selection)
+                self.assertEqual(len(adapted.excluded), 1)
 
     def test_malformed_gold_spans_are_excluded_with_reasons(self) -> None:
         rows = (
@@ -150,15 +211,18 @@ class AuthoringTests(unittest.TestCase):
         for row in rows:
             with self.subTest(row=row):
                 adapted = adapt_row(row)
-                self.assertIsInstance(adapted, ExcludedRow)
-                assert isinstance(adapted, ExcludedRow)
-                self.assertTrue(adapted.reason)
+                self.assertIsNone(adapted.source_conformance)
+                self.assertIsNone(adapted.context_selection)
+                self.assertEqual(len(adapted.excluded), 1)
+                self.assertTrue(adapted.excluded[0].reason)
 
     def test_task_text_never_reaches_a_case_record(self) -> None:
-        data = encode_case_spec(_case(_row())).decode("utf-8")
-        self.assertNotIn(PROBLEM_TEXT, data)
-        self.assertNotIn(PATCH_TEXT, data)
-        self.assertNotIn("problem_statement", data)
+        for case in (_case(_row()), _selection(_row())):
+            with self.subTest(case=case.case_id):
+                data = encode_case_spec(case).decode("utf-8")
+                self.assertNotIn(PROBLEM_TEXT, data)
+                self.assertNotIn(PATCH_TEXT, data)
+                self.assertNotIn("problem_statement", data)
 
     def test_import_report_surfaces_exclusions_and_duplicates(self) -> None:
         report = import_rows(
@@ -169,9 +233,10 @@ class AuthoringTests(unittest.TestCase):
                 _row(instance_id="bad id"),
             )
         )
-        self.assertEqual(len(report.cases), 2)
+        self.assertEqual(len(report.source_conformance), 2)
+        self.assertEqual(len(report.context_selection), 2)
         reasons = {item.reason for item in report.excluded}
-        self.assertIn("duplicate case id in sample", reasons)
+        self.assertIn("duplicate case id in source-conformance sample", reasons)
         self.assertIn("missing or invalid instance_id", reasons)
 
     def test_write_cases_refuses_to_replace_a_changed_record(self) -> None:
@@ -224,6 +289,19 @@ class SplitTests(unittest.TestCase):
             path = write_splits(cases, Path(temp) / "splits.json")
             self.assertTrue(path.is_file())
 
+    def test_the_two_suites_never_share_a_split_group(self) -> None:
+        adapted = _adapted(_row())
+        conformance = adapted.source_conformance
+        selection = adapted.context_selection
+        assert conformance is not None and selection is not None
+        self.assertNotEqual(conformance.split_group, selection.split_group)
+        self.assertEqual(
+            conformance.split_group, f"{SOURCE_CONFORMANCE}:project"
+        )
+        self.assertEqual(
+            selection.split_group, f"{CONTEXT_SELECTION}:project"
+        )
+
     def test_malformed_splits_record_is_reported(self) -> None:
         with TemporaryDirectory() as temp:
             with self.assertRaises(ContractError):
@@ -231,6 +309,39 @@ class SplitTests(unittest.TestCase):
 
 
 class CheckoutTests(unittest.TestCase):
+
+    def test_capture_defaults_keep_both_corpus_locks(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "source"
+            commit = _git_repo(repo)
+            adapted = _adapted(_row(base_commit=commit, repo_url=str(repo)))
+            store = CaptureStore(root / "store")
+            assert adapted.source_conformance is not None
+            ensure_checkout(adapted.source_conformance.source, store)
+            locks: dict[str, Path] = {}
+            for kind, case in (
+                (SOURCE_CONFORMANCE, adapted.source_conformance),
+                (CONTEXT_SELECTION, adapted.context_selection),
+            ):
+                assert case is not None
+                directory = root / kind
+                write_cases((case,), directory)
+                code, output = run_cli(
+                    "capture",
+                    "--cases-dir",
+                    str(directory),
+                    "--store",
+                    str(store.root),
+                )
+                summary = json.loads(output)
+                self.assertEqual(code, 0, summary)
+                self.assertEqual(summary["suite_id"], kind)
+                locks[kind] = Path(summary["lock"])
+            self.assertNotEqual(locks[SOURCE_CONFORMANCE], locks[CONTEXT_SELECTION])
+            for kind, path in locks.items():
+                self.assertEqual(store.read_lock(path).suite_id, kind)
+
     def test_checkout_pins_the_commit_and_refuses_drift(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)

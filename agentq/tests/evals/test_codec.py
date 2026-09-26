@@ -443,6 +443,23 @@ class RoundTripTests(unittest.TestCase):
 
 
 class StrictDecodeTests(unittest.TestCase):
+    def test_missing_required_fields_raise_contract_errors_at_each_boundary(self) -> None:
+        fixture = build_fixture("basic-edit")
+        for path in (
+            ("schema",),
+            ("snapshot", "fixture_revision"),
+            ("decision", "request", "target", "path"),
+            ("decision", "pool", "variants", 0, "text"),
+        ):
+            with self.subTest(path=path):
+                document = json.loads(encode_capture(fixture.capture))
+                parent = document
+                for key in path[:-1]:
+                    parent = parent[key]
+                del parent[path[-1]]
+                with self.assertRaises(ContractError):
+                    decode_capture(json.dumps(document).encode())
+
     def setUp(self) -> None:
         self.capture = _kitchen_sink_capture()
 
@@ -523,6 +540,20 @@ class StrictDecodeTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_missing_required_fields_raise_contract_errors(self) -> None:
+        for section, field in ((None, "schema"), ("selection", "role_diversity")):
+            with self.subTest(section=section, field=field):
+                document = json.loads(encode_config(DecisionConfig()))
+                del (document if section is None else document[section])[field]
+                with self.assertRaises(ContractError):
+                    decode_config(json.dumps(document).encode())
+
+    def test_legacy_selection_flags_keep_their_original_defaults(self) -> None:
+        document = json.loads(encode_config(DecisionConfig()))
+        del document["selection"]["variant_fallback"]
+        del document["selection"]["skip_zero_value"]
+        self.assertEqual(decode_config(json.dumps(document).encode()), DecisionConfig())
+
     def test_default_config_round_trips(self) -> None:
         config = DecisionConfig()
         self.assertEqual(decode_config(encode_config(config)), config)
@@ -591,6 +622,12 @@ class ConfigTests(unittest.TestCase):
 
 
 class CaseAndAttemptCodecTests(unittest.TestCase):
+    def test_case_suite_requires_its_cases_array(self) -> None:
+        with self.assertRaises(ContractError):
+            decode_case_suite(
+                b'{"schema":"agentq.eval.case-suite/v1","suite_id":"test"}'
+            )
+
     def test_case_suite_round_trips(self) -> None:
         suite = decode_case_suite(CASES.read_bytes())
         self.assertEqual(suite.suite_id, "orders-python-v1")

@@ -63,6 +63,22 @@ def exact_keys(
         raise ContractError(f"{what} has unknown fields: {', '.join(extra)}")
 
 
+def object_fields(
+    value: object,
+    what: str,
+    allowed: set[str],
+    *,
+    optional: Iterable[str] = (),
+) -> dict[str, object]:
+    """Validate an object's keys before decoding, with explicit legacy defaults."""
+    mapping = as_mapping(value, what)
+    exact_keys(mapping, allowed, what)
+    missing = sorted(allowed - set(optional) - mapping.keys())
+    if missing:
+        raise ContractError(f"{what} is missing fields: {', '.join(missing)}")
+    return mapping
+
+
 def read_str(value: object, what: str, *, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not value and not allow_empty):
         raise ContractError(f"{what} must be a string")

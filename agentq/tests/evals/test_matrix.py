@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from agentq.core import ContractError
 from agentq.inspection.budgeting import DeliveryBudget
@@ -20,10 +21,13 @@ from evals.experiments import (
     TuningCase,
     load_splits,
 )
+from evals.fingerprint import decision_engine_digest
 from evals.matrix import (
+    FrozenManifest,
     MatrixCaseResult,
-    choose_matrix_cell,
+    PromotionRule,
     config_document,
+    eligible_cells,
     evaluate_matrix,
     freeze_matrix,
     grouped_deltas,
@@ -32,6 +36,8 @@ from evals.matrix import (
     matrix_cells,
     matrix_report,
     matrix_summary,
+    metric_fingerprint,
+    nominate_cell,
     paired_deltas,
     resolve_matrix_profile,
     validate_holdout,
@@ -39,22 +45,21 @@ from evals.matrix import (
 )
 from evals.models import LockedCase, SuiteLock
 from evals.store import CaptureStore
-from tests.evals.support import BASELINE_PROFILE, PROJECT, compiled
+from tests.evals.support import (
+    BASELINE_PROFILE,
+    PROJECT,
+    compiled,
+    tuning_case,
+)
 
 CHALLENGER_PROFILE = PROJECT / "evals" / "profiles" / "selection-challenger.json"
 
 
-def _tuning(case_id: str) -> TuningCase:
-    fixture, judgment = compiled(case_id)
-    return TuningCase(case_id, fixture.capture, judgment, fixture.budget)
-
-
 def _store_case(store: CaptureStore, case_id: str) -> tuple[TuningCase, LockedCase]:
-    fixture, judgment = compiled(case_id)
-    capture_id = store.write_capture(fixture.capture)
-    judgment_id = store.write_judgment(judgment)
-    case = TuningCase(case_id, fixture.capture, judgment, fixture.budget)
-    locked = LockedCase(case_id, capture_id, judgment_id, fixture.budget)
+    case = tuning_case(case_id)
+    capture_id = store.write_capture(case.capture)
+    judgment_id = store.write_judgment(case.judgments)
+    locked = LockedCase(case_id, capture_id, judgment_id, case.delivery)
     return case, locked
 
 
@@ -133,6 +138,23 @@ def _row(
     }
 
 
+def _guardrail_row(
+    cell: str,
+    *,
+    critical: int,
+    present: int,
+    irrelevant: int,
+    unjudged: int = 10,
+    delivered: int = 100,
+) -> dict[str, object]:
+    return {
+        **_row(cell, 12000, critical=critical, present=present),
+        "known_irrelevant_source_chars_delivered": irrelevant,
+        "unjudged_source_chars_delivered": unjudged,
+        "delivered_source_chars_total": delivered,
+    }
+
+
 class MatrixCellTests(unittest.TestCase):
     def test_matrix_cells_map_interventions(self) -> None:
         base = DecisionConfig()
@@ -192,8 +214,16 @@ class MatrixCellTests(unittest.TestCase):
 
 
 class MatrixEvaluationTests(unittest.TestCase):
+    def test_report_without_validation_keeps_the_validation_section_empty(self) -> None:
+        base = DecisionConfig()
+        report = matrix_report(matrix_cells(base), base, (tuning_case("basic-edit"),))
+        self.assertEqual(report["chosen"]["label"], "baseline")
+        self.assertEqual(report["validation"]["cases"], [])
+        self.assertEqual(report["validation"]["summary"], [])
+        self.assertEqual(report["validation"]["paired"], {})
+
     def test_evaluate_matrix_is_deterministic(self) -> None:
-        cases = (_tuning("basic-edit"), _tuning("variant-fallback"))
+        cases = (tuning_case("basic-edit"), tuning_case("variant-fallback"))
         base = DecisionConfig()
         cells = matrix_cells(base)
         first = evaluate_matrix(cases, cells, (6000, 12000), base=base)
@@ -206,7 +236,7 @@ class MatrixEvaluationTests(unittest.TestCase):
             DecisionConfig(),
             delivery=DeliveryBudget(max_chars=1, envelope_chars=0),
         )
-        case = replace(_tuning("basic-edit"), delivery=None)
+        case = replace(tuning_case("basic-edit"), delivery=None)
         results = evaluate_matrix((case,), matrix_cells(base), (1,), base=base)
         self.assertEqual(results[0].outcome, "failed")
         self.assertEqual(results[0].failure_reason, "delivery_budget")
@@ -214,7 +244,137 @@ class MatrixEvaluationTests(unittest.TestCase):
         self.assertEqual(rows[0]["failures"], 1)
         self.assertEqual(rows[0]["failed_cases"], ["basic-edit"])
 
-    def test_choose_prefers_coverage_then_validation(self) -> None:
+    def test_summary_promotes_negative_and_cost_metrics(self) -> None:
+        results = (
+            replace(
+                _result("baseline", "case", 12000, critical=1, present=True),
+                known_irrelevant_variants_delivered=1,
+                known_irrelevant_source_chars_delivered=18,
+                unjudged_source_chars_delivered=20,
+                final_output_tokens=525,
+            ),
+        )
+        row = matrix_summary(results, budgets=(12000,))[0]
+        self.assertEqual(row["known_irrelevant_variants_delivered"], 1)
+        self.assertEqual(row["known_irrelevant_source_chars_delivered"], 18)
+        self.assertEqual(row["unjudged_source_chars_delivered"], 20)
+        self.assertEqual(row["final_output_tokens"], 525)
+
+    def test_eligibility_rejects_development_and_validation_defects(self) -> None:
+        development = [
+            _row("baseline", 12000, critical=21, present=15),
+            _row("a", 12000, critical=22, present=16),
+            _row("b", 12000, critical=22, present=16),
+        ]
+        validation = [
+            _row("baseline", 12000, critical=3, present=3),
+            _row("a", 12000, critical=0, present=0, failures=3, violations=1),
+            _row("b", 12000, critical=4, present=4),
+        ]
+        self.assertEqual(
+            eligible_cells(development, validation, ["baseline", "a", "b"]),
+            ("baseline", "b"),
+        )
+        development.append(_row("c", 12000, critical=30, present=20, failures=1))
+        validation.append(_row("c", 12000, critical=5, present=5))
+        self.assertEqual(
+            eligible_cells(
+                development, validation, ["baseline", "a", "b", "c"]
+            ),
+            ("baseline", "b"),
+        )
+
+    def test_nomination_rejects_a_validation_violation(self) -> None:
+        development = [
+            _row("baseline", 12000, critical=21, present=15),
+            _row("b", 12000, critical=22, present=16),
+        ]
+        validation = [
+            _row("baseline", 12000, critical=3, present=3),
+            _row("b", 12000, critical=0, present=0, failures=3, violations=1),
+        ]
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "baseline"
+        )
+
+    def test_nomination_rejects_a_validation_delivery_failure(self) -> None:
+        development = [
+            _row("baseline", 12000, critical=21, present=15),
+            _row("b", 12000, critical=22, present=16),
+        ]
+        validation = [
+            _row("baseline", 12000, critical=3, present=3),
+            _row("b", 12000, critical=5, present=5, failures=1),
+        ]
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "baseline"
+        )
+
+    def test_nomination_rejects_a_validation_quality_regression(self) -> None:
+        development = [
+            _row("baseline", 12000, critical=21, present=15),
+            _row("b", 12000, critical=30, present=20),
+        ]
+        validation = [
+            _row("baseline", 12000, critical=3, present=3),
+            _row("b", 12000, critical=2, present=2),
+        ]
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "baseline"
+        )
+
+    def test_nomination_rejects_a_negative_delivery_regression(self) -> None:
+        development = [
+            _guardrail_row("baseline", critical=10, present=5, irrelevant=18),
+            _guardrail_row("b", critical=12, present=6, irrelevant=500),
+        ]
+        validation = [
+            _guardrail_row("baseline", critical=3, present=3, irrelevant=18),
+            _guardrail_row("b", critical=4, present=4, irrelevant=500),
+        ]
+        self.assertEqual(
+            eligible_cells(development, validation, ["baseline", "b"]),
+            ("baseline",),
+        )
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "baseline"
+        )
+
+    def test_nomination_accepts_a_candidate_clean_on_guardrails(self) -> None:
+        development = [
+            _guardrail_row("baseline", critical=10, present=5, irrelevant=18),
+            _guardrail_row("b", critical=12, present=6, irrelevant=18),
+        ]
+        validation = [
+            _guardrail_row("baseline", critical=3, present=3, irrelevant=18),
+            _guardrail_row("b", critical=4, present=4, irrelevant=18),
+        ]
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "b"
+        )
+
+    def test_eligibility_spans_every_declared_budget(self) -> None:
+        development = [
+            _row("baseline", 6000, critical=10, present=5),
+            _row("baseline", 12000, critical=21, present=15),
+            _row("b", 6000, critical=20, present=14, failures=1),
+            _row("b", 12000, critical=22, present=16),
+        ]
+        validation = [
+            _row("baseline", 6000, critical=1, present=1),
+            _row("baseline", 12000, critical=3, present=3),
+            _row("b", 6000, critical=2, present=2),
+            _row("b", 12000, critical=4, present=4),
+        ]
+        self.assertEqual(
+            eligible_cells(development, validation, ["baseline", "b"]),
+            ("baseline",),
+        )
+        self.assertEqual(
+            nominate_cell(development, validation, ["baseline", "b"]), "baseline"
+        )
+
+    def test_nomination_ranks_validation_before_development(self) -> None:
         development = [
             _row("baseline", 12000, critical=17, present=9, noncritical=6),
             _row("a", 12000, critical=18, present=9, noncritical=6),
@@ -226,21 +386,19 @@ class MatrixEvaluationTests(unittest.TestCase):
             _row("b", 12000, critical=2, present=2),
         ]
         self.assertEqual(
-            choose_matrix_cell(development, validation, ["baseline", "a", "b"]), "b"
+            nominate_cell(development, validation, ["baseline", "a", "b"]), "a"
         )
-        validation[2] = _row("b", 12000, critical=3, present=3)
-        self.assertEqual(
-            choose_matrix_cell(development, validation, ["baseline", "a", "b"]), "b"
-        )
-        ineligible = _row("c", 12000, critical=19, present=11, violations=1)
-        self.assertEqual(
-            choose_matrix_cell(
-                development + [ineligible], validation, ["baseline", "a", "b", "c"]
-            ),
-            "b",
-        )
+
+    def test_nomination_without_validation_fits_on_development(self) -> None:
+        development = [
+            _row("baseline", 12000, critical=17, present=9),
+            _row("a", 12000, critical=18, present=9),
+        ]
+        self.assertEqual(nominate_cell(development, [], ["baseline", "a"]), "a")
+
+    def test_nomination_requires_an_eligible_cell(self) -> None:
         with self.assertRaises(ContractError):
-            choose_matrix_cell(
+            nominate_cell(
                 [_row("baseline", 12000, critical=17, present=9, failures=1)],
                 [],
                 ["baseline"],
@@ -371,10 +529,30 @@ class FreezeTests(unittest.TestCase):
             locks,
             splits_path,
             report,
+            baseline=base,
             frozen_profile_path=profile_path,
             manifest_path=manifest_path,
         )
         return store, locks, splits_path, profile_path, manifest_path, report
+
+    def _frozen(self, root: Path) -> tuple[
+        CaptureStore,
+        tuple[SuiteLock, ...],
+        Path,
+        FrozenManifest,
+        SplitAssignments,
+    ]:
+        """One frozen experiment with its manifest and splits loaded."""
+        store, locks, splits_path, _profile, manifest_path, _report = self._freeze(
+            root
+        )
+        return (
+            store,
+            locks,
+            splits_path,
+            load_frozen_manifest(manifest_path),
+            load_splits(splits_path),
+        )
 
     def test_freeze_is_idempotent_and_immutable(self) -> None:
         with TemporaryDirectory() as temp:
@@ -387,6 +565,7 @@ class FreezeTests(unittest.TestCase):
                 locks,
                 splits_path,
                 report,
+                baseline=DecisionConfig(),
                 frozen_profile_path=profile_path,
                 manifest_path=manifest_path,
             )
@@ -417,18 +596,47 @@ class FreezeTests(unittest.TestCase):
                     locks,
                     splits_path,
                     altered,
+                    baseline=DecisionConfig(),
                     frozen_profile_path=profile_path,
                     manifest_path=manifest_path,
+                )
+
+    def test_freeze_records_the_complete_experiment_identity(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            _store, _locks, _splits_path, manifest, _splits = self._frozen(root)
+            baseline = DecisionConfig()
+            self.assertEqual(manifest.baseline, baseline)
+            self.assertEqual(manifest.baseline_digest, config_digest(baseline))
+            self.assertEqual(manifest.engine_digest, decision_engine_digest())
+            self.assertEqual(manifest.metric_profile, "metrics-v1")
+            self.assertEqual(manifest.metric_fingerprint, metric_fingerprint())
+            self.assertEqual(manifest.promotion, PromotionRule())
+
+    def test_freeze_rejects_a_report_with_a_different_baseline(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            _store, locks, splits_path, _profile, manifest_path, report = self._freeze(
+                root
+            )
+            changed = replace(
+                DecisionConfig(),
+                scoring=replace(DecisionConfig().scoring, binding_bonus=9),
+            )
+            with self.assertRaises(ContractError):
+                freeze_matrix(
+                    locks,
+                    splits_path,
+                    report,
+                    baseline=changed,
+                    frozen_profile_path=root / "other-profile.json",
+                    manifest_path=root / "other-manifest.json",
                 )
 
     def test_validate_holdout_rejects_corpus_changes(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
-            _store, locks, splits_path, _profile, manifest_path, _report = self._freeze(
-                root
-            )
-            manifest = load_frozen_manifest(manifest_path)
-            splits = load_splits(splits_path)
+            _store, locks, splits_path, manifest, splits = self._frozen(root)
             validate_holdout(manifest, locks, splits_path, splits)
             with self.assertRaises(ContractError):
                 validate_holdout(
@@ -453,19 +661,92 @@ class FreezeTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 validate_holdout(manifest, locks, moved_path, load_splits(moved_path))
 
-    def test_holdout_report_uses_only_held_out_cases(self) -> None:
+    def test_validate_holdout_rejects_a_changed_decision_engine(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
-            store, locks, splits_path, _profile, manifest_path, _report = self._freeze(
-                root
+            _store, locks, splits_path, manifest, splits = self._frozen(root)
+            with patch(
+                "evals.matrix.decision_engine_digest", return_value="0" * 64
+            ):
+                with self.assertRaises(ContractError):
+                    validate_holdout(manifest, locks, splits_path, splits)
+
+    def test_validate_holdout_rejects_duplicate_frozen_suites(self) -> None:
+        with TemporaryDirectory() as temp:
+            _store, locks, splits_path, manifest, splits = self._frozen(Path(temp))
+            with self.assertRaisesRegex(ContractError, "duplicate"):
+                validate_holdout(manifest, (*locks, locks[0]), splits_path, splits)
+
+    def test_validate_holdout_rejects_a_changed_metric_definition(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            _store, locks, splits_path, manifest, splits = self._frozen(root)
+            with patch("evals.matrix.metric_fingerprint", return_value="0" * 64):
+                with self.assertRaises(ContractError):
+                    validate_holdout(manifest, locks, splits_path, splits)
+
+    def test_validate_holdout_requires_every_frozen_suite(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = CaptureStore(root / "store")
+            base = DecisionConfig()
+            development, development_lock = _store_case(store, "basic-edit")
+            held, held_lock = _store_case(store, "lexical-decoy")
+            extra, extra_lock = _store_case(store, "variant-fallback")
+            alpha = SuiteLock("alpha", (development_lock, held_lock))
+            beta = SuiteLock("beta", (extra_lock,))
+            locks = (alpha, beta)
+            splits_path = root / "splits.json"
+            _write_splits(
+                splits_path,
+                {
+                    "basic-edit": DEVELOPMENT,
+                    "lexical-decoy": HOLDOUT,
+                    "variant-fallback": HOLDOUT,
+                },
+            )
+            report = matrix_report(matrix_cells(base), base, (development, extra), (held,))
+            manifest_path = root / "frozen-matrix.json"
+            freeze_matrix(
+                locks,
+                splits_path,
+                report,
+                baseline=base,
+                frozen_profile_path=root / "m2-frozen.json",
+                manifest_path=manifest_path,
             )
             manifest = load_frozen_manifest(manifest_path)
             splits = load_splits(splits_path)
+            validate_holdout(manifest, locks, splits_path, splits)
+            with self.assertRaises(ContractError):
+                validate_holdout(manifest, (alpha,), splits_path, splits)
+
+    def test_holdout_report_rejects_a_changed_baseline(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            store, locks, splits_path, manifest, splits = self._frozen(root)
+            changed = replace(
+                manifest.baseline,
+                scoring=replace(
+                    manifest.baseline.scoring, profile="scoring-other"
+                ),
+            )
+            with self.assertRaises(ContractError):
+                holdout_report(manifest, store, locks, splits, base=changed)
+
+    def test_holdout_report_uses_only_held_out_cases(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            store, locks, splits_path, manifest, splits = self._frozen(root)
             report = holdout_report(manifest, store, locks, splits)
             self.assertEqual(report["cases"], ["lexical-decoy"])
             self.assertEqual(report["chosen_label"], "baseline")
             self.assertEqual(len(report["summary"]), 2 * len(manifest.budgets))
             self.assertEqual(len(report["paired"]), len(manifest.budgets))
+            self.assertEqual(
+                report["promotion"]["rule"], manifest.promotion.to_wire()
+            )
+            self.assertIn("promoted", report["promotion"])
             with self.assertRaises(ContractError):
                 holdout_report(
                     manifest,

@@ -28,12 +28,7 @@ from agentq.inspection.contracts import (
 )
 from agentq.inspection.service import inspect
 from tests.support.inspection_fakes import FilesystemVersionReader
-
-
-def _write(root: Path, relative: str, text: str) -> None:
-    target = root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+from tests.support.inspection_fixtures import write_source_file
 
 
 def _context(root: Path) -> InspectionContext:
@@ -64,7 +59,7 @@ class ResolutionOutcomeTests(unittest.TestCase):
     def test_unique_declaration_resolves_with_a_truthful_source_gap(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 1\n")
             bundle = inspect(_symbol_request(), _context(root))
         self.assertIsInstance(bundle.resolution, ResolvedTarget)
         assert isinstance(bundle.resolution, ResolvedTarget)
@@ -85,8 +80,8 @@ class ResolutionOutcomeTests(unittest.TestCase):
     def test_duplicate_declarations_stay_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/a.py", "def target():\n    return 1\n")
-            _write(
+            write_source_file(root, "src/a.py", "def target():\n    return 1\n")
+            write_source_file(
                 root,
                 "src/b.py",
                 "class Holder:\n    pass\n\n\ndef target():\n    return 2\n",
@@ -100,8 +95,8 @@ class ResolutionOutcomeTests(unittest.TestCase):
     def test_parse_failure_produces_an_incomplete_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/good.py", "def target():\n    return 1\n")
-            _write(root, "src/bad.py", "def target(:\n")
+            write_source_file(root, "src/good.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/bad.py", "def target(:\n")
             bundle = inspect(_symbol_request(), _context(root))
         self.assertIsInstance(bundle.resolution, UnresolvedTarget)
         assert isinstance(bundle.resolution, UnresolvedTarget)
@@ -114,7 +109,7 @@ class ResolutionOutcomeTests(unittest.TestCase):
     def test_missing_symbol_is_explicitly_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def other():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def other():\n    return 1\n")
             bundle = inspect(_symbol_request(), _context(root))
         assert isinstance(bundle.resolution, UnresolvedTarget)
         self.assertIs(bundle.resolution.reason, UnresolvedReason.NOT_FOUND)
@@ -122,11 +117,11 @@ class ResolutionOutcomeTests(unittest.TestCase):
     def test_changed_source_version_makes_the_candidate_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 1\n")
             first = inspect(_symbol_request(), _context(root))
             assert isinstance(first.resolution, ResolvedTarget)
             candidate_id = first.resolution.declaration.candidate_id  # type: ignore[union-attr]
-            _write(root, "src/service.py", "def target():\n    return 2\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 2\n")
             second = inspect(
                 InspectionRequest(
                     target=CandidateTarget(
@@ -143,7 +138,7 @@ class ResolutionOutcomeTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 1\n")
             context = _context(root)
             # Register an applicable TS adapter whose probe cannot find a project.
             from agentq.inspection.adapters.typescript import (
@@ -178,7 +173,7 @@ class SingleUnavailableAdapterTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 1\n")
             unavailable = TypeScriptInspectionAdapter(
                 probe=lambda root, scopes: TypeScriptProbe(
                     available=False, reason="node is required"
@@ -205,13 +200,13 @@ class RepositoryPipelineTests(unittest.TestCase):
     def test_edit_intent_collects_source_tests_and_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(
+            write_source_file(
                 root,
                 "pyproject.toml",
                 '[project]\nname = "orders"\nversion = "0.1.0"\n',
             )
-            _write(root, "src/service.py", "def list_orders():\n    return []\n")
-            _write(
+            write_source_file(root, "src/service.py", "def list_orders():\n    return []\n")
+            write_source_file(
                 root,
                 "tests/test_service.py",
                 "\n\ndef test_it():\n    assert list_orders() == []\n",
@@ -288,7 +283,7 @@ class PythonAdapterTests(unittest.TestCase):
         line = 'label = "😀"; target()'
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/use.py", line + "\n")
+            write_source_file(root, "src/use.py", line + "\n")
             adapter = PythonInspectionAdapter()
             result = adapter.acquire(
                 EvidenceRequest(
@@ -312,7 +307,7 @@ class PythonAdapterTests(unittest.TestCase):
     def test_declarations_expose_signature_variants(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(
+            write_source_file(
                 root,
                 "src/service.py",
                 "def target(value: int) -> int:\n    return value\n",
@@ -342,9 +337,9 @@ class CaptureCacheFreshnessTests(unittest.TestCase):
         registry = CapabilityRegistry((PythonInspectionAdapter(),))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write(root, "src/service.py", "def target():\n    return 1\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 1\n")
             first = registry.acquire(request, _capture_context(root, registry))[0]
-            _write(root, "src/service.py", "def target():\n    return 2\n")
+            write_source_file(root, "src/service.py", "def target():\n    return 2\n")
             second = registry.acquire(request, _capture_context(root, registry))[0]
         self.assertEqual(len(first.observations), 1)
         self.assertEqual(len(second.observations), 1)

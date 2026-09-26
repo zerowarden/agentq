@@ -38,11 +38,12 @@ class RepositoryError(RuntimeError):
     """The checkout cannot be read as a Git repository."""
 
 
-def _git(root: Path, *args: str) -> str:
+def run_git(root: Path, *args: str, timeout: int = 30) -> str:
+    """Run one git command in a checkout; failure is a typed repository error."""
     if not root.is_dir():
         raise RepositoryError(f"checkout is missing: {root}")
     try:
-        result = run_cmd(["git", *args], cwd=root, timeout=30)
+        result = run_cmd(["git", *args], cwd=root, timeout=timeout)
     except (AgentQError, OSError) as exc:
         raise RepositoryError(f"git could not run in {root}: {exc}") from exc
     if result.returncode != 0:
@@ -54,7 +55,7 @@ def _git(root: Path, *args: str) -> str:
 
 def _entries(root: Path) -> tuple[tuple[str, str, str], ...]:
     entries: list[tuple[str, str, str]] = []
-    for line in _git(root, "ls-files", "-s").splitlines():
+    for line in run_git(root, "ls-files", "-s").splitlines():
         match = _INDEX_ENTRY.match(line)
         if match is None:
             raise RepositoryError(f"unrecognized git index entry: {line!r}")
@@ -77,15 +78,15 @@ def repository_snapshot(root: Path, *, repo_id: str) -> RepositorySnapshot:
     A dirty working tree has no immutable identity: it is rejected rather than
     silently captured, so acceptance cannot pass on uncommitted edits.
     """
-    if _git(root, "status", "--porcelain").strip():
+    if run_git(root, "status", "--porcelain").strip():
         raise RepositoryError(f"checkout is not clean: {root}")
     entries = _entries(root)
     source = tuple(item for item in entries if not _is_configuration(item[2]))
     configuration = tuple(item for item in entries if _is_configuration(item[2]))
     return RepositorySnapshot(
         repo_id=repo_id,
-        commit=_git(root, "rev-parse", "HEAD").strip(),
-        tree=_git(root, "rev-parse", "HEAD^{tree}").strip(),
+        commit=run_git(root, "rev-parse", "HEAD").strip(),
+        tree=run_git(root, "rev-parse", "HEAD^{tree}").strip(),
         source_manifest_digest=_digest(source),
         configuration_manifest_digest=_digest(configuration),
     )

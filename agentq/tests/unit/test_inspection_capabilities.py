@@ -49,6 +49,17 @@ def _request(capability: Capability, target=None) -> EvidenceRequest:
     )
 
 
+def _candidate(path: str):
+    return make_declaration_candidate(
+        provider="fake",
+        path=path,
+        source_version="v1",
+        kind="function",
+        span=SourceSpan(start_line=1, end_line=2),
+        signature="function target()",
+    )
+
+
 class UnsupportedCapabilityTests(unittest.TestCase):
     def test_missing_handler_reports_unsupported(self) -> None:
         registry = CapabilityRegistry()
@@ -238,16 +249,6 @@ class BrokenAdapterTests(unittest.TestCase):
 
 
 class SubjectApplicabilityTests(unittest.TestCase):
-    def _candidate(self, path: str):
-        return make_declaration_candidate(
-            provider="fake",
-            path=path,
-            source_version="v1",
-            kind="function",
-            span=SourceSpan(start_line=1, end_line=2),
-            signature="function target()",
-        )
-
     def test_handlers_for_respects_the_resolved_subject_language(self) -> None:
         typescript = FakeHandler(
             name="fake-ts",
@@ -265,7 +266,7 @@ class SubjectApplicabilityTests(unittest.TestCase):
             Capability.SEMANTIC_REFERENCES,
             SymbolTarget(name="target"),
             context,
-            self._candidate("src/service.py"),
+            _candidate("src/service.py"),
         )
         self.assertEqual([handler.name for handler in handlers], ["fake-py"])
 
@@ -278,7 +279,7 @@ class SubjectApplicabilityTests(unittest.TestCase):
         report = CapabilityRegistry((typescript,)).describe(
             _symbol_request(),
             fake_context(typescript),
-            subject=self._candidate("src/service.py"),
+            subject=_candidate("src/service.py"),
         )
         entry = report.entries_for(Capability.SEMANTIC_REFERENCES)[0]
         self.assertIs(entry.status, AvailabilityStatus.NOT_APPLICABLE)
@@ -295,16 +296,6 @@ class BatchingTests(unittest.TestCase):
             limit=10,
         )
 
-    def _candidate(self, path: str):
-        return make_declaration_candidate(
-            provider="fake",
-            path=path,
-            source_version="v1",
-            kind="function",
-            span=SourceSpan(start_line=1, end_line=2),
-            signature="function target()",
-        )
-
     def test_acquire_many_batches_one_subject_into_one_invocation(self) -> None:
         handler = FakeHandler(
             name="fake",
@@ -316,7 +307,7 @@ class BatchingTests(unittest.TestCase):
             ),
         )
         registry = CapabilityRegistry((handler,))
-        subject = self._candidate("src/service.ts")
+        subject = _candidate("src/service.ts")
         results = registry.acquire_many(
             (
                 self._request(Capability.SEMANTIC_REFERENCES, subject),
@@ -343,9 +334,9 @@ class BatchingTests(unittest.TestCase):
         results = registry.acquire_many(
             (
                 self._request(
-                    Capability.SEMANTIC_REFERENCES, self._candidate("src/a.ts")
+                    Capability.SEMANTIC_REFERENCES, _candidate("src/a.ts")
                 ),
-                self._request(Capability.IMPLEMENTATIONS, self._candidate("src/b.ts")),
+                self._request(Capability.IMPLEMENTATIONS, _candidate("src/b.ts")),
             ),
             fake_context(handler),
         )
@@ -360,7 +351,7 @@ class BatchingTests(unittest.TestCase):
             ),
         )
         registry = CapabilityRegistry((handler,))
-        subject = self._candidate("src/service.ts")
+        subject = _candidate("src/service.ts")
         results = registry.acquire_many(
             (
                 self._request(Capability.SEMANTIC_REFERENCES, subject),

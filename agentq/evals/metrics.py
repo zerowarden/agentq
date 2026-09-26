@@ -26,6 +26,7 @@ from agentq.inspection.contracts import (
 from agentq.inspection.decision import DecisionConfig
 
 from .codec import capture_digest, judgment_digest
+from .fingerprint import metrics_digest
 from .models import (
     CaseEvaluation,
     ExpectedOutcomeKind,
@@ -33,10 +34,17 @@ from .models import (
     JudgmentFacet,
     JudgmentSet,
     ReplayCapture,
+    ratio,
 )
 from .replay import decision_id
 
 METRIC_PROFILE = "metrics-v1"
+
+# No tokenizer is pinned, so output tokens are a deterministic character
+# proxy. The reason travels with the number so it is never mistaken for a
+# model tokenizer count.
+TOKEN_PROXY_CHARS = 4
+TOKEN_PROXY_REASON = "character proxy: ceil(render_chars / 4); no pinned tokenizer"
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,11 @@ class MetricConfig:
 
 
 DEFAULT_METRIC_CONFIG = MetricConfig()
+
+
+def metric_fingerprint(config: MetricConfig = DEFAULT_METRIC_CONFIG) -> str:
+    """One metric identity shared by evaluations and frozen experiments."""
+    return canonical_digest({"source": metrics_digest(), "config": config.to_wire()})
 
 
 def witness_supported(
@@ -230,6 +243,53 @@ def _check_expectations(
     return tuple(unmet)
 
 
+def judged_variant_ids(
+    judgments: JudgmentSet,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Known-relevant and known-irrelevant variant ids, kept distinct."""
+    relevant: set[str] = set()
+    for witness in judgments.witnesses:
+        relevant.update(witness.acceptable_variant_ids)
+    return frozenset(relevant), frozenset(judgments.irrelevant_variant_ids)
+
+
+def _delivery_review(
+    capture: ReplayCapture,
+    judgments: JudgmentSet,
+    delivered_ids: frozenset[str],
+) -> tuple[int, int, int, int]:
+    """Delivered chars, judged chars, irrelevant variants, irrelevant chars.
+
+    A delivered variant absent from both the witnesses and the irrelevant list
+    is unjudged, never negative: absence from annotations is not a label.
+    """
+    variants = {
+        variant.variant_id: variant for variant in capture.decision.pool.variants
+    }
+    relevant, irrelevant = judged_variant_ids(judgments)
+    delivered_chars = judged_chars = irrelevant_chars = irrelevant_count = 0
+    for variant_id in delivered_ids:
+        variant = variants.get(variant_id)
+        if variant is None:
+            continue
+        chars = len(variant.text)
+        delivered_chars += chars
+        if variant_id in irrelevant:
+            irrelevant_count += 1
+            irrelevant_chars += chars
+            judged_chars += chars
+        elif variant_id in relevant:
+            judged_chars += chars
+    return delivered_chars, judged_chars, irrelevant_count, irrelevant_chars
+
+
+def _output_tokens(delivered: DecisionDelivered | None) -> tuple[int | None, str]:
+    if delivered is None or delivered.bundle.render is None:
+        return None, "no rendered output"
+    chars = delivered.bundle.render.chars
+    return (chars + TOKEN_PROXY_CHARS - 1) // TOKEN_PROXY_CHARS, TOKEN_PROXY_REASON
+
+
 def evaluate_decision(
     capture: ReplayCapture,
     outcome: DecisionOutcome,
@@ -250,7 +310,7 @@ def evaluate_decision(
         {
             "decision": decision_key,
             "judgments": judgment_key,
-            "metrics": config.to_wire(),
+            "metrics": metric_fingerprint(config),
         }
     )
 
@@ -291,6 +351,10 @@ def evaluate_decision(
         assert isinstance(outcome, DecisionFailure)
         failure_detail = outcome.detail
 
+    delivered_chars, judged_chars, irrelevant_count, irrelevant_chars = (
+        _delivery_review(capture, judgments, delivered_ids)
+    )
+    token_count, token_reason = _output_tokens(delivered)
     return CaseEvaluation(
         case_id=capture.case_id,
         capture_id=capture_id,
@@ -303,8 +367,8 @@ def evaluate_decision(
         facets=facets,
         render_chars=render_chars,
         render_bytes=render_bytes,
-        token_count=None,
-        token_reason="no pinned tokenizer",
+        token_count=token_count,
+        token_reason=token_reason,
         failure_detail=failure_detail,
         selected_variant_ids=_selection_variant_ids(
             None if delivered is None else delivered.bundle.selection
@@ -313,11 +377,11 @@ def evaluate_decision(
             () if delivered is None else _selection_variant_ids(outcome.initial_selection)
         ),
         fitting_events=0 if delivered is None else len(delivered.fitting_events),
+        delivered_source_chars=delivered_chars,
+        judged_source_chars_delivered=judged_chars,
+        known_irrelevant_variants_delivered=irrelevant_count,
+        known_irrelevant_source_chars_delivered=irrelevant_chars,
     )
-
-
-def _ratio(numerator: int, denominator: int) -> float | None:
-    return None if denominator == 0 else numerator / denominator
 
 
 def summarize(
@@ -339,17 +403,35 @@ def summarize(
         ),
         "critical_facets": critical,
         "critical_delivered": sum(item.critical_delivered for item in evaluations),
-        "critical_recall_delivered": _ratio(
+        "critical_recall_delivered": ratio(
             sum(item.critical_delivered for item in evaluations), critical
         ),
-        "critical_recall_pool": _ratio(
+        "critical_recall_pool": ratio(
             sum(item.critical_pool for item in evaluations), critical
         ),
-        "critical_recall_initial": _ratio(
+        "critical_recall_initial": ratio(
             sum(item.critical_initial for item in evaluations), critical
         ),
         "cases_with_critical_facets": len(with_critical),
         "all_critical_present_cases": len(present),
-        "all_critical_present_rate": _ratio(len(present), len(with_critical)),
+        "all_critical_present_rate": ratio(len(present), len(with_critical)),
         "render_chars_total": sum(item.render_chars or 0 for item in evaluations),
+        "known_irrelevant_variants_delivered": sum(
+            item.known_irrelevant_variants_delivered for item in evaluations
+        ),
+        "known_irrelevant_source_chars_delivered": sum(
+            item.known_irrelevant_source_chars_delivered for item in evaluations
+        ),
+        "judged_fraction_of_delivery": ratio(
+            sum(item.judged_source_chars_delivered for item in evaluations),
+            sum(item.delivered_source_chars for item in evaluations),
+        ),
+        "unjudged_fraction_of_delivery": ratio(
+            sum(
+                item.delivered_source_chars - item.judged_source_chars_delivered
+                for item in evaluations
+            ),
+            sum(item.delivered_source_chars for item in evaluations),
+        ),
+        "final_output_tokens": sum(item.token_count or 0 for item in evaluations),
     }

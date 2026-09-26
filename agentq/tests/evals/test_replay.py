@@ -20,7 +20,7 @@ from evals.build_fixtures import build_suite, write_suite
 from evals.codec import decode_capture, encode_capture
 from evals.replay import decision_id, load_config, replay_capture, replay_suite
 from evals.store import CaptureStore, StoreError
-from tests.evals.support import BASELINE_PROFILE
+from tests.evals.support import BASELINE_PROFILE, run_cli
 
 
 class ReplayTests(unittest.TestCase):
@@ -43,6 +43,17 @@ class ReplayTests(unittest.TestCase):
             scoring=replace(DEFAULT_SCORING, binding_bonus=7),
         )
         self.assertNotEqual(base, decision_id("a" * 64, changed))
+
+    def test_decision_identity_binds_the_decision_engine_source(self) -> None:
+        with mock.patch(
+            "evals.replay.decision_engine_digest", return_value="1" * 64
+        ):
+            first = decision_id("a" * 64, DecisionConfig())
+        with mock.patch(
+            "evals.replay.decision_engine_digest", return_value="2" * 64
+        ):
+            second = decision_id("a" * 64, DecisionConfig())
+        self.assertNotEqual(first, second)
 
     def test_baseline_profile_loads_as_the_runtime_default(self) -> None:
         self.assertEqual(load_config(BASELINE_PROFILE), DecisionConfig())
@@ -121,39 +132,27 @@ class CliSliceTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             store_root = Path(temp) / "store"
             run = Path(temp) / "run"
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = evals_cli.main(
-                    [
-                        "build-fixtures",
-                        "--suite",
-                        "smoke-v1",
-                        "--store",
-                        str(store_root),
-                    ]
-                )
+            code, output = run_cli(
+                "build-fixtures", "--suite", "smoke-v1", "--store", str(store_root)
+            )
             self.assertEqual(code, 0)
-            summary = json.loads(stdout.getvalue())
+            summary = json.loads(output)
             self.assertEqual(len(summary["cases"]), 8)
             self.assertTrue(all(case["variant_aliases"] for case in summary["cases"]))
             lock_path = Path(summary["lock"])
             self.assertTrue(lock_path.is_file())
 
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = evals_cli.main(
-                    [
-                        "replay",
-                        "--suite",
-                        str(lock_path),
-                        "--profile",
-                        str(BASELINE_PROFILE),
-                        "--run-dir",
-                        str(run),
-                    ]
-                )
+            code, output = run_cli(
+                "replay",
+                "--suite",
+                str(lock_path),
+                "--profile",
+                str(BASELINE_PROFILE),
+                "--run-dir",
+                str(run),
+            )
             self.assertEqual(code, 0)
-            replay_summary = json.loads(stdout.getvalue())
+            replay_summary = json.loads(output)
             self.assertEqual(replay_summary["delivered"], 8)
             self.assertEqual(replay_summary["failed"], 0)
             self.assertEqual(len(replay_summary["cases"]), 8)
@@ -161,29 +160,13 @@ class CliSliceTests(unittest.TestCase):
     def test_catalog_renders_one_case_in_alias_terms(self) -> None:
         with TemporaryDirectory() as temp:
             store_root = Path(temp) / "store"
-            with contextlib.redirect_stdout(io.StringIO()):
-                evals_cli.main(
-                    [
-                        "build-fixtures",
-                        "--suite",
-                        "smoke-v1",
-                        "--store",
-                        str(store_root),
-                    ]
-                )
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = evals_cli.main(
-                    [
-                        "catalog",
-                        "--store",
-                        str(store_root),
-                        "--case",
-                        "basic-edit",
-                    ]
-                )
+            run_cli(
+                "build-fixtures", "--suite", "smoke-v1", "--store", str(store_root)
+            )
+            code, text = run_cli(
+                "catalog", "--store", str(store_root), "--case", "basic-edit"
+            )
             self.assertEqual(code, 0)
-            text = stdout.getvalue()
             self.assertIn("request: location:orders.py:10:5", text)
             self.assertIn("searched (collection plan):", text)
             self.assertIn("acquired (", text)
@@ -204,10 +187,8 @@ class CliSliceTests(unittest.TestCase):
             run = Path(temp) / "run"
             replay_suite(store, altered, DecisionConfig(), run)
 
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = evals_cli.main(["evaluate", "--run-dir", str(run)])
-            report = json.loads(stdout.getvalue())
+            code, output = run_cli("evaluate", "--run-dir", str(run))
+            report = json.loads(output)
         self.assertEqual(code, 0)
         self.assertEqual(report["unevaluated_cases"], 1)
         self.assertEqual(report["evaluated_cases"], 7)

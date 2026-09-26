@@ -88,23 +88,3 @@ Common options include:
 The default output budget is 12,000 characters. Acquisition policy (per-file
 sampling, page limits, coverage counting, context) and the delivery budget are
 chosen by `agentq`, not by the caller.
-
-## Privacy
-
-By default, `agentq`:
-
-- makes no network requests during normal use;
-- excludes common sensitive paths from searches and reads; and
-- redacts common secret-like values from retained command logs.
-
-Repository root, filesystem boundary, sensitive-path policy, and output budgets
-are host concerns; the agent-facing commands do not expose them as flags.
-
-## More help
-
-```bash
-agentq --help
-agentq COMMAND --help
-```
-
-The skill documentation under [`skills/`](../skills/) contains stricter workflows for coding agents.

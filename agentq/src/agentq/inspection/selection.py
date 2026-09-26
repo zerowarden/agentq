@@ -9,6 +9,7 @@ heuristic makes no optimality claim.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
 
@@ -205,8 +206,10 @@ class _SelectionState:
     )
     reserved: list[str] = field(default_factory=list[str])
     represented_roles: set[EvidenceRole] = field(default_factory=set[EvidenceRole])
-    covered: list[tuple[ObservationKind | None, str, int, int]] = field(
-        default_factory=list[tuple[ObservationKind | None, str, int, int]]
+    # Coverage is keyed by observation so a representation upgrade can retract
+    # exactly its own extent instead of guessing from the new variant's span.
+    covered: list[tuple[str, ObservationKind | None, str, int, int]] = field(
+        default_factory=list[tuple[str, ObservationKind | None, str, int, int]]
     )
     files: dict[str, int] = field(default_factory=dict[str, int])
     cost: int = 0
@@ -239,24 +242,59 @@ class _SelectionState:
         self.selected.append(item)
         self.chosen[item.observation_id] = item.variant
         self.cost += selected_cost(item, self.output_format)
+        self._credit(item.observation_id, item.variant, features)
+
+    def replace(
+        self,
+        current: SelectedEvidence,
+        upgraded: SelectedEvidence,
+        features: EvidenceFeatures | None,
+    ) -> None:
+        """Swap one chosen representation, keeping accounting on the new extent."""
+        self.selected[self.selected.index(current)] = upgraded
+        self.chosen[upgraded.observation_id] = upgraded.variant
+        self.cost += selected_cost(upgraded, self.output_format) - selected_cost(
+            current, self.output_format
+        )
+        self.covered = [
+            entry for entry in self.covered if entry[0] != upgraded.observation_id
+        ]
+        role = None if features is None else features.role
+        old_path = current.variant.source.path
+        if role in PER_FILE_ROLES and old_path is not None:
+            self.files[old_path] = max(0, self.files.get(old_path, 0) - 1)
+        self._credit(upgraded.observation_id, upgraded.variant, features)
+
+    def _credit(
+        self,
+        observation_id: str,
+        variant: EvidenceVariant,
+        features: EvidenceFeatures | None,
+    ) -> None:
         role = None if features is None else features.role
         if role is not None:
             self.represented_roles.add(role)
-        span = item.variant.span
-        path = item.variant.source.path
+        span = variant.span
+        path = variant.source.path
         if role in PER_FILE_ROLES and path is not None:
             # Only capped roles consume the per-file quota: required source
             # and declaration evidence must not spend the optional budget.
             self.files[path] = self.files.get(path, 0) + 1
         kind = None if features is None else features.observation_kind
         if span is not None and path is not None:
-            self.covered.append((kind, path, span.start_line, span.end_line))
+            self.covered.append(
+                (observation_id, kind, path, span.start_line, span.end_line)
+            )
 
     def omit(self, observation_id: str, variant_id: str | None, reason: str) -> None:
         self.omitted.append(OmittedEvidence(observation_id, variant_id, reason))
 
     def overlaps(
-        self, variant: EvidenceVariant, features: EvidenceFeatures | None
+        self,
+        variant: EvidenceVariant,
+        features: EvidenceFeatures | None,
+        *,
+        ignore: str | None = None,
     ) -> bool:
         """Overlap is repeated excerpts of one kind, never across kinds."""
         span = variant.span
@@ -265,11 +303,13 @@ class _SelectionState:
             return False
         kind = None if features is None else features.observation_kind
         return any(
-            covered_kind is kind
+            covered_id != ignore
+            and covered_kind is kind
             and covered_path == path
             and span.start_line <= covered_end
             and span.end_line >= covered_start
-            for covered_kind, covered_path, covered_start, covered_end in self.covered
+            for covered_id, covered_kind, covered_path, covered_start, covered_end
+            in self.covered
         )
 
     def file_capped(
@@ -281,6 +321,28 @@ class _SelectionState:
         if path is None:
             return False
         return self.files.get(path, 0) >= limit
+
+    def overlap_rejection(
+        self, variant: EvidenceVariant, features: EvidenceFeatures | None
+    ) -> str | None:
+        """The overlap rejection for one proposed variant, or ``None``."""
+        return (
+            OMISSION_OVERLAP if self.overlaps(variant, features) else None
+        )
+
+    def optional_rejection(
+        self,
+        variant: EvidenceVariant,
+        features: EvidenceFeatures | None,
+        limit: int,
+    ) -> str | None:
+        """Why one optional variant cannot be taken, evaluated on that variant."""
+        overlap = self.overlap_rejection(variant, features)
+        if overlap is not None:
+            return overlap
+        if features is not None and self.file_capped(features, variant, limit):
+            return OMISSION_SAME_FILE
+        return None
 
 
 def _admissible_variants(
@@ -308,9 +370,17 @@ def _take_fitting(
     *,
     reason: str,
     fallback: bool,
+    reject: Callable[[EvidenceVariant], str | None] | None = None,
 ) -> bool:
-    """Take the first representation that fits; without fallback, only the best."""
+    """Take the first representation that fits; without fallback, only the best.
+
+    ``reject`` is evaluated against the actual proposed variant, so a fallback
+    that changes the covered extent cannot slip past a constraint the preferred
+    variant already failed.
+    """
     for variant in variants if fallback else variants[:1]:
+        if reject is not None and reject(variant) is not None:
+            continue
         item = state.build(observation_id, variant, reason, scored)
         if state.fits(item):
             state.take(item, features)
@@ -318,14 +388,65 @@ def _take_fitting(
     return False
 
 
+def _rejection_reason(
+    reject: Callable[[EvidenceVariant], str | None],
+    variants: tuple[EvidenceVariant, ...],
+    *,
+    fallback: bool,
+) -> str:
+    """The first constraint that rejected a tried variant, else a budget loss."""
+    for variant in variants if fallback else variants[:1]:
+        reason = reject(variant)
+        if reason is not None:
+            return reason
+    return OMISSION_BUDGET
+
+
+def _upgrade_feasible(
+    state: _SelectionState,
+    current: SelectedEvidence,
+    variant: EvidenceVariant,
+    features: EvidenceFeatures | None,
+    requirements: tuple[EvidenceRequirement, ...],
+    pool: EvidencePool,
+    profile: SelectionProfile,
+) -> bool:
+    """Whether a replacement is admissible against the actual proposed variant."""
+    if state.overlaps(variant, features, ignore=current.observation_id):
+        return False
+    if (
+        features is not None
+        and features.role in PER_FILE_ROLES
+        and variant.source.path != current.variant.source.path
+        and variant.source.path is not None
+        and state.files.get(variant.source.path, 0) >= profile.per_file_limit
+    ):
+        return False
+    return not any(
+        _variant_satisfies(pool, current.variant, item)
+        and not _variant_satisfies(pool, variant, item)
+        for item in requirements
+    )
+
+
 def _upgrade_chosen(
     state: _SelectionState,
     observation_id: str,
     variant: EvidenceVariant,
     requirement: EvidenceRequirement,
+    requirements: tuple[EvidenceRequirement, ...],
+    pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
+    profile: SelectionProfile,
 ) -> bool:
-    """Replace a chosen representation, charging only the serialized difference."""
+    """Replace a chosen representation, charging only the serialized difference.
+
+    The replacement may cover a different extent, so feasibility is evaluated
+    against the actual variant: it must not overlap other selected evidence of
+    its kind, must respect the per-file quota, must keep every requirement the
+    previous representation satisfied, and must fit the remaining budget. The
+    replaced extent is retracted from coverage before the new one is credited.
+    """
     current = next(
         (item for item in state.selected if item.observation_id == observation_id),
         None,
@@ -334,10 +455,12 @@ def _upgrade_chosen(
         return False
     if current.variant.variant_id == variant.variant_id:
         return True
-    # An upgrade changes representation only; variants of one observation share
-    # their source location, so coverage and file accounting stay valid.
-    assert variant.span == current.variant.span
-    assert variant.source.path == current.variant.source.path
+    breakdown = scored.get(observation_id)
+    features = None if breakdown is None else breakdown.features
+    if not _upgrade_feasible(
+        state, current, variant, features, requirements, pool, profile
+    ):
+        return False
     upgraded = state.build(
         observation_id,
         variant,
@@ -350,10 +473,19 @@ def _upgrade_chosen(
     )
     if state.cost + delta > state.available:
         return False
-    state.selected[state.selected.index(current)] = upgraded
-    state.chosen[observation_id] = variant
-    state.cost += delta
+    state.replace(current, upgraded, features)
     return True
+
+
+def _optional_rejector(
+    state: _SelectionState,
+    features: EvidenceFeatures | None,
+    limit: int,
+) -> Callable[[EvidenceVariant], str | None]:
+    def reject(variant: EvidenceVariant) -> str | None:
+        return state.optional_rejection(variant, features, limit)
+
+    return reject
 
 
 def _reserve_required(
@@ -370,17 +502,25 @@ def _reserve_required(
         if not candidates:
             continue
         if _reserve_requirement(
-            state, candidates, requirement, scored, profile.variant_fallback
+            state,
+            pool,
+            policy.requirements,
+            candidates,
+            requirement,
+            scored,
+            profile,
         ):
             state.reserved.append(requirement.requirement_id)
 
 
 def _reserve_requirement(
     state: _SelectionState,
+    pool: EvidencePool,
+    requirements: tuple[EvidenceRequirement, ...],
     candidates: tuple[tuple[str, EvidenceVariant], ...],
     requirement: EvidenceRequirement,
     scored: dict[str, ScoredEvidence],
-    fallback: bool,
+    profile: SelectionProfile,
 ) -> bool:
     """Take the smallest acceptable representation that fits the budget."""
     for observation_id, variant in candidates:
@@ -388,8 +528,15 @@ def _reserve_requirement(
         if existing is not None:
             if existing.variant_id == variant.variant_id:
                 return True
-            if fallback and _upgrade_chosen(
-                state, observation_id, variant, requirement, scored
+            if profile.variant_fallback and _upgrade_chosen(
+                state,
+                observation_id,
+                variant,
+                requirement,
+                requirements,
+                pool,
+                scored,
+                profile,
             ):
                 return True
             continue
@@ -411,18 +558,46 @@ def _reserve_requirement(
     return False
 
 
+def _optional_admissible(
+    breakdown: ScoredEvidence | None, profile: SelectionProfile
+) -> bool:
+    """Whether one optional observation may be admitted under this profile.
+
+    Every optional phase consults this single predicate, so a zero-value
+    observation cannot enter through role diversity after the score-fill phase
+    has declared it excluded. Required reservation never consults it.
+    """
+    if not profile.skip_zero_value:
+        return True
+    return breakdown is not None and breakdown.score.total != 0
+
+
 def _select_role_representatives(
     state: _SelectionState,
     pool: EvidencePool,
     scored: dict[str, ScoredEvidence],
     profile: SelectionProfile,
 ) -> None:
-    """One best candidate per still-unrepresented role, best role first."""
-    while True:
-        candidate = _next_role_candidate(state, pool, scored)
-        if candidate is None:
-            return
-        observation_id, variants, features = candidate
+    """One best candidate per still-unrepresented role, best role first.
+
+    Role representatives pass the same optional admission as the score-fill
+    phase, including the per-file quota: a role whose only candidates sit in a
+    capped file stays unrepresented rather than exceeding the cap.
+    """
+    for observation in _ordered_observations(pool, scored):
+        observation_id = observation.observation_id
+        if observation_id in state.chosen or state.is_unstable(observation_id):
+            continue
+        breakdown = scored.get(observation_id)
+        if breakdown is None or not _optional_admissible(breakdown, profile):
+            continue
+        features = breakdown.features
+        if features.role is None or features.role in state.represented_roles:
+            continue
+        variants = _admissible_variants(pool, observation_id, None)
+        if not variants:
+            continue
+        reject = _optional_rejector(state, features, profile.per_file_limit)
         if _take_fitting(
             state,
             observation_id,
@@ -431,36 +606,14 @@ def _select_role_representatives(
             scored,
             reason=REASON_ROLE,
             fallback=profile.variant_fallback,
+            reject=reject,
         ):
             continue
-        state.omit(observation_id, variants[0].variant_id, OMISSION_BUDGET)
-        if features.role is not None:
-            state.represented_roles.add(features.role)
-
-
-def _next_role_candidate(
-    state: _SelectionState,
-    pool: EvidencePool,
-    scored: dict[str, ScoredEvidence],
-) -> tuple[str, tuple[EvidenceVariant, ...], EvidenceFeatures] | None:
-    for observation in _ordered_observations(pool, scored):
-        if observation.observation_id in state.chosen:
-            continue
-        if state.is_unstable(observation.observation_id):
-            continue
-        breakdown = scored.get(observation.observation_id)
-        if breakdown is None:
-            continue
-        features = breakdown.features
-        if features.role is None or features.role in state.represented_roles:
-            continue
-        variants = _admissible_variants(pool, observation.observation_id, None)
-        if not variants:
-            continue
-        if state.overlaps(variants[0], features):
-            continue
-        return observation.observation_id, variants, features
-    return None
+        state.omit(
+            observation_id,
+            variants[0].variant_id,
+            _rejection_reason(reject, variants, fallback=profile.variant_fallback),
+        )
 
 
 def _priority_variant(
@@ -537,20 +690,13 @@ def _fill_by_score(
             continue
         breakdown = scored.get(observation_id)
         observation_features = None if breakdown is None else breakdown.features
-        if state.overlaps(variant, observation_features):
-            state.omit(observation_id, variant.variant_id, OMISSION_OVERLAP)
-            continue
-        if observation_features is not None and state.file_capped(
-            observation_features, variant, profile.per_file_limit
-        ):
-            state.omit(observation_id, variant.variant_id, OMISSION_SAME_FILE)
-            continue
-        if profile.skip_zero_value and (
-            breakdown is None or breakdown.score.total == 0
-        ):
+        if not _optional_admissible(breakdown, profile):
             state.omit(observation_id, variant.variant_id, OMISSION_NO_VALUE)
             continue
         variants = _admissible_variants(pool, observation_id, None)
+        reject = _optional_rejector(
+            state, observation_features, profile.per_file_limit
+        )
         if _take_fitting(
             state,
             observation_id,
@@ -559,9 +705,14 @@ def _fill_by_score(
             scored,
             reason=REASON_RELEVANCE,
             fallback=profile.variant_fallback,
+            reject=reject,
         ):
             continue
-        state.omit(observation_id, variant.variant_id, OMISSION_BUDGET)
+        state.omit(
+            observation_id,
+            variant.variant_id,
+            _rejection_reason(reject, variants, fallback=profile.variant_fallback),
+        )
 
 
 def reduce_selection(
@@ -651,7 +802,7 @@ def _reservation_candidates(
     for observation in _ordered_observations(pool, scored):
         if observation.observation_id in pool.unstable_observation_ids:
             continue
-        if not _observation_matches(requirement, observation):
+        if not observation_matches(requirement, observation):
             continue
         existing = chosen.get(observation.observation_id)
         if existing is not None:
@@ -695,10 +846,10 @@ def _variant_satisfies(
         or observation.observation_id in pool.unstable_observation_ids
     ):
         return False
-    return _observation_matches(requirement, observation)
+    return observation_matches(requirement, observation)
 
 
-def _observation_matches(
+def observation_matches(
     requirement: EvidenceRequirement, observation: Observation
 ) -> bool:
     """Kind plus domain matching; a labeled test mention is not a source use."""
@@ -786,7 +937,7 @@ def _assess(
     matched = tuple(
         observation
         for observation in pool.observations
-        if _observation_matches(requirement, observation)
+        if observation_matches(requirement, observation)
     )
     unstable = tuple(
         observation

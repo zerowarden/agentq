@@ -35,7 +35,7 @@ from .json import (
     as_list,
     as_mapping,
     decode_json,
-    exact_keys,
+    object_fields,
     optional_str,
     read_enum,
     read_int,
@@ -66,10 +66,8 @@ def _snapshot_from_wire(value: object, what: str) -> Snapshot:
     mapping = as_mapping(value, what)
     kind = read_str(mapping.get("kind"), f"{what}.kind")
     if kind == "fixture":
-        exact_keys(
-            mapping,
-            {"kind", "fixture_id", "fixture_revision", "content_digest"},
-            what,
+        object_fields(
+            mapping, what, {"kind", "fixture_id", "fixture_revision", "content_digest"}
         )
         return FixtureSnapshot(
             fixture_id=read_str(mapping["fixture_id"], f"{what}.fixture_id"),
@@ -81,8 +79,9 @@ def _snapshot_from_wire(value: object, what: str) -> Snapshot:
             ),
         )
     if kind == "repository":
-        exact_keys(
+        object_fields(
             mapping,
+            what,
             {
                 "kind",
                 "repo_id",
@@ -91,7 +90,6 @@ def _snapshot_from_wire(value: object, what: str) -> Snapshot:
                 "source_manifest_digest",
                 "configuration_manifest_digest",
             },
-            what,
         )
         return RepositorySnapshot(
             repo_id=read_str(mapping["repo_id"], f"{what}.repo_id"),
@@ -133,8 +131,9 @@ def _limits_wire(limits: AcquisitionLimits) -> dict[str, object]:
 
 
 def _limits_from_wire(value: object, what: str) -> AcquisitionLimits:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {*LIMIT_FIELDS, "deadline_seconds"}, what)
+    mapping = object_fields(
+        value, what, {*LIMIT_FIELDS, "deadline_seconds"}, optional=_DEFAULTED_LIMIT_FIELDS
+    )
     fields: dict[str, int] = {}
     for name in LIMIT_FIELDS:
         if name in mapping:
@@ -169,23 +168,17 @@ def _report_wire(report: CapabilityReport) -> dict[str, object]:
 
 
 def _report_from_wire(value: object, what: str) -> CapabilityReport:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"request_id", "entries"}, what)
+    mapping = object_fields(value, what, {"request_id", "entries"})
     entries: list[CapabilityEntry] = []
     for index, item in enumerate(as_list(mapping["entries"], what)):
-        entry = as_mapping(item, f"{what}.entries[{index}]")
-        exact_keys(
-            entry,
-            {
+        entry = object_fields(item, f"{what}.entries[{index}]", {
                 "capability",
                 "status",
                 "provider",
                 "provider_version",
                 "reason",
                 "diagnostics",
-            },
-            f"{what}.entries[{index}]",
-        )
+            })
         entries.append(
             CapabilityEntry(
                 capability=read_enum(
@@ -225,8 +218,7 @@ def _producer_wire(producer: ProducerFingerprint) -> dict[str, object]:
 
 
 def _producer_from_wire(value: object, what: str) -> ProducerFingerprint:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"provider", "version"}, what)
+    mapping = object_fields(value, what, {"provider", "version"})
     return ProducerFingerprint(
         provider=read_str(mapping["provider"], f"{what}.provider"),
         version=optional_str(mapping["version"], f"{what}.version"),
@@ -250,10 +242,7 @@ def _capture_wire(capture: ReplayCapture) -> dict[str, object]:
 
 
 def _capture_from_wire(value: object, what: str) -> ReplayCapture:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "schema",
             "case_id",
             "snapshot",
@@ -261,9 +250,7 @@ def _capture_from_wire(value: object, what: str) -> ReplayCapture:
             "limits",
             "capability_report",
             "decision",
-        },
-        what,
-    )
+        })
     schema = read_str(mapping["schema"], f"{what}.schema")
     if schema != CAPTURE_SCHEMA:
         raise ContractError(f"unsupported capture schema: {schema!r}")

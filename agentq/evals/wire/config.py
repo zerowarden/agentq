@@ -24,20 +24,17 @@ from ..models import (
 from .json import (
     as_mapping,
     decode_json,
-    exact_keys,
+    object_fields,
     read_bool,
     read_int,
     read_str,
 )
 
 
-def _scoring_wire(profile: ScoringProfile) -> dict[str, object]:
-    return profile.to_wire()
-
-
 def _scoring_from_wire(value: object, what: str) -> ScoringProfile:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"profile", "binding_bonus", "intent_priorities"}, what)
+    mapping = object_fields(
+        value, what, {"profile", "binding_bonus", "intent_priorities"}
+    )
     priorities = as_mapping(mapping["intent_priorities"], f"{what}.intent_priorities")
     unknown = sorted(set(priorities) - {intent.value for intent in Intent})
     if unknown:
@@ -86,29 +83,20 @@ def _scoring_from_wire(value: object, what: str) -> ScoringProfile:
     )
 
 
-def _selection_wire(profile: SelectionProfile) -> dict[str, object]:
-    return profile.to_wire()
-
-
 # Selection flags introduced after the first profiles were written: a profile
 # that predates one falls back to the behavior it had.
 _DEFAULTED_SELECTION_FIELDS = ("variant_fallback", "skip_zero_value")
 
 
 def _selection_from_wire(value: object, what: str) -> SelectionProfile:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "profile",
             "reserve_required",
             "role_diversity",
             "per_file_limit",
             "fill_by_score",
             *_DEFAULTED_SELECTION_FIELDS,
-        },
-        what,
-    )
+        }, optional=_DEFAULTED_SELECTION_FIELDS)
     defaults = SelectionProfile()
     variant_fallback = (
         read_bool(mapping["variant_fallback"], f"{what}.variant_fallback")
@@ -140,8 +128,7 @@ def _delivery_wire(delivery: DeliveryBudget) -> dict[str, object]:
 
 
 def _delivery_from_wire(value: object, what: str) -> DeliveryBudget:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"max_chars", "envelope_chars"}, what)
+    mapping = object_fields(value, what, {"max_chars", "envelope_chars"})
     return DeliveryBudget(
         max_chars=read_int(mapping["max_chars"], f"{what}.max_chars", minimum=1),
         envelope_chars=read_int(
@@ -153,8 +140,8 @@ def _delivery_from_wire(value: object, what: str) -> DeliveryBudget:
 def _config_wire(config: DecisionConfig) -> dict[str, object]:
     return {
         "schema": CONFIG_SCHEMA,
-        "scoring": _scoring_wire(config.scoring),
-        "selection": _selection_wire(config.selection),
+        "scoring": config.scoring.to_wire(),
+        "selection": config.selection.to_wire(),
         "delivery": _delivery_wire(config.delivery),
         "output_format": config.output_format,
     }
@@ -169,11 +156,10 @@ def decode_config(data: bytes) -> DecisionConfig:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ContractError(f"decision config is not valid UTF-8: {exc}") from exc
-    mapping = as_mapping(decode_json(text, what="decision config"), "decision config")
-    exact_keys(
-        mapping,
-        {"schema", "scoring", "selection", "delivery", "output_format"},
+    mapping = object_fields(
+        decode_json(text, what="decision config"),
         "decision config",
+        {"schema", "scoring", "selection", "delivery", "output_format"},
     )
     schema = read_str(mapping["schema"], "decision config.schema")
     if schema != CONFIG_SCHEMA:

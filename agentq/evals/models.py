@@ -10,6 +10,7 @@ evaluation label: aliases and judgments live outside captures.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
@@ -20,6 +21,7 @@ from agentq.core import (
     require_bool,
     require_int,
     require_str,
+    require_unique_strings,
 )
 from agentq.inspection.budgeting import AcquisitionLimits, DeliveryBudget
 from agentq.inspection.contracts import (
@@ -165,12 +167,23 @@ class SuiteLock:
             is_instance_of(item, LockedCase) for item in self.cases
         ):
             raise ContractError("suite lock cases must be a tuple of LockedCase")
+        require_unique_strings(
+            tuple(case.case_id for case in self.cases), "suite lock case ids"
+        )
 
     def is_evaluated(self) -> bool:
         """A frozen evaluated suite has a judgment for every scheduled case."""
         return bool(self.cases) and all(
             case.judgment_id is not None for case in self.cases
         )
+
+
+def validate_suite_membership(locks: Sequence[SuiteLock]) -> None:
+    """An experiment counts each suite and each case exactly once."""
+    require_unique_strings(tuple(lock.suite_id for lock in locks), "suite ids")
+    require_unique_strings(
+        tuple(case.case_id for lock in locks for case in lock.cases), "case ids"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +523,54 @@ class JudgmentSet:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Aggregation helpers
+# ---------------------------------------------------------------------------
+
+
+def ratio(numerator: int, denominator: int) -> float | None:
+    """A rate with an explicit N/A result when the denominator is zero."""
+    return None if denominator == 0 else numerator / denominator
+
+
+def delivery_fractions(
+    delivered_chars: int, judged_chars: int
+) -> tuple[float | None, float | None]:
+    """Judged and unjudged shares of delivered source characters."""
+    judged = ratio(judged_chars, delivered_chars)
+    if judged is None:
+        return None, None
+    return judged, ratio(delivered_chars - judged_chars, delivered_chars)
+
+
+def evaluation_is_clean(*, failures: int, violations: int, unmet: int) -> bool:
+    """Eligibility always requires successful delivery and clean correctness gates."""
+    return failures == 0 and violations == 0 and unmet == 0
+
+
+def delivery_guardrail_violations(
+    *,
+    irrelevant_chars: int,
+    unjudged_fraction: float | None,
+    baseline_irrelevant_chars: int | None,
+    baseline_unjudged_fraction: float | None,
+) -> tuple[str, ...]:
+    """Known-irrelevant volume and the unjudged share must not exceed baseline."""
+    violations: list[str] = []
+    if (
+        baseline_irrelevant_chars is not None
+        and irrelevant_chars > baseline_irrelevant_chars
+    ):
+        violations.append("known_irrelevant_delivery_regressed")
+    if (
+        baseline_unjudged_fraction is not None
+        and unjudged_fraction is not None
+        and unjudged_fraction > baseline_unjudged_fraction
+    ):
+        violations.append("unjudged_delivery_regressed")
+    return tuple(violations)
+
+
 @dataclass(frozen=True)
 class FacetCoverage:
     """One facet's support at the pool, initial-selection, and delivery stages."""
@@ -542,6 +603,13 @@ class CaseEvaluation:
     selected_variant_ids: tuple[str, ...] = ()
     initial_selected_variant_ids: tuple[str, ...] = ()
     fitting_events: int = 0
+    # Delivered material by review status: known negatives, known positives,
+    # and material nobody judged are kept distinct. Source characters are the
+    # volume measure; a variant absent from the annotations is not negative.
+    delivered_source_chars: int = 0
+    judged_source_chars_delivered: int = 0
+    known_irrelevant_variants_delivered: int = 0
+    known_irrelevant_source_chars_delivered: int = 0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -554,6 +622,30 @@ class CaseEvaluation:
         ):
             require_str(value, f"case evaluation {name}")
         require_int(self.fitting_events, "case evaluation fitting events", minimum=0)
+        for name, value in (
+            ("delivered source chars", self.delivered_source_chars),
+            ("judged source chars delivered", self.judged_source_chars_delivered),
+            (
+                "known irrelevant variants delivered",
+                self.known_irrelevant_variants_delivered,
+            ),
+            (
+                "known irrelevant source chars delivered",
+                self.known_irrelevant_source_chars_delivered,
+            ),
+        ):
+            require_int(value, f"case evaluation {name}", minimum=0)
+        if self.judged_source_chars_delivered > self.delivered_source_chars:
+            raise ContractError(
+                "case evaluation judged chars cannot exceed delivered chars"
+            )
+        if (
+            self.known_irrelevant_source_chars_delivered
+            > self.judged_source_chars_delivered
+        ):
+            raise ContractError(
+                "case evaluation known-irrelevant chars cannot exceed judged chars"
+            )
 
     @property
     def critical_facets(self) -> tuple[FacetCoverage, ...]:
@@ -581,3 +673,38 @@ class CaseEvaluation:
         if self.critical_total == 0:
             return None
         return self.critical_delivered == self.critical_total
+
+    @property
+    def noncritical_facets(self) -> tuple[FacetCoverage, ...]:
+        return tuple(item for item in self.facets if not item.critical)
+
+    @property
+    def noncritical_total(self) -> int:
+        """Pool-supported noncritical facets: the optional coverage base."""
+        return sum(1 for item in self.noncritical_facets if item.pool_supported)
+
+    @property
+    def noncritical_delivered(self) -> int:
+        return sum(
+            1
+            for item in self.noncritical_facets
+            if item.pool_supported and item.delivered_supported
+        )
+
+    @property
+    def final_output_tokens(self) -> int | None:
+        return self.token_count
+
+    @property
+    def judged_fraction_of_delivery(self) -> float | None:
+        """Share of delivered source characters the reviewer judged at all."""
+        return delivery_fractions(
+            self.delivered_source_chars, self.judged_source_chars_delivered
+        )[0]
+
+    @property
+    def unjudged_fraction_of_delivery(self) -> float | None:
+        """Share of delivered source characters absent from the annotations."""
+        return delivery_fractions(
+            self.delivered_source_chars, self.judged_source_chars_delivered
+        )[1]

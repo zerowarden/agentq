@@ -30,12 +30,12 @@ from ..models import (
     SuiteLock,
 )
 from .config import _delivery_from_wire, _delivery_wire
-from .contracts import _request_from_wire, _request_wire
+from .contracts import _request_from_wire
 from .json import (
     as_list,
     as_mapping,
     decode_json,
-    exact_keys,
+    object_fields,
     optional_int,
     optional_str,
     read_bool,
@@ -79,11 +79,10 @@ def _expected_wire(outcome: ExpectedOutcome) -> dict[str, object]:
 
 
 def _expected_from_wire(value: object, what: str) -> ExpectedOutcome:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {"kind", "requirement_id", "status", "code", "minimum", "audit_note"},
+    mapping = object_fields(
+        value,
         what,
+        {"kind", "requirement_id", "status", "code", "minimum", "audit_note"},
     )
     return ExpectedOutcome(
         kind=read_enum(ExpectedOutcomeKind, mapping["kind"], f"{what}.kind"),
@@ -107,8 +106,7 @@ def _witness_wire(witness: JudgmentWitness) -> dict[str, object]:
 
 
 def _witness_from_wire(value: object, what: str) -> JudgmentWitness:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"witness_id", "acceptable_variant_ids"}, what)
+    mapping = object_fields(value, what, {"witness_id", "acceptable_variant_ids"})
     return JudgmentWitness(
         witness_id=read_str(mapping["witness_id"], f"{what}.witness_id"),
         acceptable_variant_ids=read_strings(
@@ -127,8 +125,9 @@ def _facet_wire(facet: JudgmentFacet) -> dict[str, object]:
 
 
 def _facet_from_wire(value: object, what: str) -> JudgmentFacet:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"facet_id", "critical", "audit_note", "witness_sets"}, what)
+    mapping = object_fields(
+        value, what, {"facet_id", "critical", "audit_note", "witness_sets"}
+    )
     clauses = tuple(
         read_strings(clause, f"{what}.witness_sets[{index}]")
         for index, clause in enumerate(as_list(mapping["witness_sets"], what))
@@ -160,10 +159,7 @@ def _judgment_wire(judgment: JudgmentSet) -> dict[str, object]:
 
 
 def _judgment_from_wire(value: object, what: str) -> JudgmentSet:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "schema",
             "case_id",
             "capture_id",
@@ -173,9 +169,7 @@ def _judgment_from_wire(value: object, what: str) -> JudgmentSet:
             "witnesses",
             "irrelevant_variant_ids",
             "expected_outcomes",
-        },
-        what,
-    )
+        })
     schema = read_str(mapping["schema"], f"{what}.schema")
     if schema != JUDGMENT_SCHEMA:
         raise ContractError(f"unsupported judgment schema: {schema!r}")
@@ -237,11 +231,9 @@ def _case_source_wire(source: CaseSource) -> dict[str, object]:
 
 
 def _case_source_from_wire(value: object, what: str) -> CaseSource:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {"kind", "root", "fixture_revision", "repo", "commit", "repo_url"},
-        what,
+    mapping = object_fields(
+        value, what, {"kind", "root", "fixture_revision", "repo", "commit", "repo_url"},
+        optional={"fixture_revision", "repo", "commit", "repo_url"},
     )
     return CaseSource(
         kind=read_str(mapping["kind"], f"{what}.kind"),
@@ -266,7 +258,7 @@ def _case_spec_wire(spec: CaseSpec) -> dict[str, object]:
         "schema": spec.schema,
         "case_id": spec.case_id,
         "source": _case_source_wire(spec.source),
-        "request": _request_wire(spec.request),
+        "request": spec.request.to_wire(),
         "target_origin": spec.target_origin,
         "judgment_basis": spec.judgment_basis,
         "split_group": spec.split_group,
@@ -276,10 +268,7 @@ def _case_spec_wire(spec: CaseSpec) -> dict[str, object]:
 
 
 def _case_spec_from_wire(value: object, what: str) -> CaseSpec:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "schema",
             "case_id",
             "source",
@@ -289,9 +278,7 @@ def _case_spec_from_wire(value: object, what: str) -> CaseSpec:
             "split_group",
             "capture_id",
             "judgment_id",
-        },
-        what,
-    )
+        })
     schema = read_str(mapping["schema"], f"{what}.schema")
     if schema != CASE_SCHEMA:
         raise ContractError(f"unsupported case schema: {schema!r}")
@@ -337,7 +324,7 @@ def decode_case_suite(data: bytes) -> CaseSuite:
         return CaseSuite(suite_id=spec.case_id, cases=(spec,))
     if schema != CASE_SUITE_SCHEMA:
         raise ContractError(f"unsupported case suite schema: {schema!r}")
-    exact_keys(mapping, {"schema", "suite_id", "cases"}, "case suite")
+    object_fields(mapping, "case suite", {"schema", "suite_id", "cases"})
     cases = tuple(
         _case_spec_from_wire(item, f"case suite.cases[{index}]")
         for index, item in enumerate(as_list(mapping["cases"], "case suite.cases"))
@@ -364,10 +351,7 @@ def _attempt_wire(attempt: CaptureAttempt) -> dict[str, object]:
 
 
 def _attempt_from_wire(value: object, what: str) -> CaptureAttempt:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "case_id",
             "outcome",
             "reason",
@@ -377,9 +361,7 @@ def _attempt_from_wire(value: object, what: str) -> CaptureAttempt:
             "checkout",
             "started_at",
             "duration_ms",
-        },
-        what,
-    )
+        })
     return CaptureAttempt(
         case_id=read_str(mapping["case_id"], f"{what}.case_id"),
         outcome=read_enum(AttemptOutcome, mapping["outcome"], f"{what}.outcome"),
@@ -409,8 +391,11 @@ def decode_attempts(data: bytes) -> tuple[CaptureAttempt, ...]:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ContractError(f"capture attempts are not valid UTF-8: {exc}") from exc
-    mapping = as_mapping(decode_json(text, what="capture attempts"), "capture attempts")
-    exact_keys(mapping, {"schema", "attempts"}, "capture attempts")
+    mapping = object_fields(
+        decode_json(text, what="capture attempts"),
+        "capture attempts",
+        {"schema", "attempts"},
+    )
     schema = read_str(mapping["schema"], "capture attempts.schema")
     if schema != ATTEMPTS_SCHEMA:
         raise ContractError(f"unsupported capture attempts schema: {schema!r}")
@@ -427,18 +412,21 @@ def decode_lock(data: bytes) -> SuiteLock:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ContractError(f"suite lock is not valid UTF-8: {exc}") from exc
-    mapping = as_mapping(decode_json(text, what="suite lock"), "suite lock")
-    exact_keys(mapping, {"schema", "suite_id", "cases"}, "suite lock")
+    mapping = object_fields(
+        decode_json(text, what="suite lock"),
+        "suite lock",
+        {"schema", "suite_id", "cases"},
+    )
     schema = read_str(mapping["schema"], "suite lock.schema")
     if schema != LOCK_SCHEMA:
         raise ContractError(f"unsupported suite lock schema: {schema!r}")
     cases: list[LockedCase] = []
     for index, item in enumerate(as_list(mapping["cases"], "suite lock.cases")):
-        case = as_mapping(item, f"suite lock.cases[{index}]")
-        exact_keys(
-            case,
-            {"case_id", "capture_id", "judgment_id", "delivery"},
+        case = object_fields(
+            item,
             f"suite lock.cases[{index}]",
+            {"case_id", "capture_id", "judgment_id", "delivery"},
+            optional={"delivery"},
         )
         # A lock written before delivery pins existed falls back to the profile.
         delivery = case.get("delivery")

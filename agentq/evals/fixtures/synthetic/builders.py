@@ -552,6 +552,15 @@ def _build(
 # ---------------------------------------------------------------------------
 
 
+def _declaration_and_source_parts(
+    declaration_acq: AcquisitionRecord, source_acq: AcquisitionRecord
+) -> tuple[Observation, EvidenceVariant, Observation, EvidenceVariant]:
+    """The declaration and exact-source observations every case shares."""
+    declaration, (signature,) = _declaration(declaration_acq)
+    source, (exact_source,) = _source_window(source_acq)
+    return declaration, signature, source, exact_source
+
+
 def build_basic_edit() -> FixtureBuild:
     case_id = "basic-edit"
     declaration_acq = _acquisition(case_id, Capability.RESOLVE_LOCATION)
@@ -559,8 +568,9 @@ def build_basic_edit() -> FixtureBuild:
     reference_acq = _acquisition(case_id, Capability.SEMANTIC_REFERENCES)
     test_acq, test_part = _test_search_parts(case_id)
     package_acq = _acquisition(case_id, Capability.OWNING_PACKAGE)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     caller, (caller_variant,) = _reference(reference_acq)
     test, (test_variant,) = test_part
     package, (package_variant,) = _package(package_acq)
@@ -609,8 +619,9 @@ def build_lexical_decoy() -> FixtureBuild:
     )
     test_acq, test_part = _test_search_parts(case_id)
     package_acq = _acquisition(case_id, Capability.OWNING_PACKAGE)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     relevant, (relevant_variant,) = _reference(reference_acq)
     decoy, (decoy_variant,) = _lexical_mention(lexical_acq)
     test, (test_variant,) = test_part
@@ -663,8 +674,9 @@ def build_same_file_quota() -> FixtureBuild:
     source_acq = _acquisition(case_id, Capability.READ_SOURCE)
     reference_acq = _acquisition(case_id, Capability.SEMANTIC_REFERENCES)
     test_acq, test_part = _test_search_parts(case_id)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     uses = tuple(
         _reference(
             reference_acq,
@@ -708,8 +720,9 @@ def build_variant_fallback() -> FixtureBuild:
     declaration_acq = _acquisition(case_id, Capability.RESOLVE_LOCATION)
     source_acq = _acquisition(case_id, Capability.READ_SOURCE)
     implementation_acq = _acquisition(case_id, Capability.IMPLEMENTATIONS)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     implementation, (exact, excerpt) = _implementation(implementation_acq)
     pool = _pool(
         case_id,
@@ -816,8 +829,9 @@ def build_empty_test_search() -> FixtureBuild:
         status=CollectionStatus.EMPTY,
         scope=(TEST_PATH,),
     )
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     pool = _pool(
         case_id,
         (declaration, (signature,)),
@@ -846,8 +860,9 @@ def build_unstable_source() -> FixtureBuild:
     declaration_acq = _acquisition(case_id, Capability.RESOLVE_LOCATION)
     source_acq = _acquisition(case_id, Capability.READ_SOURCE)
     test_acq, test_part = _test_search_parts(case_id)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     pool = _pool(
         case_id,
         (declaration, (signature,)),
@@ -892,8 +907,9 @@ def build_delivery_overhead() -> FixtureBuild:
     source_acq = _acquisition(case_id, Capability.READ_SOURCE)
     reference_acq = _acquisition(case_id, Capability.SEMANTIC_REFERENCES)
     test_acq, test_part = _test_search_parts(case_id)
-    declaration, (signature,) = _declaration(declaration_acq)
-    source, (exact_source,) = _source_window(source_acq)
+    declaration, signature, source, exact_source = _declaration_and_source_parts(
+        declaration_acq, source_acq
+    )
     large_use, (large_variant,) = _reference(
         reference_acq, path=CALLER_PATH, line=4, text=_large_use_text()
     )

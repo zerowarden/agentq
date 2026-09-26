@@ -9,6 +9,7 @@ overwrite an existing run.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from agentq.inspection.decision import (
 )
 
 from .codec import config_digest, decode_config, encode_config, encode_lock
+from .fingerprint import decision_engine_digest
 from .models import LockedCase, ReplayCapture, SuiteLock
 from .store import CaptureStore, StoreError
 
@@ -45,12 +47,19 @@ def case_config(config: DecisionConfig, case: LockedCase) -> DecisionConfig:
 
 
 def decision_id(capture_id: str, config: DecisionConfig) -> str:
-    """Capture plus configuration plus decision implementation fingerprint."""
+    """Capture plus configuration plus decision implementation fingerprint.
+
+    The declared version string is kept for readability; the source digest is
+    what actually binds the identity to the running decision engine, so a
+    selector or scorer edit invalidates a replay even when nobody bumps the
+    string.
+    """
     return canonical_digest(
         {
             "capture": capture_id,
             "config": config_digest(config),
             "implementation": DECISION_VERSION,
+            "engine": decision_engine_digest(),
         }
     )
 
@@ -162,6 +171,15 @@ def _decision_record(item: ReplayedCase) -> dict[str, object]:
     return record
 
 
+def outcome_counts(replayed: Sequence[ReplayedCase]) -> tuple[int, int]:
+    """Delivered and failed counts for one replayed batch."""
+    delivered = sum(
+        1 for item in replayed if isinstance(item.outcome, DecisionDelivered)
+    )
+    failed = sum(1 for item in replayed if isinstance(item.outcome, DecisionFailure))
+    return delivered, failed
+
+
 def _write_run(
     store: CaptureStore,
     lock: SuiteLock,
@@ -171,17 +189,14 @@ def _write_run(
 ) -> None:
     store.write_artifact(run_dir / "lock.json", encode_lock(lock))
     store.write_artifact(run_dir / "config.json", encode_config(config))
+    delivered, failed = outcome_counts(replayed)
     execution = {
         "execution_id": run_dir.name,
         "store": str(store.root),
         "suite_id": lock.suite_id,
         "capture_count": len(replayed),
-        "delivered": sum(
-            1 for item in replayed if isinstance(item.outcome, DecisionDelivered)
-        ),
-        "failed": sum(
-            1 for item in replayed if isinstance(item.outcome, DecisionFailure)
-        ),
+        "delivered": delivered,
+        "failed": failed,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     store.write_artifact(run_dir / "execution.json", canonical_json(execution) + "\n")

@@ -3,6 +3,34 @@
 Developer-only tooling that measures whether `agentq`'s delivered evidence is
 actually useful. This package is never imported by the installed runtime.
 
+## Two suites, never one headline
+
+`import-rows` authors two suites from the same pinned rows, and they are
+captured, split, and reported separately:
+
+- **source-conformance** anchors the request on the first gold span exactly as
+  the annotator recorded it. The range policy reserves that exact source, so
+  the suite is a source-reading correctness gate: it answers "was the requested
+  span delivered", not "was the right evidence selected".
+- **context-selection** anchors the request on the changed symbol the patch
+  names, scoped to that symbol's package. The pool then holds competing
+  declarations, references, and mentions, and reviewer-authored judgments
+  witness the row's other gold spans among them. This is the scoring corpus.
+
+Split groups are namespaced by suite and each suite has its own split file, so
+the two cannot be averaged into one headline score by accident. The remaining
+gold spans stay in the evaluation-only authoring sample; the reviewer reads
+them there when authoring the capture-bound draft.
+
+For `capture --cases-dir`, the default suite id is the directory name. An
+explicit `--suite` overrides it. Keep the two corpora in separate experiment
+commands; the repeatable `--suite` option can combine arbitrary suite locks.
+
+Frozen experiments bind the inspection and core source trees and all Python
+evaluation code, including metric aggregation and promotion rules. Changing
+any of that code requires a new freeze, even when profile names are unchanged.
+Fingerprints are cached per process; restart the command after editing code.
+
 ## How judgments work
 
 Human review produces a grading rubric that a program can check. The evaluator

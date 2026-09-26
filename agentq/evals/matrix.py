@@ -1,8 +1,12 @@
 """W10 controlled matrix: paired comparisons, freeze, and the held-out run.
 
 The matrix evaluates the declared baseline/A/B/C configurations over identical
-captures at the three delivery ceilings. Only development and validation are
-loaded to choose a configuration; the chosen one is frozen together with the
+captures at the three delivery ceilings. Three decisions are kept separate:
+eligibility (no failures, violations, or unmet expectations on development or
+validation at any declared budget), nomination (the best validation objective
+among eligible cells, with development breaking ties), and promotion (a
+separately specified acceptance rule on held-out data). Only development and
+validation are loaded to nominate; the nominee is frozen together with the
 exact capture, lock, and split digests it was chosen against. The held-out
 command refuses to run unless those digests still match, so a result cannot be
 retrospectively optimized by editing the profile or the corpus.
@@ -36,13 +40,18 @@ from .experiments import (
     select_split,
     undelivered_facets,
 )
+from .fingerprint import decision_engine_digest
 from .importer import write_new_or_equal
-from .metrics import CaseEvaluation
+from .metrics import DEFAULT_METRIC_CONFIG, CaseEvaluation, metric_fingerprint
 from .models import (
     FixtureSnapshot,
     ReplayCapture,
     RepositorySnapshot,
     SuiteLock,
+    delivery_guardrail_violations,
+    evaluation_is_clean,
+    ratio,
+    validate_suite_membership,
 )
 from .replay import load_config, with_delivery
 from .runner import evaluate_capture
@@ -59,11 +68,42 @@ from .wire.json import (
 
 MATRIX_SCHEMA = "agentq.eval.matrix/v1"
 HOLDOUT_SCHEMA = "agentq.eval.holdout-matrix/v1"
-FROZEN_SCHEMA = "agentq.eval.frozen-matrix/v1"
+FROZEN_SCHEMA = "agentq.eval.frozen-matrix/v2"
 
 BUDGETS = (6000, 12000, 24000)
 PRIMARY_BUDGET = 12000
 CELL_ORDER = ("baseline", "a", "b", "c")
+
+
+@dataclass(frozen=True)
+class PromotionRule:
+    """The declared held-out acceptance rule frozen with one experiment.
+
+    ``no_regression`` promotes the nominee only when the held-out run is clean
+    and its primary-budget coverage does not fall below the baseline's by more
+    than ``margin``. Promotion is evaluated after the fact and reported; it
+    never feeds back into nomination.
+    """
+
+    rule: str = "no_regression"
+    version: str = "promotion-v1"
+    margin: int = 0
+
+    def __post_init__(self) -> None:
+        if self.rule != "no_regression":
+            raise ContractError(f"unsupported promotion rule: {self.rule!r}")
+        if self.margin < 0:
+            raise ContractError("promotion margin must be >= 0")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "rule": self.rule,
+            "version": self.version,
+            "margin": self.margin,
+        }
+
+
+DEFAULT_PROMOTION = PromotionRule()
 
 
 @dataclass(frozen=True)
@@ -112,6 +152,11 @@ class MatrixCaseResult:
     unmet: tuple[str, ...]
     fitting_events: int
     selected_variant_ids: tuple[str, ...]
+    known_irrelevant_variants_delivered: int = 0
+    known_irrelevant_source_chars_delivered: int = 0
+    unjudged_source_chars_delivered: int = 0
+    delivered_source_chars: int = 0
+    final_output_tokens: int = 0
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -139,6 +184,15 @@ class MatrixCaseResult:
             "unmet_expectations": list(self.unmet),
             "fitting_events": self.fitting_events,
             "selected_variant_ids": list(self.selected_variant_ids),
+            "known_irrelevant_variants_delivered": (
+                self.known_irrelevant_variants_delivered
+            ),
+            "known_irrelevant_source_chars_delivered": (
+                self.known_irrelevant_source_chars_delivered
+            ),
+            "unjudged_source_chars_delivered": self.unjudged_source_chars_delivered,
+            "delivered_source_chars": self.delivered_source_chars,
+            "final_output_tokens": self.final_output_tokens,
         }
 
 
@@ -166,12 +220,24 @@ class SplitViolation:
 
 @dataclass(frozen=True)
 class FrozenManifest:
-    """The immutable record of a chosen matrix configuration and its corpus."""
+    """The immutable record of one complete experiment.
+
+    Configuration alone is not an experiment identity: the baseline the
+    nominee was compared against, the decision-engine source, the metric
+    implementation and configuration, the promotion rule, and the exact
+    suite/case membership are all frozen here.
+    """
 
     path: Path
     chosen_label: str
     config: DecisionConfig
     config_digest: str
+    baseline: DecisionConfig
+    baseline_digest: str
+    engine_digest: str
+    metric_profile: str
+    metric_fingerprint: str
+    promotion: PromotionRule
     budgets: tuple[int, ...]
     primary_budget: int
     splits_path: str
@@ -286,6 +352,7 @@ def validate_split_groups(
     store: CaptureStore, locks: Sequence[SuiteLock], splits: SplitAssignments
 ) -> tuple[SplitViolation, ...]:
     """No repository or fixture may have cases in more than one split."""
+    validate_suite_membership(locks)
     by_group: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for lock in locks:
         for case in lock.cases:
@@ -345,12 +412,6 @@ def _case_result(
     outcome: DecisionOutcome,
     evaluation: CaseEvaluation,
 ) -> MatrixCaseResult:
-    noncritical_total = noncritical_delivered = 0
-    for facet in evaluation.facets:
-        if facet.critical or not facet.pool_supported:
-            continue
-        noncritical_total += 1
-        noncritical_delivered += 1 if facet.delivered_supported else 0
     failed = isinstance(outcome, DecisionFailure)
     return MatrixCaseResult(
         case_id=case.case_id,
@@ -369,19 +430,26 @@ def _case_result(
         critical_initial=evaluation.critical_initial,
         critical_delivered=evaluation.critical_delivered,
         all_critical_present=evaluation.all_critical_present,
-        noncritical_total=noncritical_total,
-        noncritical_delivered=noncritical_delivered,
+        noncritical_total=evaluation.noncritical_total,
+        noncritical_delivered=evaluation.noncritical_delivered,
         render_chars=evaluation.render_chars,
         render_bytes=evaluation.render_bytes,
         violations=evaluation.violations,
         unmet=evaluation.unmet_expectations,
         fitting_events=evaluation.fitting_events,
         selected_variant_ids=evaluation.selected_variant_ids,
+        known_irrelevant_variants_delivered=(
+            evaluation.known_irrelevant_variants_delivered
+        ),
+        known_irrelevant_source_chars_delivered=(
+            evaluation.known_irrelevant_source_chars_delivered
+        ),
+        unjudged_source_chars_delivered=(
+            evaluation.delivered_source_chars - evaluation.judged_source_chars_delivered
+        ),
+        delivered_source_chars=evaluation.delivered_source_chars,
+        final_output_tokens=evaluation.final_output_tokens or 0,
     )
-
-
-def _ratio(numerator: int, denominator: int) -> float | None:
-    return None if denominator == 0 else numerator / denominator
 
 
 def matrix_summary(
@@ -419,14 +487,27 @@ def _summary_row(
         "critical_pool": sum(item.critical_pool for item in members),
         "critical_initial": sum(item.critical_initial for item in members),
         "critical_delivered": delivered,
-        "critical_recall_delivered": _ratio(delivered, critical),
+        "critical_recall_delivered": ratio(delivered, critical),
         "cases_with_critical_facets": len(with_critical),
         "all_critical_present_cases": len(present),
-        "all_critical_present_rate": _ratio(len(present), len(with_critical)),
+        "all_critical_present_rate": ratio(len(present), len(with_critical)),
         "noncritical_total": sum(item.noncritical_total for item in members),
         "noncritical_delivered": sum(item.noncritical_delivered for item in members),
         "render_chars_total": sum(item.render_chars or 0 for item in members),
         "render_bytes_total": sum(item.render_bytes or 0 for item in members),
+        "known_irrelevant_variants_delivered": sum(
+            item.known_irrelevant_variants_delivered for item in members
+        ),
+        "known_irrelevant_source_chars_delivered": sum(
+            item.known_irrelevant_source_chars_delivered for item in members
+        ),
+        "unjudged_source_chars_delivered": sum(
+            item.unjudged_source_chars_delivered for item in members
+        ),
+        "delivered_source_chars_total": sum(
+            item.delivered_source_chars for item in members
+        ),
+        "final_output_tokens": sum(item.final_output_tokens for item in members),
         "violations": sum(len(item.violations) for item in members),
         "violation_cases": sorted(item.case_id for item in members if item.violations),
         "unmet_expectations": sum(len(item.unmet) for item in members),
@@ -446,10 +527,10 @@ def _summary_row(
 
 
 def _eligible(row: Mapping[str, object]) -> bool:
-    return (
-        row["violations"] == 0
-        and row["unmet_expectations"] == 0
-        and row["failures"] == 0
+    return evaluation_is_clean(
+        failures=int(row["failures"]),
+        violations=int(row["violations"]),
+        unmet=int(row["unmet_expectations"]),
     )
 
 
@@ -461,33 +542,136 @@ def _objective(row: Mapping[str, object]) -> tuple[int, ...]:
     )
 
 
-def choose_matrix_cell(
+def _rows_by_cell(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, tuple[Mapping[str, object], ...]]:
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["cell"])].append(row)
+    return {label: tuple(items) for label, items in grouped.items()}
+
+
+def _primary_row(
+    rows: Sequence[Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    return next((row for row in rows if row["budget"] == PRIMARY_BUDGET), None)
+
+
+def _regresses_on_guardrails(
+    row: Mapping[str, object], baseline: Mapping[str, object] | None
+) -> bool:
+    """Known-irrelevant delivery and the unjudged share may not grow."""
+    if baseline is None:
+        return False
+    baseline_fraction = ratio(
+        int(baseline.get("unjudged_source_chars_delivered", 0)),
+        int(baseline.get("delivered_source_chars_total", 0)),
+    )
+    row_fraction = ratio(
+        int(row.get("unjudged_source_chars_delivered", 0)),
+        int(row.get("delivered_source_chars_total", 0)),
+    )
+    return bool(
+        delivery_guardrail_violations(
+            irrelevant_chars=int(row.get("known_irrelevant_source_chars_delivered", 0)),
+            unjudged_fraction=row_fraction,
+            baseline_irrelevant_chars=int(
+                baseline.get("known_irrelevant_source_chars_delivered", 0)
+            ),
+            baseline_unjudged_fraction=baseline_fraction,
+        )
+    )
+
+
+def _regresses_on_any_budget(
+    rows: Sequence[Mapping[str, object]],
+    baseline: Sequence[Mapping[str, object]],
+) -> bool:
+    baseline_by_budget = {row["budget"]: row for row in baseline}
+    return any(
+        _regresses_on_guardrails(row, baseline_by_budget.get(row["budget"]))
+        for row in rows
+    )
+
+
+def eligible_cells(
+    development: Sequence[Mapping[str, object]],
+    validation: Sequence[Mapping[str, object]] = (),
+    order: Sequence[str] = CELL_ORDER,
+) -> tuple[str, ...]:
+    """Cells clean on development and validation at every declared budget.
+
+    A cell with any delivery failure, correctness violation, unmet
+    expectation, or negative-delivery regression against the baseline at any
+    operating budget is ineligible, even when it leads at the primary budget.
+    Validation defects disqualify exactly like development ones; eligibility
+    is not a tie-break.
+    """
+    dev = _rows_by_cell(development)
+    val = _rows_by_cell(validation)
+    baseline_dev = dev.get("baseline", ())
+    baseline_val = val.get("baseline", ())
+    eligible: list[str] = []
+    for label in order:
+        dev_rows = dev.get(label, ())
+        val_rows = val.get(label, ())
+        if _primary_row(dev_rows) is None:
+            continue
+        if validation and _primary_row(val_rows) is None:
+            continue
+        if not all(_eligible(row) for row in (*dev_rows, *val_rows)):
+            continue
+        if _regresses_on_any_budget(dev_rows, baseline_dev):
+            continue
+        if _regresses_on_any_budget(val_rows, baseline_val):
+            continue
+        eligible.append(label)
+    return tuple(eligible)
+
+
+def _nomination_key(
+    label: str,
+    dev: Mapping[str, tuple[Mapping[str, object], ...]],
+    val: Mapping[str, tuple[Mapping[str, object], ...]],
+    *,
+    with_validation: bool,
+) -> tuple[int, ...]:
+    """Validation first, then the development fit; missing rows never reach here."""
+    dev_primary = _primary_row(dev[label])
+    assert dev_primary is not None
+    key = _objective(dev_primary)
+    if not with_validation:
+        return key
+    val_primary = _primary_row(val[label])
+    assert val_primary is not None
+    return _objective(val_primary) + key
+
+
+def nominate_cell(
     development: Sequence[Mapping[str, object]],
     validation: Sequence[Mapping[str, object]] = (),
     order: Sequence[str] = CELL_ORDER,
 ) -> str:
-    """Best eligible objective at the primary budget; ties keep declared order."""
-    dev = {row["cell"]: row for row in development if row["budget"] == PRIMARY_BUDGET}
-    val = {row["cell"]: row for row in validation if row["budget"] == PRIMARY_BUDGET}
-    eligible = [label for label in order if label in dev and _eligible(dev[label])]
+    """Nominate one eligible cell from validation, after fitting on development.
+
+    Development gates eligibility and breaks validation ties; the validation
+    objective is the nomination key. A quality regression on validation can
+    therefore never be outweighed by a development improvement. Promotion is a
+    separate decision against held-out data and is never made here.
+    """
+    dev = _rows_by_cell(development)
+    val = _rows_by_cell(validation)
+    eligible = eligible_cells(development, validation, order)
     if not eligible:
-        raise ContractError("no eligible matrix cell at the primary budget")
+        raise ContractError("no eligible matrix cell at the declared budgets")
+    with_validation = bool(validation)
     best = eligible[0]
+    best_key = _nomination_key(best, dev, val, with_validation=with_validation)
     for label in eligible[1:]:
-        if _choice_key(dev[label], val.get(label)) > _choice_key(
-            dev[best], val.get(best)
-        ):
-            best = label
+        key = _nomination_key(label, dev, val, with_validation=with_validation)
+        if key > best_key:
+            best, best_key = label, key
     return best
-
-
-def _choice_key(
-    row: Mapping[str, object], validation: Mapping[str, object] | None
-) -> tuple[int, ...]:
-    key = _objective(row)
-    if validation is None:
-        return key
-    return key + _objective(validation)
 
 
 def paired_deltas(
@@ -619,7 +803,7 @@ def matrix_report(
     development_summary = matrix_summary(development_results, budgets)
     validation_summary = matrix_summary(validation_results, budgets)
     order = [cell.label for cell in cells]
-    chosen = choose_matrix_cell(development_summary, validation_summary, order)
+    chosen = nominate_cell(development_summary, validation_summary, order)
     chosen_cell = next(cell for cell in cells if cell.label == chosen)
     frozen = replace(base, scoring=chosen_cell.scoring, selection=chosen_cell.selection)
     development_paired = {
@@ -630,7 +814,7 @@ def matrix_report(
     validation_paired = {
         cell.label: paired_deltas(validation_results, cell.label)
         for cell in cells
-        if cell.label != "baseline"
+        if validation_results and cell.label != "baseline"
     }
     return {
         "schema": MATRIX_SCHEMA,
@@ -674,6 +858,9 @@ def matrix_report(
         "chosen": {
             "label": chosen,
             "retained_baseline": chosen == "baseline",
+            "eligible": list(
+                eligible_cells(development_summary, validation_summary, order)
+            ),
             "config": config_document(frozen),
             "config_digest": config_digest(frozen),
         },
@@ -711,25 +898,57 @@ def _summary_list(report: Mapping[str, object], key: str) -> list[object]:
     return as_list(section.get("summary"), f"{key} summary")
 
 
+def _report_baseline(report: Mapping[str, object]) -> Mapping[str, object]:
+    for item in as_list(report.get("cells"), "matrix report.cells"):
+        cell = as_mapping(item, "matrix cell")
+        if cell.get("label") == "baseline":
+            return cell
+    raise ContractError("matrix report carries no baseline cell")
+
+
 def freeze_matrix(
     locks: Sequence[SuiteLock],
     splits_path: Path,
     report: Mapping[str, object],
     *,
+    baseline: DecisionConfig,
     frozen_profile_path: Path,
     manifest_path: Path,
+    promotion: PromotionRule = DEFAULT_PROMOTION,
 ) -> dict[str, object]:
-    """Write the chosen configuration and its immutable corpus manifest."""
+    """Write the chosen configuration and its immutable experiment manifest.
+
+    Re-freezing is the deliberate path to a new experiment version: the
+    manifest is written once and never replaced, so a changed baseline, engine,
+    metric, promotion rule, or corpus requires a new manifest path.
+    """
+    validate_suite_membership(locks)
     chosen = as_mapping(report.get("chosen"), "matrix report.chosen")
     config = config_from_document(chosen.get("config"))
     if config_digest(config) != read_str(chosen.get("config_digest"), "config digest"):
         raise ContractError("chosen configuration digest does not match its contents")
+    baseline_cell = _report_baseline(report)
+    if (
+        baseline_cell.get("scoring") != baseline.scoring.to_wire()
+        or baseline_cell.get("selection") != baseline.selection.to_wire()
+    ):
+        raise ContractError(
+            "matrix report baseline does not match the configuration being frozen"
+        )
     write_new_or_equal(frozen_profile_path, encode_config(config))
     manifest = {
         "schema": FROZEN_SCHEMA,
         "chosen_label": read_str(chosen.get("label"), "chosen label"),
         "config": config_document(config),
         "config_digest": config_digest(config),
+        "baseline": config_document(baseline),
+        "baseline_digest": config_digest(baseline),
+        "engine": {"source_digest": decision_engine_digest()},
+        "metrics": {
+            "profile": DEFAULT_METRIC_CONFIG.profile,
+            "fingerprint": metric_fingerprint(),
+        },
+        "promotion": promotion.to_wire(),
         "budgets": list(as_list(report.get("budgets"), "matrix report.budgets")),
         "primary_budget": report.get("primary_budget"),
         "splits": {
@@ -762,6 +981,11 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
             "chosen_label",
             "config",
             "config_digest",
+            "baseline",
+            "baseline_digest",
+            "engine",
+            "metrics",
+            "promotion",
             "budgets",
             "primary_budget",
             "splits",
@@ -775,13 +999,35 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
         read_str(mapping.get("schema"), "frozen matrix manifest schema")
         != FROZEN_SCHEMA
     ):
-        raise ContractError("unsupported frozen matrix manifest schema")
+        raise ContractError(
+            "unsupported frozen matrix manifest schema; start a new experiment"
+        )
     config = config_from_document(mapping.get("config"))
     digest = read_str(
         mapping.get("config_digest"), "frozen matrix manifest config digest"
     )
     if config_digest(config) != digest:
         raise ContractError("frozen matrix manifest configuration is corrupt")
+    baseline = config_from_document(mapping.get("baseline"))
+    baseline_digest = read_str(
+        mapping.get("baseline_digest"), "frozen matrix manifest baseline digest"
+    )
+    if config_digest(baseline) != baseline_digest:
+        raise ContractError("frozen matrix manifest baseline is corrupt")
+    engine = as_mapping(mapping.get("engine"), "frozen matrix manifest engine")
+    exact_keys(engine, {"source_digest"}, "frozen matrix manifest engine")
+    metrics = as_mapping(mapping.get("metrics"), "frozen matrix manifest metrics")
+    exact_keys(
+        metrics, {"profile", "fingerprint"}, "frozen matrix manifest metrics"
+    )
+    promotion = as_mapping(
+        mapping.get("promotion"), "frozen matrix manifest promotion"
+    )
+    exact_keys(
+        promotion,
+        {"rule", "version", "margin"},
+        "frozen matrix manifest promotion",
+    )
     budgets = tuple(
         read_int(item, f"frozen budget {index}", minimum=1)
         for index, item in enumerate(
@@ -797,6 +1043,8 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
         entry = as_mapping(item, what)
         exact_keys(entry, {"suite_id", "lock_digest", "cases"}, what)
         suite_id = read_str(entry.get("suite_id"), f"{what}.suite_id")
+        if suite_id in suites:
+            raise ContractError(f"duplicate frozen suite id: {suite_id!r}")
         lock_digests[suite_id] = read_str(
             entry.get("lock_digest"), f"{what}.lock_digest"
         )
@@ -817,6 +1065,22 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
         ),
         config=config,
         config_digest=digest,
+        baseline=baseline,
+        baseline_digest=baseline_digest,
+        engine_digest=read_str(
+            engine.get("source_digest"), "frozen matrix manifest engine digest"
+        ),
+        metric_profile=read_str(
+            metrics.get("profile"), "frozen matrix manifest metric profile"
+        ),
+        metric_fingerprint=read_str(
+            metrics.get("fingerprint"), "frozen matrix manifest metric fingerprint"
+        ),
+        promotion=PromotionRule(
+            rule=read_str(promotion.get("rule"), "promotion rule"),
+            version=read_str(promotion.get("version"), "promotion version"),
+            margin=read_int(promotion.get("margin"), "promotion margin", minimum=0),
+        ),
         budgets=budgets,
         primary_budget=read_int(
             mapping.get("primary_budget"),
@@ -834,15 +1098,31 @@ def load_frozen_manifest(path: Path) -> FrozenManifest:
     )
 
 
-def validate_holdout(
-    manifest: FrozenManifest,
-    locks: Sequence[SuiteLock],
-    splits_path: Path,
-    splits: SplitAssignments,
+def _validate_frozen_identity(manifest: FrozenManifest) -> None:
+    """The decision engine and metric implementations must still match."""
+    if decision_engine_digest() != manifest.engine_digest:
+        raise ContractError(
+            "the decision engine changed since the matrix was frozen; "
+            "start a new experiment"
+        )
+    if metric_fingerprint() != manifest.metric_fingerprint:
+        raise ContractError(
+            "the metric implementation or configuration changed since the "
+            "matrix was frozen; start a new experiment"
+        )
+
+
+def _validate_frozen_suites(
+    manifest: FrozenManifest, locks: Sequence[SuiteLock]
 ) -> None:
-    """Refuse a held-out run unless the frozen corpus is still exact."""
-    if splits_digest(splits_path) != manifest.splits_digest:
-        raise ContractError("split assignments changed since the matrix was frozen")
+    """Every frozen suite and case must be supplied exactly once."""
+    validate_suite_membership(locks)
+    supplied = {lock.suite_id for lock in locks}
+    missing = sorted(set(manifest.lock_digests) - supplied)
+    if missing:
+        raise ContractError(
+            "the held-out run omits frozen suites: " + ", ".join(missing)
+        )
     for lock in locks:
         frozen_digest = manifest.lock_digests.get(lock.suite_id)
         if frozen_digest is None:
@@ -865,12 +1145,70 @@ def validate_holdout(
                     f"capture for {case.case_id!r} changed since the matrix "
                     "was frozen"
                 )
+
+
+def validate_holdout(
+    manifest: FrozenManifest,
+    locks: Sequence[SuiteLock],
+    splits_path: Path,
+    splits: SplitAssignments,
+) -> None:
+    """Refuse a held-out run unless the frozen experiment is still exact.
+
+    Identity covers the decision engine source, the metric implementation and
+    configuration, every frozen suite, and the corpus. A change in any of them
+    is a new experiment, not a resumed one.
+    """
+    _validate_frozen_identity(manifest)
+    _validate_frozen_suites(manifest, locks)
+    if splits_digest(splits_path) != manifest.splits_digest:
+        raise ContractError("split assignments changed since the matrix was frozen")
     if not any(
         splits.split_of(case.case_id) == HOLDOUT
         for lock in locks
         for case in lock.cases
     ):
         raise ContractError("the frozen suites carry no held-out cases")
+
+
+def _primary_summary(
+    summary: Sequence[Mapping[str, object]], cell: str
+) -> Mapping[str, object] | None:
+    return next(
+        (
+            row
+            for row in summary
+            if row["cell"] == cell and row["budget"] == PRIMARY_BUDGET
+        ),
+        None,
+    )
+
+
+def evaluate_promotion(
+    rule: PromotionRule,
+    baseline: Mapping[str, object] | None,
+    nominee: Mapping[str, object] | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Whether the held-out nominee is promoted under the frozen rule."""
+    reasons: list[str] = []
+    for label, row in (("baseline", baseline), ("nominee", nominee)):
+        if row is None:
+            reasons.append(f"{label} has no primary-budget held-out summary")
+            continue
+        if not _eligible(row):
+            reasons.append(f"{label} is not clean on held-out cases")
+    if reasons:
+        return False, tuple(reasons)
+    assert baseline is not None and nominee is not None
+    if int(nominee["critical_delivered"]) < int(
+        baseline["critical_delivered"]
+    ) - rule.margin:
+        reasons.append("nominee critical coverage regressed beyond the margin")
+    if int(nominee["all_critical_present_cases"]) < int(
+        baseline["all_critical_present_cases"]
+    ) - rule.margin:
+        reasons.append("nominee all-critical-present count regressed beyond the margin")
+    return not reasons, tuple(reasons)
 
 
 def holdout_report(
@@ -881,14 +1219,18 @@ def holdout_report(
     *,
     base: DecisionConfig | None = None,
 ) -> dict[str, object]:
-    """Evaluate the frozen challenger against the baseline on held-out cases."""
+    """Evaluate the frozen nominee against the frozen baseline on held-out cases.
+
+    The baseline must still equal the frozen one, never the current runtime
+    default: a changed baseline would silently change what the nominee is
+    compared against. Promotion is evaluated against the frozen rule and
+    reported.
+    """
     base_config = DecisionConfig() if base is None else base
-    if (
-        base_config.delivery != manifest.config.delivery
-        or base_config.output_format != manifest.config.output_format
-    ):
+    if base_config != manifest.baseline:
         raise ContractError(
-            "runtime delivery or renderer changed since the matrix was frozen"
+            "the baseline configuration changed since the matrix was frozen; "
+            "start a new experiment"
         )
     holdout = load_tuning_cases(
         store,
@@ -898,7 +1240,7 @@ def holdout_report(
         raise ContractError("the frozen suites carry no judged held-out cases")
     baseline_cell = MatrixCell(
         "baseline",
-        "runtime default scorer and selector",
+        "frozen baseline scorer and selector",
         base_config.scoring,
         base_config.selection,
     )
@@ -915,6 +1257,12 @@ def holdout_report(
         holdout, (baseline_cell, frozen_cell), manifest.budgets, base=manifest.config
     )
     paired = paired_deltas(results, frozen_label)
+    summary = matrix_summary(results, manifest.budgets)
+    promoted, promotion_reasons = evaluate_promotion(
+        manifest.promotion,
+        _primary_summary(summary, "baseline"),
+        _primary_summary(summary, frozen_label),
+    )
     return {
         "schema": HOLDOUT_SCHEMA,
         "chosen_label": manifest.chosen_label,
@@ -923,9 +1271,14 @@ def holdout_report(
         "primary_budget": manifest.primary_budget,
         "cases": [case.case_id for case in holdout],
         "groups": sorted({case_group(case.capture) for case in holdout}),
-        "summary": matrix_summary(results, manifest.budgets),
+        "summary": summary,
         "paired": paired,
         "grouped": grouped_deltas(paired),
+        "promotion": {
+            "rule": manifest.promotion.to_wire(),
+            "promoted": promoted,
+            "reasons": list(promotion_reasons),
+        },
         "undelivered_facets": [
             {
                 "cell": cell.label,

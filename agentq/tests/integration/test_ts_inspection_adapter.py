@@ -123,6 +123,16 @@ def _request(symbol: str = "listOrders") -> InspectionRequest:
     )
 
 
+def _require_typescript(case: unittest.TestCase, root: Path) -> None:
+    """Skip the calling test unless the pinned TypeScript bridge can run."""
+    if not _node_available():
+        case.skipTest("node is required for the TypeScript bridge")
+    if not _link_typescript(root):
+        case.skipTest(
+            "run `npm install` in agentq/ for the pinned typescript dev dependency"
+        )
+
+
 class ProbeIntegrationTests(unittest.TestCase):
     def test_probe_reports_unavailable_without_a_typescript_project(self) -> None:
         if not _node_available():
@@ -174,14 +184,6 @@ class ProbeIntegrationTests(unittest.TestCase):
 
 
 class RealAdapterIntegrationTests(unittest.TestCase):
-    def _require_typescript(self, root: Path) -> None:
-        if not _node_available():
-            self.skipTest("node is required for the TypeScript bridge")
-        if not _link_typescript(root):
-            self.skipTest(
-                "run `npm install` in agentq/ for the pinned typescript dev dependency"
-            )
-
     def test_unique_declaration_resolves_and_the_bridge_batch_reports_locations(
         self,
     ) -> None:
@@ -198,7 +200,7 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                     ),
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request(), _context(root))
             self.assertIsInstance(bundle.resolution, ResolvedTarget)
             assert isinstance(bundle.resolution, ResolvedTarget)
@@ -247,7 +249,7 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                     ),
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request(), _context(root))
             assert bundle.selection is not None
             self.assertTrue(bundle.selection.selected)
@@ -279,7 +281,7 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                     "src/b.ts": "export function listOrders(): number {\n  return 2;\n}\n",
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request(), _context(root))
             self.assertIsInstance(bundle.resolution, AmbiguousTarget)
             assert isinstance(bundle.resolution, AmbiguousTarget)
@@ -306,7 +308,7 @@ class RealAdapterIntegrationTests(unittest.TestCase):
                     ),
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request(), _context(root))
             self.assertIsInstance(bundle.resolution, ResolvedTarget)
             assert isinstance(bundle.resolution, ResolvedTarget)
@@ -337,14 +339,6 @@ class RealAdapterIntegrationTests(unittest.TestCase):
 class InspectionBatchingIntegrationTests(unittest.TestCase):
     """The pipeline itself must batch symbol operations into one bridge call."""
 
-    def _require_typescript(self, root: Path) -> None:
-        if not _node_available():
-            self.skipTest("node is required for the TypeScript bridge")
-        if not _link_typescript(root):
-            self.skipTest(
-                "run `npm install` in agentq/ for the pinned typescript dev dependency"
-            )
-
     def test_inspection_batches_references_and_implementations(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentq-ts-batch-") as temp:
             root = _make_repo(
@@ -359,7 +353,7 @@ class InspectionBatchingIntegrationTests(unittest.TestCase):
                     ),
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             calls: list[TypeScriptBatchRequest] = []
 
             def counting_batch(request: TypeScriptBatchRequest):
@@ -397,14 +391,6 @@ class InspectionBatchingIntegrationTests(unittest.TestCase):
 class MixedLanguageAffinityTests(unittest.TestCase):
     """The resolved declaration, not the request scope, picks the provider."""
 
-    def _require_typescript(self, root: Path) -> None:
-        if not _node_available():
-            self.skipTest("node is required for the TypeScript bridge")
-        if not _link_typescript(root):
-            self.skipTest(
-                "run `npm install` in agentq/ for the pinned typescript dev dependency"
-            )
-
     def test_python_declaration_in_a_mixed_repo_uses_python_mentions(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentq-ts-mixed-py-") as temp:
             root = _make_repo(
@@ -416,7 +402,7 @@ class MixedLanguageAffinityTests(unittest.TestCase):
                     "src/web/app.ts": "export const marker = 1;\n",
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request("list_orders"), _context(root))
             self.assertIsInstance(bundle.resolution, ResolvedTarget)
             assert isinstance(bundle.resolution, ResolvedTarget)
@@ -445,7 +431,7 @@ class MixedLanguageAffinityTests(unittest.TestCase):
                     "src/tools/helper.py": "def helper():\n    return 1\n",
                 },
             )
-            self._require_typescript(root)
+            _require_typescript(self, root)
             bundle = inspect(_request(), _context(root))
             self.assertIsInstance(bundle.resolution, ResolvedTarget)
             assert isinstance(bundle.resolution, ResolvedTarget)

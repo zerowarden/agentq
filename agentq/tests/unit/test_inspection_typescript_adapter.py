@@ -14,12 +14,10 @@ from agentq.inspection.contracts import (
     Binding,
     Capability,
     EvidenceRequest,
-    InspectionContext,
     LocationTarget,
     ObservationKind,
     PathKind,
     PathTarget,
-    RepositoryIdentity,
     SourceSpan,
     SymbolTarget,
     make_declaration_candidate,
@@ -36,6 +34,7 @@ from agentq.navigation import (
     TypeScriptRuntime,
     ts_nav_from_payload,
 )
+from tests.support.inspection_fixtures import bare_context
 
 ASTRA_LINE = 'const helper = "😀"; export function Target() { return 1; }'
 
@@ -146,10 +145,6 @@ def _adapter(
     )
 
 
-def _context(root: Path) -> InspectionContext:
-    return InspectionContext(identity=RepositoryIdentity(root=root))
-
-
 def _write(root: Path, relative: str, text: str) -> str:
     target = root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -185,7 +180,7 @@ class CapabilitySurfaceTests(unittest.TestCase):
         )
 
     def test_applicability_is_target_language_dependent(self) -> None:
-        context = _context(Path("/repo"))
+        context = bare_context(Path("/repo"))
         python_only = _adapter(FakeBridge(), ("src/a.py",))
         self.assertFalse(
             python_only.applicable(SymbolTarget(name="x", scopes=("src",)), context)
@@ -211,7 +206,7 @@ class CapabilitySurfaceTests(unittest.TestCase):
             )
         )
         adapter = _adapter(bridge)
-        context = _context(Path("/repo"))
+        context = bare_context(Path("/repo"))
         target = SymbolTarget(name="x", scopes=("src",))
         first = adapter.availability(Capability.FIND_DECLARATIONS, target, context)
         second = adapter.availability(Capability.FIND_DECLARATIONS, target, context)
@@ -225,10 +220,10 @@ class CapabilitySurfaceTests(unittest.TestCase):
         adapter = _adapter(bridge)
         target = SymbolTarget(name="x", scopes=("src",))
         first = adapter.availability(
-            Capability.FIND_DECLARATIONS, target, _context(Path("/repo"))
+            Capability.FIND_DECLARATIONS, target, bare_context(Path("/repo"))
         )
         second = adapter.availability(
-            Capability.FIND_DECLARATIONS, target, _context(Path("/repo"))
+            Capability.FIND_DECLARATIONS, target, bare_context(Path("/repo"))
         )
         self.assertTrue(first.available)
         self.assertTrue(second.available)
@@ -239,7 +234,7 @@ class CapabilitySurfaceTests(unittest.TestCase):
         availability = adapter.availability(
             Capability.FIND_DECLARATIONS,
             SymbolTarget(name="x"),
-            _context(Path("/repo")),
+            bare_context(Path("/repo")),
         )
         self.assertTrue(availability.available)
         self.assertEqual(availability.provider_version, "5.6.3")
@@ -252,7 +247,7 @@ class CapabilitySurfaceTests(unittest.TestCase):
                 capability=Capability.OUTLINE,
                 target=SymbolTarget(name="x"),
             ),
-            _context(Path("/repo")),
+            bare_context(Path("/repo")),
         )
         self.assertEqual(result.status.value, "failed")
 
@@ -279,7 +274,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
                 )
             )
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
             self.assertEqual(result.status.value, "completed")
             observation = result.observations[0]
@@ -315,7 +310,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
                 )
             )
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
         payload = result.observations[0].payload
         self.assertIsNotNone(payload.declaration_span)  # type: ignore[union-attr]
@@ -342,7 +337,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
                 )
             )
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
         self.assertEqual(result.observations, ())
         self.assertTrue(
@@ -365,7 +360,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
                 )
             )
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
         self.assertEqual(result.status.value, "partial")
         self.assertFalse(result.coverage.is_complete())
@@ -394,7 +389,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
                 )
             )
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
         self.assertEqual(result.effective_scope, (".",))
 
@@ -439,7 +434,7 @@ class DeclarationNormalizationTests(unittest.TestCase):
             _write(root, "src/app.ts", ASTRA_LINE)
             bridge = FakeBridge(locate=ts_nav_from_payload(payload))  # type: ignore[arg-type]
             result = _adapter(bridge).acquire(
-                _declaration_request(scopes=("src",)), _context(root)
+                _declaration_request(scopes=("src",)), bare_context(root)
             )
         self.assertEqual(result.status.value, "completed")
         self.assertFalse(result.coverage.is_complete())
@@ -493,7 +488,7 @@ class ExactLocationBatchTests(unittest.TestCase):
             )
             _write(root, "src/impl.ts", "export function Target() {}\n")
             adapter = _adapter(bridge)
-            context = _context(root)
+            context = bare_context(root)
             references = EvidenceRequest(
                 request_id="req-refs",
                 capability=Capability.SEMANTIC_REFERENCES,
@@ -536,7 +531,7 @@ class ExactLocationBatchTests(unittest.TestCase):
                     target=SymbolTarget(name="Target"),
                     limit=20,
                 ),
-                _context(root),
+                bare_context(root),
             )
         self.assertEqual(result.status.value, "failed")
         self.assertIn("validated declaration subject", result.diagnostics[0].message)
@@ -567,7 +562,7 @@ class ExactLocationBatchTests(unittest.TestCase):
                     target=SymbolTarget(name="Target"),
                     subject=subject,
                 ),
-                _context(root),
+                bare_context(root),
             )
         self.assertEqual(result.status.value, "failed")
         self.assertIn("language service died", result.diagnostics[0].message)
@@ -599,7 +594,7 @@ class LocationResolutionTests(unittest.TestCase):
                     capability=Capability.RESOLVE_LOCATION,
                     target=LocationTarget(path="src/app.ts", line=1, column=code_point),
                 ),
-                _context(root),
+                bare_context(root),
             )
         call = bridge.batch_calls[0]
         self.assertEqual(call.operations, ("definition",))

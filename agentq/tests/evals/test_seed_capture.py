@@ -9,9 +9,7 @@ Python adapter has no location resolver.
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +32,7 @@ from evals.repository import snapshot_accepts, snapshot_mismatch
 from evals.repository_capture import CaptureReport, capture_suite
 from evals.store import CaptureStore
 from tests.evals.support import CASES, FIXTURE_SOURCE, JUDGMENTS
+from tests.support.git_fixture import commit_all
 
 PATH_CASE = "orders-python-understand-path"
 SYMBOL_CASE = "orders-python-edit-symbol"
@@ -42,37 +41,8 @@ AMBIGUOUS_CASE = "orders-python-ambiguous-symbol"
 
 
 def _make_checkout(root: Path) -> Path:
-    if shutil.which("git") is None:
-        pytest.skip("git is required to build the seed checkout")
     shutil.copytree(FIXTURE_SOURCE, root)
-    env = {
-        **os.environ,
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "GIT_AUTHOR_DATE": "2026-09-23T00:00:00+00:00",
-        "GIT_COMMITTER_DATE": "2026-09-23T00:00:00+00:00",
-    }
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=root, check=True, capture_output=True, env=env
-        )
-
-    git("init", "--quiet", ".")
-    git("add", "--", ".")
-    git(
-        "-c",
-        "user.name=Agentq Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "commit",
-        "--quiet",
-        "-m",
-        "Seed orders fixture v1",
-    )
+    commit_all(root, "Seed orders fixture v1")
     return root
 
 

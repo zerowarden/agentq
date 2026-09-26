@@ -8,12 +8,19 @@
     python -m evals smoke
     python -m evals matrix --suite ../.agentq-eval/suites/smoke-v1.lock.json \\
         --selection evals/profiles/selection-challenger.json --freeze
-    python -m evals holdout --suite ../.agentq-eval/suites/contextbench-sample.lock.json
+    python -m evals capture --cases-dir evals/cases/external/source-conformance \\
+        --suite contextbench-source-conformance
+    python -m evals capture --cases-dir evals/cases/external/context-selection \\
+        --suite contextbench-context-selection
+    python -m evals holdout \\
+        --suite ../.agentq-eval/suites/contextbench-context-selection.lock.json
 
 These commands are developer-only: they never run inside the agent-facing CLI,
 never download data, and never call a model. ``smoke`` exits 2 when a
 correctness gate fails. ``matrix`` loads development and validation only;
 ``holdout`` refuses to run unless the frozen manifest still matches the corpus.
+Source-conformance and context-selection suites are captured and reported
+separately: the first is a source-reading gate, the second a scoring corpus.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentq.core import ContractError
-from agentq.inspection.contracts import DecisionDelivered, DecisionFailure
+from agentq.inspection.contracts import DecisionDelivered
 from agentq.inspection.decision import DecisionConfig
 
 from .build_fixtures import (
@@ -63,6 +70,9 @@ from .experiments import (
     write_scoring_profile,
 )
 from .importer import (
+    CONTEXT_SELECTION,
+    SOURCE_CONFORMANCE,
+    SUITE_KINDS,
     assign_splits,
     ensure_checkout,
     import_rows,
@@ -84,8 +94,8 @@ from .matrix import (
     validate_split_groups,
 )
 from .metrics import CaseEvaluation, MetricConfig, summarize
-from .models import AttemptOutcome, CaseSuite
-from .replay import load_config, replay_suite
+from .models import AttemptOutcome, CaseSuite, SuiteLock
+from .replay import load_config, outcome_counts, replay_suite
 from .repository import RepositoryError
 from .repository_capture import (
     capture_suite,
@@ -138,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.add_argument(
         "--judgments-dir",
         type=Path,
-        default=PROJECT / "evals" / "judgments" / "external",
+        default=PROJECT / "evals" / "judgments" / "external" / SOURCE_CONFORMANCE,
         help="directory of one judgment draft per case",
     )
     capture = subparsers.add_parser(
@@ -159,11 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument(
         "--judgments-dir",
         type=Path,
-        default=PROJECT / "evals" / "judgments" / "external",
-        help="directory of one judgment draft per case",
+        default=None,
+        help=(
+            "directory of one judgment draft per case "
+            "(default: evals/judgments/external/<cases dir name>)"
+        ),
     )
     capture.add_argument(
-        "--suite", default="external", help="suite id for a --cases-dir run"
+        "--suite",
+        default=None,
+        help="suite id for a --cases-dir run (default: cases directory name)",
     )
     capture.add_argument(
         "--checkout",
@@ -188,13 +203,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--cases-dir",
         type=Path,
         default=PROJECT / "evals" / "cases" / "external",
-        help="directory for one case record per accepted row",
+        help="root for one case record per accepted row, split by suite",
     )
     imported.add_argument(
-        "--splits",
+        "--splits-dir",
         type=Path,
-        default=PROJECT / "evals" / "splits" / "external.json",
-        help="generated split assignment file",
+        default=PROJECT / "evals" / "splits",
+        help="directory for one generated split assignment file per suite",
     )
     fetch = subparsers.add_parser(
         "fetch-checkouts",
@@ -439,21 +454,39 @@ def _store(args: argparse.Namespace) -> CaptureStore:
     return CaptureStore(root)
 
 
-def _experiment_cases(
+def _suite_inputs(
     args: argparse.Namespace,
-) -> tuple[CaptureStore, tuple[TuningCase, ...], tuple[TuningCase, ...]]:
-    """Judged development and validation cases for the requested suites."""
+) -> tuple[CaptureStore, tuple[SuiteLock, ...], SplitAssignments]:
+    """The store, requested suite locks, and split assignments for one command."""
     store = _store(args)
     splits = (
         load_splits(args.splits) if args.splits is not None else SplitAssignments({})
     )
     locks = tuple(store.read_lock(path) for path in args.suite)
+    return store, locks, splits
+
+
+def _split_cases(
+    store: CaptureStore,
+    locks: tuple[SuiteLock, ...],
+    splits: SplitAssignments,
+) -> tuple[tuple[TuningCase, ...], tuple[TuningCase, ...]]:
+    """Judged development and validation cases for the given locks."""
     development = load_tuning_cases(
         store, tuple(select_split(lock, splits, DEVELOPMENT) for lock in locks)
     )
     validation = load_tuning_cases(
         store, tuple(select_split(lock, splits, VALIDATION) for lock in locks)
     )
+    return development, validation
+
+
+def _experiment_cases(
+    args: argparse.Namespace,
+) -> tuple[CaptureStore, tuple[TuningCase, ...], tuple[TuningCase, ...]]:
+    """Judged development and validation cases for the requested suites."""
+    store, locks, splits = _suite_inputs(args)
+    development, validation = _split_cases(store, locks, splits)
     return store, development, validation
 
 
@@ -482,7 +515,7 @@ def _build_fixtures(args: argparse.Namespace) -> int:
             for case in lock.cases
         ],
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _print_json(summary)
     return 0
 
 
@@ -492,15 +525,12 @@ def _replay(args: argparse.Namespace) -> int:
     lock = store.read_lock(lock_path)
     config = load_config(args.profile) if args.profile is not None else DecisionConfig()
     replayed = replay_suite(store, lock, config, args.run_dir)
+    delivered, failed = outcome_counts(replayed)
     summary = {
         "run_dir": str(args.run_dir),
         "suite_id": lock.suite_id,
-        "delivered": sum(
-            1 for item in replayed if isinstance(item.outcome, DecisionDelivered)
-        ),
-        "failed": sum(
-            1 for item in replayed if isinstance(item.outcome, DecisionFailure)
-        ),
+        "delivered": delivered,
+        "failed": failed,
         "cases": [
             {
                 "case_id": item.case_id,
@@ -515,7 +545,7 @@ def _replay(args: argparse.Namespace) -> int:
             for item in replayed
         ],
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _print_json(summary)
     return 0
 
 
@@ -582,11 +612,21 @@ def _capture(args: argparse.Namespace) -> int:
         if args.case is not None:
             raise ContractError("pass either --case or --cases-dir, not both")
         suite = CaseSuite(
-            suite_id=str(args.suite), cases=load_case_files(args.cases_dir)
+            suite_id=args.suite or args.cases_dir.resolve().name,
+            cases=load_case_files(args.cases_dir),
         )
+        judgments_dir = args.judgments_dir
+        if judgments_dir is None:
+            judgments_dir = (
+                PROJECT
+                / "evals"
+                / "judgments"
+                / "external"
+                / Path(args.cases_dir).name
+            )
         drafts = (
-            load_draft_directory(args.judgments_dir)
-            if args.judgments_dir is not None and args.judgments_dir.is_dir()
+            load_draft_directory(judgments_dir)
+            if judgments_dir.is_dir()
             else {}
         )
         report = capture_suite_cases(
@@ -628,35 +668,52 @@ def _capture(args: argparse.Namespace) -> int:
             for item in report.attempts
         ],
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _print_json(summary)
     return 0 if report.lock.cases else 1
 
 
 def _import_rows(args: argparse.Namespace) -> int:
     rows = load_rows(args.rows)
     report = import_rows(rows)
-    write_cases(report.cases, args.cases_dir)
-    splits_path = (
-        write_splits(report.cases, args.splits) if report.cases else None
-    )
+    accepted = {
+        SOURCE_CONFORMANCE: report.source_conformance,
+        CONTEXT_SELECTION: report.context_selection,
+    }
+    cases_dirs: dict[str, str | None] = {}
+    splits: dict[str, str | None] = {}
+    case_ids: dict[str, list[str]] = {}
+    assignments: dict[str, dict[str, str]] = {}
+    for kind in SUITE_KINDS:
+        cases = accepted[kind]
+        case_ids[kind] = [case.case_id for case in cases]
+        assignments[kind] = (
+            dict(sorted(assign_splits(cases).items())) if cases else {}
+        )
+        if not cases:
+            cases_dirs[kind] = None
+            splits[kind] = None
+            continue
+        write_cases(cases, args.cases_dir / kind)
+        cases_dirs[kind] = str(args.cases_dir / kind)
+        splits[kind] = str(
+            write_splits(cases, args.splits_dir / f"{kind}.json")
+        )
     summary = {
         "rows": len(rows),
-        "accepted": len(report.cases),
+        "accepted": {
+            kind: len(accepted[kind]) for kind in SUITE_KINDS
+        },
         "excluded": len(report.excluded),
-        "cases_dir": str(args.cases_dir),
-        "splits": None if splits_path is None else str(splits_path),
-        "case_ids": [case.case_id for case in report.cases],
-        "split_assignments": (
-            dict(sorted(assign_splits(report.cases).items()))
-            if report.cases
-            else {}
-        ),
+        "cases_dirs": cases_dirs,
+        "splits": splits,
+        "case_ids": case_ids,
+        "split_assignments": assignments,
         "excluded_rows": [
             {"instance_id": item.instance_id, "reason": item.reason}
             for item in report.excluded
         ],
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _print_json(summary)
     return 0
 
 
@@ -679,17 +736,13 @@ def _fetch_checkouts(args: argparse.Namespace) -> int:
             failed += 1
             entry["error"] = str(exc)
         fetched.append(entry)
-    print(
-        json.dumps(
-            {
-                "cases": len(cases),
-                "fetched": len(fetched) - failed,
-                "failed": failed,
-                "checkouts": fetched,
-            },
-            indent=2,
-            sort_keys=True,
-        )
+    _print_json(
+        {
+            "cases": len(cases),
+            "fetched": len(fetched) - failed,
+            "failed": failed,
+            "checkouts": fetched,
+        }
     )
     return 1 if failed else 0
 
@@ -702,7 +755,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         "cases": cases,
         "excluded": excluded,
     }
-    print(json.dumps(report, indent=2, sort_keys=True))
+    _print_json(report)
     return code
 
 
@@ -716,6 +769,7 @@ def _tune_scoring(args: argparse.Namespace) -> int:
     baseline = evaluate_candidate(
         cases,
         Candidate("baseline", "m1-corrected runtime default", base_config.scoring),
+        base=base_config,
     )
     results: list[CandidateResult] = [baseline]
     for candidate in declared_candidates():
@@ -733,6 +787,7 @@ def _tune_scoring(args: argparse.Namespace) -> int:
         validation_baseline = evaluate_candidate(
             validation_cases,
             Candidate("baseline", baseline.rationale, base_config.scoring),
+            base=base_config,
         )
         validation_chosen = evaluate_candidate(
             validation_cases,
@@ -768,7 +823,8 @@ def _tune_scoring(args: argparse.Namespace) -> int:
             item.to_wire() for item in undelivered_facets(cases, base_config)
         ],
         "discrimination": [
-            item.to_wire() for item in discrimination_findings(cases)
+            item.to_wire()
+            for item in discrimination_findings(cases, scoring=base_config.scoring)
         ],
         "delivered_irrelevant": [
             {"case_id": case_id, "variant_id": variant_id}
@@ -790,12 +846,27 @@ def _tune_scoring(args: argparse.Namespace) -> int:
         "baseline_objective": list(baseline.objective()),
         "chosen_objective": list(chosen.objective()),
         "chosen_changed_cases": list(chosen.changed_cases),
+        "chosen_reordered_cases": list(chosen.reordered_cases),
+        "chosen_utility_cases": list(chosen.utility_cases),
+        "chosen_output_cases": list(chosen.output_cases),
+        "chosen_guardrails": {
+            "known_irrelevant_variants_delivered": (
+                chosen.known_irrelevant_variants_delivered
+            ),
+            "known_irrelevant_source_chars_delivered": (
+                chosen.known_irrelevant_source_chars_delivered
+            ),
+            "judged_fraction_of_delivery": chosen.judged_fraction_of_delivery,
+            "unjudged_fraction_of_delivery": chosen.unjudged_fraction_of_delivery,
+            "final_output_tokens": chosen.final_output_tokens,
+            "violations": list(chosen.guardrail_violations()),
+        },
         "undelivered_facets": report["undelivered_facets"],
         "discrimination_findings": len(report["discrimination"]),
         "delivered_irrelevant": report["delivered_irrelevant"],
         "validation": validation_report,
     }
-    print(_json_text(summary))
+    _print_json(summary)
     return VIOLATION_EXIT if not baseline.eligible() else 0
 
 
@@ -843,19 +914,15 @@ def _compare_selectors(args: argparse.Namespace) -> int:
         else store.root / "experiments" / "selector-comparison.json",
         report,
     )
-    print(_json_text({**report, "report": str(report_path)}))
+    _print_json({**report, "report": str(report_path)})
     return VIOLATION_EXIT if not baseline.eligible() else 0
 
 
 def _matrix(args: argparse.Namespace) -> int:
-    store = _store(args)
     if args.freeze and args.splits is None:
         raise ContractError("freezing a matrix requires --splits")
     base = DecisionConfig()
-    splits = (
-        load_splits(args.splits) if args.splits is not None else SplitAssignments({})
-    )
-    locks = tuple(store.read_lock(path) for path in args.suite)
+    store, locks, splits = _suite_inputs(args)
     violations = validate_split_groups(store, locks, splits)
     if violations:
         raise ContractError("; ".join(item.describe() for item in violations))
@@ -870,12 +937,7 @@ def _matrix(args: argparse.Namespace) -> int:
         else None
     )
     cells = matrix_cells(base, tuned, challenger)
-    development = load_tuning_cases(
-        store, tuple(select_split(lock, splits, DEVELOPMENT) for lock in locks)
-    )
-    validation = load_tuning_cases(
-        store, tuple(select_split(lock, splits, VALIDATION) for lock in locks)
-    )
+    development, validation = _split_cases(store, locks, splits)
     if not development:
         raise ContractError("the matrix has no judged development cases")
     report = matrix_report(cells, base, development, validation)
@@ -896,6 +958,7 @@ def _matrix(args: argparse.Namespace) -> int:
             locks,
             args.splits,
             report,
+            baseline=base,
             frozen_profile_path=args.frozen_profile,
             manifest_path=manifest_path,
         )
@@ -921,7 +984,7 @@ def _matrix(args: argparse.Namespace) -> int:
         "failures": report["failures"],
         "frozen": frozen,
     }
-    print(_json_text(summary))
+    _print_json(summary)
     return 0
 
 
@@ -963,9 +1026,10 @@ def _holdout(args: argparse.Namespace) -> int:
             if item["budget"] == PRIMARY_BUDGET
         ],
         "grouped": report["grouped"],
+        "promotion": report["promotion"],
         "undelivered_facets": report["undelivered_facets"],
     }
-    print(_json_text(summary))
+    _print_json(summary)
     return 0
 
 
@@ -984,7 +1048,7 @@ def _smoke(args: argparse.Namespace) -> int:
         "cases": cases,
         "excluded": excluded,
     }
-    print(json.dumps(report, indent=2, sort_keys=True))
+    _print_json(report)
     return code
 
 
@@ -1093,6 +1157,16 @@ def _case_report(evaluation: CaseEvaluation) -> dict[str, object]:
         "render_chars": evaluation.render_chars,
         "fitting_events": evaluation.fitting_events,
         "evaluation_id": evaluation.evaluation_id,
+        "known_irrelevant_variants_delivered": (
+            evaluation.known_irrelevant_variants_delivered
+        ),
+        "known_irrelevant_source_chars_delivered": (
+            evaluation.known_irrelevant_source_chars_delivered
+        ),
+        "judged_fraction_of_delivery": evaluation.judged_fraction_of_delivery,
+        "unjudged_fraction_of_delivery": evaluation.unjudged_fraction_of_delivery,
+        "final_output_tokens": evaluation.final_output_tokens,
+        "final_output_token_reason": evaluation.token_reason,
     }
 
 
@@ -1105,6 +1179,10 @@ def _read_json(path: Path) -> dict[str, object]:
 
 def _json_text(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def _print_json(value: object) -> None:
+    print(_json_text(value), end="")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from agentq.core import ContractError
 from agentq.inspection.budgeting import DeliveryBudget
 from agentq.inspection.contracts import (
     DecisionDelivered,
@@ -28,7 +30,13 @@ from evals.metrics import (
     summarize,
     witness_supported,
 )
-from evals.models import JudgmentFacet, JudgmentSet, JudgmentWitness
+from evals.models import (
+    CaseEvaluation,
+    FacetCoverage,
+    JudgmentFacet,
+    JudgmentSet,
+    JudgmentWitness,
+)
 from evals.replay import case_config, replay_capture
 from evals.store import CaptureStore
 from tests.evals.support import compiled as _compiled
@@ -70,6 +78,20 @@ def _empty_selection(variant_id: str, fixture) -> SelectionPlan:
         reserved=(),
         measured_cost=0,
         budget_chars=0,
+    )
+
+
+def _evaluation_with_facets(*facets: FacetCoverage) -> CaseEvaluation:
+    return CaseEvaluation(
+        case_id="case",
+        capture_id="c" * 64,
+        judgment_id="j" * 64,
+        decision_id="d" * 64,
+        evaluation_id="e" * 64,
+        outcome="delivered",
+        violations=(),
+        unmet_expectations=(),
+        facets=facets,
     )
 
 
@@ -142,6 +164,16 @@ class WitnessRuleTests(unittest.TestCase):
 
 
 class HandCalculatedMetricsTests(unittest.TestCase):
+    def test_evaluation_identity_binds_metric_implementation(self) -> None:
+        fixture, judgment = _compiled("basic-edit")
+        config = DecisionConfig()
+        with patch("evals.metrics.metrics_digest", return_value="a" * 64, create=True):
+            _, first = _evaluate(fixture, judgment, config)
+        with patch("evals.metrics.metrics_digest", return_value="b" * 64, create=True):
+            _, second = _evaluate(fixture, judgment, config)
+        self.assertEqual(first.decision_id, second.decision_id)
+        self.assertNotEqual(first.evaluation_id, second.evaluation_id)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls._temp = TemporaryDirectory()
@@ -363,6 +395,73 @@ class CorrectnessGateTests(unittest.TestCase):
             len(pinned_outcome.initial_selection.selected),
         )
         del ample_outcome
+
+
+class NegativeDeliveryTests(unittest.TestCase):
+    def test_known_negative_and_unjudged_material_are_distinct(self) -> None:
+        fixture, judgment = _compiled("lexical-decoy")
+        _, evaluation = _evaluate(fixture, judgment, DecisionConfig())
+        self.assertGreater(evaluation.known_irrelevant_variants_delivered, 0)
+        self.assertGreater(evaluation.known_irrelevant_source_chars_delivered, 0)
+        self.assertGreater(evaluation.delivered_source_chars, 0)
+        self.assertLessEqual(
+            evaluation.judged_source_chars_delivered,
+            evaluation.delivered_source_chars,
+        )
+        # The case delivers material nobody judged; it is not negative.
+        self.assertGreater(evaluation.unjudged_fraction_of_delivery, 0)
+        self.assertGreater(evaluation.judged_fraction_of_delivery, 0)
+        self.assertIsNotNone(evaluation.final_output_tokens)
+
+    def test_summary_promotes_negative_and_cost_metrics(self) -> None:
+        fixture, judgment = _compiled("lexical-decoy")
+        _, evaluation = _evaluate(fixture, judgment, DecisionConfig())
+        summary = summarize((evaluation,))
+        self.assertEqual(
+            summary["known_irrelevant_variants_delivered"],
+            evaluation.known_irrelevant_variants_delivered,
+        )
+        self.assertEqual(
+            summary["known_irrelevant_source_chars_delivered"],
+            evaluation.known_irrelevant_source_chars_delivered,
+        )
+        self.assertEqual(
+            summary["final_output_tokens"], evaluation.final_output_tokens
+        )
+        self.assertIsNotNone(summary["judged_fraction_of_delivery"])
+        self.assertIsNotNone(summary["unjudged_fraction_of_delivery"])
+
+    def test_noncritical_coverage_counts_pool_supported_facets(self) -> None:
+        evaluation = _evaluation_with_facets(
+            FacetCoverage("critical", True, True, True, True),
+            FacetCoverage("delivered", False, True, True, True),
+            FacetCoverage("undelivered", False, True, True, False),
+            FacetCoverage("unsupported", False, False, False, False),
+        )
+        self.assertEqual(evaluation.noncritical_total, 2)
+        self.assertEqual(evaluation.noncritical_delivered, 1)
+
+    def test_known_irrelevant_chars_cannot_exceed_judged_chars(self) -> None:
+        with self.assertRaises(ContractError):
+            replace(
+                _evaluation_with_facets(),
+                delivered_source_chars=100,
+                judged_source_chars_delivered=10,
+                known_irrelevant_source_chars_delivered=20,
+            )
+
+    def test_a_failed_delivery_has_no_fractions_or_tokens(self) -> None:
+        fixture, judgment = _compiled("basic-edit")
+        config = replace(
+            DecisionConfig(),
+            delivery=DeliveryBudget(max_chars=1, envelope_chars=0),
+        )
+        outcome, evaluation = _evaluate(fixture, judgment, config)
+        self.assertNotIsInstance(outcome, DecisionDelivered)
+        self.assertEqual(evaluation.delivered_source_chars, 0)
+        self.assertIsNone(evaluation.judged_fraction_of_delivery)
+        self.assertIsNone(evaluation.unjudged_fraction_of_delivery)
+        self.assertIsNone(evaluation.final_output_tokens)
 
 
 if __name__ == "__main__":

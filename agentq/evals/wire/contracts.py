@@ -59,7 +59,7 @@ from agentq.inspection.contracts.evidence import ObservationPayload
 from .json import (
     as_list,
     as_mapping,
-    exact_keys,
+    object_fields,
     optional_int,
     optional_str,
     read_bool,
@@ -80,15 +80,9 @@ PAYLOAD_KINDS = {
 }
 
 
-
-
-
 def _span_from_wire(value: object, what: str) -> SourceSpan:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {"start_line", "start_column", "end_line", "end_column"},
-        what,
+    mapping = object_fields(
+        value, what, {"start_line", "start_column", "end_line", "end_column"}
     )
     return SourceSpan(
         start_line=read_int(mapping["start_line"], f"{what}.start_line", minimum=1),
@@ -102,13 +96,8 @@ def _span_from_wire(value: object, what: str) -> SourceSpan:
     )
 
 
-def _source_wire(source: SourceRef) -> dict[str, object]:
-    return source.to_wire()
-
-
 def _source_from_wire(value: object, what: str) -> SourceRef:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"path", "start_line", "end_line", "symbol"}, what)
+    mapping = object_fields(value, what, {"path", "start_line", "end_line", "symbol"})
     return SourceRef(
         path=optional_str(mapping["path"], f"{what}.path"),
         start_line=optional_int(
@@ -119,13 +108,8 @@ def _source_from_wire(value: object, what: str) -> SourceRef:
     )
 
 
-def _version_wire(version: SourceVersion) -> dict[str, object]:
-    return version.to_wire()
-
-
 def _version_from_wire(value: object, what: str) -> SourceVersion:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"path", "version", "method"}, what)
+    mapping = object_fields(value, what, {"path", "version", "method"})
     return SourceVersion(
         path=read_str(mapping["path"], f"{what}.path", allow_empty=True),
         version=read_str(mapping["version"], f"{what}.version", allow_empty=True),
@@ -148,10 +132,7 @@ def _coverage_wire(coverage: Coverage) -> dict[str, object]:
 
 
 def _coverage_from_wire(value: object, what: str) -> Coverage:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "status",
             "reasons",
             "domain",
@@ -161,9 +142,7 @@ def _coverage_from_wire(value: object, what: str) -> Coverage:
             "matched",
             "retained",
             "omitted",
-        },
-        what,
-    )
+        })
     return Coverage(
         status=read_str(mapping["status"], f"{what}.status"),
         reasons=read_strings(mapping["reasons"], f"{what}.reasons"),
@@ -177,13 +156,8 @@ def _coverage_from_wire(value: object, what: str) -> Coverage:
     )
 
 
-def _diagnostic_wire(diagnostic: Diagnostic) -> dict[str, object]:
-    return diagnostic.to_wire()
-
-
 def _diagnostic_from_wire(value: object, what: str) -> Diagnostic:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"message", "code", "path", "severity"}, what)
+    mapping = object_fields(value, what, {"message", "code", "path", "severity"})
     return Diagnostic(
         message=read_str(mapping["message"], f"{what}.message", allow_empty=True),
         code=read_str(mapping["code"], f"{what}.code"),
@@ -193,7 +167,7 @@ def _diagnostic_from_wire(value: object, what: str) -> Diagnostic:
 
 
 def _diagnostics_wire(items: tuple[Diagnostic, ...]) -> list[object]:
-    return [_diagnostic_wire(item) for item in items]
+    return [item.to_wire() for item in items]
 
 
 def _diagnostics_from_wire(value: object, what: str) -> tuple[Diagnostic, ...]:
@@ -222,13 +196,13 @@ def _target_from_wire(value: object, what: str) -> InspectionTarget:
     kind = read_enum(TargetKind, mapping.get("kind"), f"{what}.kind")
     match kind:
         case TargetKind.SYMBOL:
-            exact_keys(mapping, {"kind", "name", "scopes"}, what)
+            object_fields(mapping, what, {"kind", "name", "scopes"})
             return SymbolTarget(
                 name=read_str(mapping["name"], f"{what}.name"),
                 scopes=read_strings(mapping["scopes"], f"{what}.scopes"),
             )
         case TargetKind.PATH:
-            exact_keys(mapping, {"kind", "path", "path_kind"}, what)
+            object_fields(mapping, what, {"kind", "path", "path_kind"})
             return PathTarget(
                 path=read_str(mapping["path"], f"{what}.path"),
                 path_kind=read_enum(
@@ -236,14 +210,14 @@ def _target_from_wire(value: object, what: str) -> InspectionTarget:
                 ),
             )
         case TargetKind.LOCATION:
-            exact_keys(mapping, {"kind", "path", "line", "column"}, what)
+            object_fields(mapping, what, {"kind", "path", "line", "column"})
             return LocationTarget(
                 path=read_str(mapping["path"], f"{what}.path"),
                 line=read_int(mapping["line"], f"{what}.line", minimum=1),
                 column=read_int(mapping["column"], f"{what}.column", minimum=1),
             )
         case TargetKind.RANGE:
-            exact_keys(mapping, {"kind", "path", "ranges"}, what)
+            object_fields(mapping, what, {"kind", "path", "ranges"})
             return RangeTarget(
                 path=read_str(mapping["path"], f"{what}.path"),
                 ranges=tuple(
@@ -252,7 +226,7 @@ def _target_from_wire(value: object, what: str) -> InspectionTarget:
                 ),
             )
         case _:
-            exact_keys(mapping, {"kind", "candidate_id", "symbol", "scopes"}, what)
+            object_fields(mapping, what, {"kind", "candidate_id", "symbol", "scopes"})
             return CandidateTarget(
                 candidate_id=read_str(
                     mapping["candidate_id"], f"{what}.candidate_id"
@@ -262,15 +236,8 @@ def _target_from_wire(value: object, what: str) -> InspectionTarget:
             )
 
 
-def _candidate_wire(candidate: DeclarationCandidate) -> dict[str, object]:
-    return candidate.to_wire()
-
-
 def _candidate_from_wire(value: object, what: str) -> DeclarationCandidate:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "candidate_id",
             "provider",
             "path",
@@ -281,9 +248,7 @@ def _candidate_from_wire(value: object, what: str) -> DeclarationCandidate:
             "scope",
             "external",
             "declaration_span",
-        },
-        what,
-    )
+        })
     declaration_span = mapping["declaration_span"]
     return DeclarationCandidate(
         candidate_id=read_str(mapping["candidate_id"], f"{what}.candidate_id"),
@@ -307,13 +272,10 @@ def _candidate_from_wire(value: object, what: str) -> DeclarationCandidate:
     )
 
 
-def _request_wire(request: InspectionRequest) -> dict[str, object]:
-    return request.to_wire()
-
-
 def _request_from_wire(value: object, what: str) -> InspectionRequest:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"target", "intent", "evidence_scopes", "request_id"}, what)
+    mapping = object_fields(
+        value, what, {"target", "intent", "evidence_scopes", "request_id"}
+    )
     return InspectionRequest(
         target=_target_from_wire(mapping["target"], f"{what}.target"),
         intent=read_enum(Intent, mapping["intent"], f"{what}.intent"),
@@ -337,8 +299,9 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
     mapping = as_mapping(value, what)
     kind = read_str(mapping.get("payload_kind"), f"{what}.payload_kind")
     if kind == "declaration":
-        exact_keys(
+        object_fields(
             mapping,
+            what,
             {
                 "payload_kind",
                 "name",
@@ -348,7 +311,6 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
                 "scope",
                 "declaration_span",
             },
-            what,
         )
         declaration_span = mapping["declaration_span"]
         return DeclarationPayload(
@@ -366,8 +328,9 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
             ),
         )
     if kind == "reference":
-        exact_keys(
+        object_fields(
             mapping,
+            what,
             {
                 "payload_kind",
                 "relationship",
@@ -376,7 +339,6 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
                 "domain",
                 "configuration",
             },
-            what,
         )
         return ReferencePayload(
             relationship=read_str(mapping["relationship"], f"{what}.relationship"),
@@ -388,14 +350,14 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
             ),
         )
     if kind == "source_window":
-        exact_keys(mapping, {"payload_kind", "text", "span", "truncated"}, what)
+        object_fields(mapping, what, {"payload_kind", "text", "span", "truncated"})
         return SourceWindowPayload(
             text=read_str(mapping["text"], f"{what}.text", allow_empty=True),
             span=_span_from_wire(mapping["span"], f"{what}.span"),
             truncated=read_bool(mapping["truncated"], f"{what}.truncated"),
         )
     if kind == "outline":
-        exact_keys(mapping, {"payload_kind", "symbols", "truncated"}, what)
+        object_fields(mapping, what, {"payload_kind", "symbols", "truncated"})
         return OutlinePayload(
             symbols=tuple(
                 _outline_symbol_from_wire(item, f"{what}.symbols[{index}]")
@@ -404,10 +366,8 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
             truncated=read_bool(mapping["truncated"], f"{what}.truncated"),
         )
     if kind == "package":
-        exact_keys(
-            mapping,
-            {"payload_kind", "path", "kind", "name", "scripts"},
-            what,
+        object_fields(
+            mapping, what, {"payload_kind", "path", "kind", "name", "scripts"}
         )
         return PackagePayload(
             path=read_str(mapping["path"], f"{what}.path", allow_empty=True),
@@ -416,7 +376,7 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
             scripts=read_strings(mapping["scripts"], f"{what}.scripts"),
         )
     if kind == "mention":
-        exact_keys(mapping, {"payload_kind", "text", "domain"}, what)
+        object_fields(mapping, what, {"payload_kind", "text", "domain"})
         return MentionPayload(
             text=read_str(mapping["text"], f"{what}.text", allow_empty=True),
             domain=optional_str(mapping["domain"], f"{what}.domain"),
@@ -425,8 +385,7 @@ def _payload_from_wire(value: object, what: str) -> ObservationPayload:
 
 
 def _outline_symbol_from_wire(value: object, what: str) -> OutlineSymbolRef:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"name", "kind", "span"}, what)
+    mapping = object_fields(value, what, {"name", "kind", "span"})
     return OutlineSymbolRef(
         name=read_str(mapping["name"], f"{what}.name", allow_empty=True),
         kind=read_str(mapping["kind"], f"{what}.kind"),
@@ -439,28 +398,23 @@ def _observation_wire(observation: Observation) -> dict[str, object]:
         "observation_id": observation.observation_id,
         "kind": observation.kind.value,
         "payload": _payload_wire(observation.payload),
-        "source": _source_wire(observation.source),
+        "source": observation.source.to_wire(),
         "source_versions": [
-            _version_wire(version) for version in observation.source_versions
+            version.to_wire() for version in observation.source_versions
         ],
         "acquisition_id": observation.acquisition_id,
     }
 
 
 def _observation_from_wire(value: object, what: str) -> Observation:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "observation_id",
             "kind",
             "payload",
             "source",
             "source_versions",
             "acquisition_id",
-        },
-        what,
-    )
+        })
     return Observation(
         observation_id=read_str(
             mapping["observation_id"], f"{what}.observation_id"
@@ -480,15 +434,8 @@ def _observation_from_wire(value: object, what: str) -> Observation:
     )
 
 
-def _variant_wire(variant: EvidenceVariant) -> dict[str, object]:
-    return variant.to_wire()
-
-
 def _variant_from_wire(value: object, what: str) -> EvidenceVariant:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "variant_id",
             "observation_id",
             "representation",
@@ -496,9 +443,7 @@ def _variant_from_wire(value: object, what: str) -> EvidenceVariant:
             "source",
             "span",
             "text",
-        },
-        what,
-    )
+        })
     span = mapping["span"]
     return EvidenceVariant(
         variant_id=read_str(mapping["variant_id"], f"{what}.variant_id"),
@@ -531,10 +476,7 @@ def _acquisition_wire(record: AcquisitionRecord) -> dict[str, object]:
 
 
 def _acquisition_from_wire(value: object, what: str) -> AcquisitionRecord:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "acquisition_id",
             "capability",
             "provider",
@@ -545,9 +487,7 @@ def _acquisition_from_wire(value: object, what: str) -> AcquisitionRecord:
             "coverage",
             "diagnostics",
             "observed_inputs",
-        },
-        what,
-    )
+        })
     return AcquisitionRecord(
         acquisition_id=read_str(
             mapping["acquisition_id"], f"{what}.acquisition_id"
@@ -578,13 +518,12 @@ def _acquired_wire(acquired: AcquiredEvidence) -> dict[str, object]:
         "observations": [
             _observation_wire(item) for item in acquired.observations
         ],
-        "variants": [_variant_wire(item) for item in acquired.variants],
+        "variants": [item.to_wire() for item in acquired.variants],
     }
 
 
 def _acquired_from_wire(value: object, what: str) -> AcquiredEvidence:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"record", "observations", "variants"}, what)
+    mapping = object_fields(value, what, {"record", "observations", "variants"})
     return AcquiredEvidence(
         record=_acquisition_from_wire(mapping["record"], f"{what}.record"),
         observations=tuple(
@@ -603,7 +542,7 @@ def _pool_wire(pool: EvidencePool) -> dict[str, object]:
         "request_id": pool.request_id,
         "acquisitions": [_acquisition_wire(item) for item in pool.acquisitions],
         "observations": [_observation_wire(item) for item in pool.observations],
-        "variants": [_variant_wire(item) for item in pool.variants],
+        "variants": [item.to_wire() for item in pool.variants],
         "limitations": _diagnostics_wire(pool.limitations),
         "unstable_observation_ids": list(pool.unstable_observation_ids),
         "coverage": _coverage_wire(pool.coverage),
@@ -611,10 +550,7 @@ def _pool_wire(pool: EvidencePool) -> dict[str, object]:
 
 
 def _pool_from_wire(value: object, what: str) -> EvidencePool:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "request_id",
             "acquisitions",
             "observations",
@@ -622,9 +558,7 @@ def _pool_from_wire(value: object, what: str) -> EvidencePool:
             "limitations",
             "unstable_observation_ids",
             "coverage",
-        },
-        what,
-    )
+        })
     acquisitions = tuple(
         _acquisition_from_wire(item, f"{what}.acquisitions[{index}]")
         for index, item in enumerate(as_list(mapping["acquisitions"], what))
@@ -687,10 +621,7 @@ def _pool_from_wire(value: object, what: str) -> EvidencePool:
 
 
 def _requirement_from_wire(value: object, what: str) -> EvidenceRequirement:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "requirement_id",
             "role",
             "rule",
@@ -700,9 +631,7 @@ def _requirement_from_wire(value: object, what: str) -> EvidenceRequirement:
             "acceptable_kinds",
             "representations",
             "domain",
-        },
-        what,
-    )
+        })
     return EvidenceRequirement(
         requirement_id=read_str(
             mapping["requirement_id"], f"{what}.requirement_id"
@@ -735,16 +664,9 @@ def _requirement_from_wire(value: object, what: str) -> EvidenceRequirement:
     )
 
 
-def _policy_wire(policy: EvidencePolicy) -> dict[str, object]:
-    return policy.to_wire()
-
-
 def _policy_from_wire(value: object, what: str) -> EvidencePolicy:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {"profile", "intent", "target_kind", "requirements", "limitations"},
-        what,
+    mapping = object_fields(
+        value, what, {"profile", "intent", "target_kind", "requirements", "limitations"}
     )
     return EvidencePolicy(
         profile=read_str(mapping["profile"], f"{what}.profile"),
@@ -771,7 +693,7 @@ def _collection_wire(plan: CollectionPlan) -> dict[str, object]:
                 "requirement_id": item.requirement_id,
                 "target": None if item.target is None else _target_wire(item.target),
                 "subject": (
-                    None if item.subject is None else _candidate_wire(item.subject)
+                    None if item.subject is None else item.subject.to_wire()
                 ),
                 "scope": list(item.scope),
                 "domain": item.domain,
@@ -793,16 +715,12 @@ def _collection_wire(plan: CollectionPlan) -> dict[str, object]:
 
 
 def _collection_from_wire(value: object, what: str) -> CollectionPlan:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping, {"profile", "request_id", "target", "requests", "omissions"}, what
+    mapping = object_fields(
+        value, what, {"profile", "request_id", "target", "requests", "omissions"}
     )
     requests: list[CollectionRequest] = []
     for index, item in enumerate(as_list(mapping["requests"], what)):
-        request = as_mapping(item, f"{what}.requests[{index}]")
-        exact_keys(
-            request,
-            {
+        request = object_fields(item, f"{what}.requests[{index}]", {
                 "request_id",
                 "capability",
                 "role",
@@ -813,9 +731,7 @@ def _collection_from_wire(value: object, what: str) -> CollectionPlan:
                 "domain",
                 "limit",
                 "detail",
-            },
-            f"{what}.requests[{index}]",
-        )
+            })
         target = request["target"]
         subject = request["subject"]
         requests.append(
@@ -867,11 +783,10 @@ def _collection_from_wire(value: object, what: str) -> CollectionPlan:
         )
     omissions: list[RequirementOmission] = []
     for index, item in enumerate(as_list(mapping["omissions"], what)):
-        omission = as_mapping(item, f"{what}.omissions[{index}]")
-        exact_keys(
-            omission,
-            {"requirement_id", "capability", "status", "reason"},
+        omission = object_fields(
+            item,
             f"{what}.omissions[{index}]",
+            {"requirement_id", "capability", "status", "reason"},
         )
         omissions.append(
             RequirementOmission(
@@ -913,7 +828,7 @@ def _resolution_wire(resolution: ResolvedTarget) -> dict[str, object]:
         "declaration": (
             None
             if resolution.declaration is None
-            else _candidate_wire(resolution.declaration)
+            else resolution.declaration.to_wire()
         ),
         "candidate_coverage": _coverage_wire(resolution.candidate_coverage),
         "candidate_evidence": [
@@ -923,19 +838,14 @@ def _resolution_wire(resolution: ResolvedTarget) -> dict[str, object]:
 
 
 def _resolution_from_wire(value: object, what: str) -> ResolvedTarget:
-    mapping = as_mapping(value, what)
-    exact_keys(
-        mapping,
-        {
+    mapping = object_fields(value, what, {
             "outcome",
             "method",
             "target",
             "declaration",
             "candidate_coverage",
             "candidate_evidence",
-        },
-        what,
-    )
+        })
     outcome = read_str(mapping["outcome"], f"{what}.outcome")
     if outcome != "resolved":
         raise ContractError(
@@ -964,17 +874,18 @@ def _resolution_from_wire(value: object, what: str) -> ResolvedTarget:
 
 def _decision_input_wire(decision: DecisionInput) -> dict[str, object]:
     return {
-        "request": _request_wire(decision.request),
+        "request": decision.request.to_wire(),
         "resolution": _resolution_wire(decision.resolution),
-        "policy": _policy_wire(decision.policy),
+        "policy": decision.policy.to_wire(),
         "collection": _collection_wire(decision.collection),
         "pool": _pool_wire(decision.pool),
     }
 
 
 def _decision_input_from_wire(value: object, what: str) -> DecisionInput:
-    mapping = as_mapping(value, what)
-    exact_keys(mapping, {"request", "resolution", "policy", "collection", "pool"}, what)
+    mapping = object_fields(
+        value, what, {"request", "resolution", "policy", "collection", "pool"}
+    )
     return DecisionInput(
         request=_request_from_wire(mapping["request"], f"{what}.request"),
         resolution=_resolution_from_wire(

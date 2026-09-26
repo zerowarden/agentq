@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 
+from evals import __main__ as evals_cli
 from evals.build_fixtures import build_fixture
+from evals.experiments import TuningCase
 from evals.fixtures.synthetic.builders import FixtureBuild
 from evals.judgments import compile_judgments, load_draft
 from evals.models import JudgmentSet
@@ -27,3 +31,17 @@ def compiled(case_id: str) -> tuple[FixtureBuild, JudgmentSet]:
         fixture.capture,
     )
     return fixture, judgment
+
+
+def tuning_case(case_id: str) -> TuningCase:
+    """One compiled fixture as a tuning case with its pinned budget."""
+    fixture, judgment = compiled(case_id)
+    return TuningCase(case_id, fixture.capture, judgment, fixture.budget)
+
+
+def run_cli(*args: str) -> tuple[int, str]:
+    """Run one developer CLI command and capture its stdout."""
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        code = evals_cli.main(list(args))
+    return code, stdout.getvalue()
